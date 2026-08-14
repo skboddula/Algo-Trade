@@ -53,9 +53,9 @@ For detailed client setup and migration steps, refer to [app/client/README.md](a
 
 ---
 
-### V1 - V4 Console Application Setup (Legacy CLI)
+### Fastify Backend Daemon & Master Ingestor Setup (`app/core`)
 
-If you wish to run the legacy CLI/console versions (V1–V4):
+To run the headless backend daemon (with 1-API master market ingestion and multi-tenant execution on a GCP Always Free VM / AWS Lightsail with Static IP):
 
 1. Navigate to the core directory:
    ```bash
@@ -63,22 +63,21 @@ If you wish to run the legacy CLI/console versions (V1–V4):
    ```
 2. Install dependencies:
    ```bash
-   yarn install # or npm install
+   yarn install
    ```
-3. Create a `.env` file and configure your broker credentials. Use `.env.sample` as a template.
-4. Compile the TypeScript code:
+3. Configure environment:
    ```bash
-   tsc
+   cp .env.sample .env
    ```
-5. Start the console job:
+4. Run in development or start the 24/7 daemon:
    ```bash
-   yarn start # or npm run start
+   yarn dev     # Development mode with live reload
+   yarn test    # Run full automated Vitest test suite
+   yarn build   # Build TypeScript for production
+   yarn start   # Start Fastify server
    ```
 
-#### Console Logs Preview:
-![App Starting Log](assets/images/app-start.png)
-
-![Trade Notification Log](assets/images/telegram-notify.jpg)
+For detailed backend architecture, endpoints, and GCP Free VM deployment instructions, see [app/core/README.md](app/core/README.md).
 
 ---
 

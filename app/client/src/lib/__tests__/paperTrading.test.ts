@@ -313,7 +313,7 @@ describe('paper history reconciliation contract', () => {
             '2026-07-29T04:00:00.000Z',
             JSON.stringify({
               underlyingSymbol: 'NIFTY 50',
-              expiry: '2026-08-04',
+              expiry: '2099-12-31',
             }),
           ),
         ...closedTrades,
@@ -391,7 +391,7 @@ describe('paper entry persistence', () => {
             metadata: {
               underlyingSymbol: 'NIFTY 50',
               tradingSymbol: 'NIFTY26AUG24100CE',
-              expiry: '2026-08-04',
+              expiry: '2099-12-31',
               tradeType: 'buying',
             },
           }),

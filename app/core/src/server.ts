@@ -1,58 +1,137 @@
-import dayjs from 'dayjs';
-import utc from 'dayjs/plugin/utc';
-import timezone from 'dayjs/plugin/timezone';
-import express, { Request, Response } from 'express';
-import bodyParser from 'body-parser';
-import { core, exitTrade, resetTrades, scheduleCron, setToken } from '.';
-import { log } from './utils/log';
-import { appConfig } from './config/app';
-import { login } from './brokers/finvasia/apis/login';
+import fastify from 'fastify'
+import cors from '@fastify/cors'
+import websocket from '@fastify/websocket'
+import rateLimit from '@fastify/rate-limit'
+import dotenv from 'dotenv'
+import { MasterIngestionEngine } from './services/masterIngestor'
+import { OrderGateway } from './services/orderGateway'
+import { TenantManager } from './services/tenantManager'
+import { botRoutes } from './routes/botRoutes'
 
-dayjs.extend(utc);
-dayjs.extend(timezone);
-dayjs.tz.setDefault("Asia/Kolkata");
+dotenv.config()
 
-const app = express();
-const port = 3000;
+export function buildServer(opts?: { mockMode?: boolean; primaryToken?: string }) {
+  const app = fastify({
+    logger: {
+      level: process.env.LOG_LEVEL || 'info',
+      transport:
+        process.env.NODE_ENV !== 'production'
+          ? {
+              target: 'pino-pretty',
+              options: {
+                translateTime: 'HH:MM:ss Z',
+                ignore: 'pid,hostname',
+              },
+            }
+          : undefined,
+    },
+  })
 
-app.use(bodyParser.json());
+  // Register Plugins
+  app.register(cors, {
+    origin: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  })
 
-app.post('/', (req: Request, res: Response) => {
-    core(req.body);
-    res.send('OK')
-});
+  app.register(rateLimit, {
+    max: 200,
+    timeWindow: '1 minute',
+  })
 
-app.post('/app/token/generate', async (req: Request, res: Response) => {
-    const apiResponse = await login(req.body.authCode);
-    log.info(`Received token ${apiResponse?.susertoken}`);
-    setToken(apiResponse?.susertoken);
-    res.send('OK');
-});
+  app.register(websocket)
 
-app.post('/app/set-token', (req: Request, res: Response) => {
-    setToken(req.body.token);
-    log.info(`Token set!`);
-    res.send('OK');
-});
+  // Initialize Core Services
+  const masterIngestor = new MasterIngestionEngine({
+    pollingIntervalMs: parseInt(process.env.POLLING_INTERVAL_MS || '2000', 10),
+    primaryUpstoxToken: opts?.primaryToken || process.env.PRIMARY_UPSTOX_TOKEN,
+    mockMode: opts?.mockMode ?? (process.env.NODE_ENV === 'test' || !process.env.PRIMARY_UPSTOX_TOKEN),
+  })
 
-app.get('/app/get-token', (req: Request, res: Response) => {
-    res.send(appConfig.token);
-});
+  masterIngestor.on('error', (err) => {
+    app.log.error(err, 'Master Ingestion Engine error')
+  })
 
-app.get('/trade/reset', async (req: Request, res: Response) => {
-    await resetTrades()
-    log.info(`Day's trade data reset successful`);
-    res.send('OK');
-});
+  const orderGateway = new OrderGateway(process.env.UPSTOX_API_URL || 'https://api.upstox.com/v2')
+  const tenantManager = new TenantManager(masterIngestor, orderGateway)
 
-app.get('/trade/exit', async (req: Request, res: Response) => {
-    await exitTrade()
-    res.send('OK - order exited');
-});
+  tenantManager.on('error', (err) => {
+    app.log.error(err, 'Tenant Manager tick processing error')
+  })
 
-app.listen(port, () => {
-    log.info(`Algo Trade app listening on port ${port}`);
-    scheduleCron('35 30-59/1 9 * * 1-5');
-    scheduleCron('35 * 10-14 * * 1-5');
-    log.info('Cron Started!');
-});
+  // Register Bot Routes
+  app.register(botRoutes, {
+    masterIngestor,
+    tenantManager,
+    orderGateway,
+  })
+
+  // Health check route
+  app.get('/health', async () => {
+    return { status: 'healthy', timestamp: new Date().toISOString(), memoryUsage: process.memoryUsage() }
+  })
+
+  // Graceful shutdown hooks
+  app.addHook('onClose', async () => {
+    masterIngestor.stop()
+  })
+
+  return { app, masterIngestor, tenantManager, orderGateway }
+}
+
+export const REQUIRED_ENV_VARS = ['PRIMARY_UPSTOX_TOKEN'] as const
+
+export function validateEnvironment(env: Record<string, string | undefined> = process.env): {
+  valid: boolean
+  missing: string[]
+} {
+  const isMock = env.MOCK_MODE === 'true' || env.NODE_ENV === 'test'
+  if (isMock) {
+    return { valid: true, missing: [] }
+  }
+
+  const missing = REQUIRED_ENV_VARS.filter((key) => !env[key] || env[key]?.trim() === '')
+  return {
+    valid: missing.length === 0,
+    missing: [...missing],
+  }
+}
+
+// Start server if run directly
+if (require.main === module) {
+  const PORT = parseInt(process.env.PORT || '3000', 10)
+  const HOST = process.env.HOST || '0.0.0.0'
+
+  // ── Required env validation ──────────────────────────────────────────────
+  const { valid, missing } = validateEnvironment()
+
+  if (!valid) {
+    console.error(`\n❌ Fatal: Core service cannot start because required environment variable(s) are missing:\n`)
+    for (const key of missing) {
+      console.error(`   • ${key}`)
+    }
+    console.error(`\n   Please configure them in your .env file or environment before starting.\n`)
+    process.exit(1)
+  }
+
+  const { app, masterIngestor } = buildServer()
+
+  app.listen({ port: PORT, host: HOST }, (err, address) => {
+    if (err) {
+      app.log.error(err)
+      process.exit(1)
+    }
+    app.log.info(`⚡ Algo-Trade Fastify Daemon listening at ${address}`)
+    masterIngestor.start()
+    app.log.info(`📡 Master Ingestion Engine started (Single 1-API fetch loop active)`)
+  })
+
+  // Process termination signals
+  const shutdown = async () => {
+    app.log.info('Shutting down gracefully...')
+    await app.close()
+    process.exit(0)
+  }
+
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+}
