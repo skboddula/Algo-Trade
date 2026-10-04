@@ -33,6 +33,7 @@ import {
   handleUpstoxSmartlistFutures,
 } from './upstoxProxy'
 import { handleGlobalIndices } from './globalIndices'
+import { handleTelegramNotify } from './telegram'
 
 const MAX_BODY_BYTES = 1024 * 50
 const RATE_LIMIT_WINDOW_SECONDS = 60
@@ -284,6 +285,8 @@ export default {
       return captureResponse(await handlePaperTradeExit(request, env, userId))
     if (url.pathname === '/api/paper/reset' && request.method === 'POST')
       return captureResponse(await handlePaperReset(env, userId))
+    if (url.pathname === '/api/notify/telegram' && request.method === 'POST')
+      return captureResponse(await handleTelegramNotify(request, env, userId))
 
     return jsonError(404, 'Unknown API route')
   },

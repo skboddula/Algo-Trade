@@ -20,3 +20,12 @@ UPSTOX_REDIRECT_URI=http://localhost:5173/broker/callback
 # when either value is missing.
 AUTH0_DOMAIN=algo-trade.us.auth0.com
 AUTH0_AUDIENCE=https://algo-trade.us.auth0.com/api/v2/
+
+# ─── Telegram Trade Alerts (Optional) ───────────────────────────
+# Create a bot via @BotFather on Telegram, send it any message, then read
+# your chat id from https://api.telegram.org/bot<TOKEN>/getUpdates
+# For production, set these via:
+#   wrangler secret put TELEGRAM_BOT_TOKEN
+#   wrangler secret put TELEGRAM_CHAT_ID
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=

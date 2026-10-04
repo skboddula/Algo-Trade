@@ -47,6 +47,7 @@ export const API_MARKET_OPTION_CONTRACTS = '/api/market/option-contracts'
 export const API_MARKET_GLOBAL_INDICES = '/api/market/upstox/global-indices'
 export const API_MARKET_OPTION_CHAIN = '/api/market/option-chain'
 export const API_MARKET_QUOTES = '/api/market/quotes'
+export const API_NOTIFY_TELEGRAM = '/api/notify/telegram'
 export const API_MARKET_INDICES = '/api/market/indices'
 
 export const MCP_UPSTOX_URL = 'https://mcp.upstox.com/mcp'

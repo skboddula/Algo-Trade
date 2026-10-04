@@ -22,6 +22,7 @@ import {
   type fetchMarket,
 } from '@/lib/marketService'
 import { getOtmStrike } from '@/lib/indicators'
+import { buildEntryAlertMessage, sendTelegramAlert } from '@/lib/telegram'
 import { notify } from '@/lib/notifications'
 import {
   isStaticIpRestrictionError,
@@ -321,6 +322,8 @@ export function useTradeExecution() {
         let firstDirection: 'CE' | 'PE' = 'CE'
         let firstEntryPrice = 0
         let firstEntryTime = new Date().toISOString()
+        let firstStrikePrice: number | undefined
+        let firstExpiry: string | undefined
 
         for (const leg of legsToPlace) {
           if (abortSignal?.aborted) {
@@ -355,6 +358,8 @@ export function useTradeExecution() {
             firstInstrumentKey = instrumentKey
             firstDirection = leg.direction
             firstEntryPrice = ltp
+            firstStrikePrice = strike.strike_price
+            firstExpiry = strike.expiry
           }
 
           const side = leg.tradeType === 'selling' ? 'SELL' : 'BUY'
@@ -548,6 +553,32 @@ export function useTradeExecution() {
           }
           curTradesPerSym[sym] = (curTradesPerSym[sym] ?? 0) + 1
           newlyEnteredPositions.add(sym)
+          void (async () => {
+            const sent = await sendTelegramAlert(
+              buildEntryAlertMessage({
+                symbol: sym,
+                signal: symSig.signal,
+                confidence: symSig.confidence,
+                executionMode,
+                strikePrice: firstStrikePrice,
+                expiry: firstExpiry,
+                legs: positionLegs.map((leg) => ({
+                  direction: leg.direction,
+                  entryPrice: leg.entryPrice,
+                  quantity: leg.quantity,
+                  lotSize: leg.lotSize ?? lotSize,
+                  tradeType: leg.tradeType ?? resolvedTradeType,
+                })),
+                maxProfitPct: config.maxProfitPct,
+                maxLossPct: config.maxLossPct,
+              }),
+            )
+            if (!sent) {
+              addLog(mkLog('warn', 'order', `[${sym}] Telegram alert not sent`))
+            }
+          })().catch(() => {
+            addLog(mkLog('warn', 'order', `[${sym}] Telegram alert failed`))
+          })
         } else if (positionLegs.length > 0) {
           if (executionMode === 'paper') {
             for (const leg of positionLegs) {
