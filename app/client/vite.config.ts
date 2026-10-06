@@ -9,6 +9,13 @@ export default defineConfig(({ mode }) => {
   const isTest = process.env.VITEST === 'true' || mode === 'test'
   return {
     plugins: [tailwindcss(), react(), ...(!isTest ? [cloudflare()] : [])],
+    server: {
+      // Allow access via Tailscale MagicDNS hostname (tailnet HTTPS proxy)
+      allowedHosts: ['.ts.net'],
+      // Bind to all interfaces so Tailscale MagicDNS can reach the dev server
+      host: false,
+      port: 5173,
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
