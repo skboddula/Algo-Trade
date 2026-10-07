@@ -56,6 +56,12 @@ export interface ExecutionContext {
   curPositions: Record<UnderlyingSymbol, ActivePosition | null>
   curTradesPerSym: Partial<Record<UnderlyingSymbol, number>>
   lastExitTimes: Record<string, number>
+  /**
+   * Tick-level LTP from the Upstox Market Data Feed V3 stream, when enabled
+   * and connected. Returns null when no streamed price is available so the
+   * caller falls back to REST option-chain prices.
+   */
+  getStreamedPrice?: (instrumentKey: string) => number | null
   addLog: (log: BotLog) => void
   onStaticIpError: () => void
   abortSignal?: AbortSignal
@@ -683,6 +689,7 @@ export function useTradeExecution() {
         afterCutoff,
         curPositions,
         lastExitTimes,
+        getStreamedPrice,
         addLog,
         abortSignal,
       } = ctx
@@ -697,7 +704,10 @@ export function useTradeExecution() {
         const optionPrices = indexOptionPrices(symOptionChain)
         const posKey = pos.instrumentKey
         const currentPrice =
-          optionPrices.get(posKey) ?? pos.currentPrice ?? pos.entryPrice
+          getStreamedPrice?.(posKey) ??
+          optionPrices.get(posKey) ??
+          pos.currentPrice ??
+          pos.entryPrice
 
         let updatedLegs: PositionLeg[] | undefined
         let totalUnrealizedPnl = 0
@@ -709,7 +719,9 @@ export function useTradeExecution() {
 
             if (!isExited) {
               legCurrentPrice =
-                optionPrices.get(leg.instrumentKey) ?? legCurrentPrice
+                getStreamedPrice?.(leg.instrumentKey) ??
+                optionPrices.get(leg.instrumentKey) ??
+                legCurrentPrice
             }
 
             const legUrPnl =

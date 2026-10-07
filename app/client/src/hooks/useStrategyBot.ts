@@ -28,6 +28,7 @@ import {
   loadExitTimes,
 } from './useBotState'
 import { useTradeExecution, type ExecutionContext } from './useTradeExecution'
+import { createUpstoxMarketStream } from '@/lib/upstoxMarketStream'
 import {
   fetchPaperHistory,
   getIndiaDateString,
@@ -51,6 +52,170 @@ export function useStrategyBot(token: string | null) {
   const liveArmedRef = useRef(false)
   const resumedTokenRef = useRef<string | null>(null)
   const [liveArmed, setLiveArmed] = useState(false)
+  const streamRef = useRef<ReturnType<typeof createUpstoxMarketStream> | null>(
+    null,
+  )
+  const streamDisplayTimerRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  )
+
+  // ─── Upstox Market Data Feed V3 stream helpers ───────────────────────────
+  const getStreamedPrice = useCallback(
+    (instrumentKey: string): number | null => {
+      return streamRef.current?.getLatestPrice(instrumentKey) ?? null
+    },
+    [],
+  )
+
+  /**
+   * Applies tick-level streamed prices to open positions between polling
+   * ticks for live PnL display. Guarded by isTickingRef so it never races
+   * with an in-flight tick; ticks still own exit decisions.
+   */
+  const refreshDisplayedStreamPrices = useCallback(() => {
+    const stream = streamRef.current
+    if (!stream || isTickingRef.current) return
+    const cur = statusRef.current
+    if (cur.state !== 'RUNNING' && cur.state !== 'ORDERED') return
+
+    let changed = false
+    const nextPositions: Record<UnderlyingSymbol, ActivePosition | null> = {
+      ...cur.positions,
+    }
+
+    for (const [sym, pos] of Object.entries(cur.positions)) {
+      if (!pos) continue
+      const key = sym as UnderlyingSymbol
+
+      if (pos.legs && pos.legs.length > 0) {
+        let legChanged = false
+        const updatedLegs = pos.legs.map((leg) => {
+          if (leg.status === 'CLOSED') return leg
+          const streamed = stream.getLatestPrice(leg.instrumentKey)
+          if (streamed == null || streamed === leg.currentPrice) return leg
+          legChanged = true
+          const unrealizedPnl =
+            leg.tradeType === 'selling'
+              ? (leg.entryPrice - streamed) * leg.quantity
+              : (streamed - leg.entryPrice) * leg.quantity
+          return { ...leg, currentPrice: streamed, unrealizedPnl }
+        })
+        if (legChanged) {
+          const totalUnrealizedPnl = updatedLegs.reduce(
+            (sum, leg) => sum + (leg.unrealizedPnl ?? 0),
+            0,
+          )
+          const primaryLeg =
+            updatedLegs.find(
+              (leg) => leg.instrumentKey === pos.instrumentKey,
+            ) ?? updatedLegs[0]
+          nextPositions[key] = {
+            ...pos,
+            legs: updatedLegs,
+            currentPrice: primaryLeg?.currentPrice ?? pos.currentPrice,
+            unrealizedPnl: totalUnrealizedPnl,
+          }
+          changed = true
+        }
+      } else {
+        const streamed = stream.getLatestPrice(pos.instrumentKey)
+        if (streamed != null && streamed !== pos.currentPrice) {
+          const isSelling = pos.tradeType === 'selling'
+          const unrealizedPnl = isSelling
+            ? (pos.entryPrice - streamed) * pos.quantity
+            : (streamed - pos.entryPrice) * pos.quantity
+          nextPositions[key] = { ...pos, currentPrice: streamed, unrealizedPnl }
+          changed = true
+        }
+      }
+    }
+
+    if (!changed) return
+    const primary =
+      nextPositions['NIFTY 50'] ??
+      Object.values(nextPositions).find((p) => p !== null) ??
+      null
+    updateStatus({ positions: nextPositions, position: primary })
+  }, [statusRef, updateStatus])
+
+  /** Keeps the stream subscribed to exactly the held position leg keys. */
+  const syncStreamSubscriptions = useCallback(
+    (positions: Record<UnderlyingSymbol, ActivePosition | null>) => {
+      const stream = streamRef.current
+      if (!stream) return
+      const keys = new Set<string>()
+      for (const pos of Object.values(positions)) {
+        if (!pos) continue
+        if (pos.instrumentKey) keys.add(pos.instrumentKey)
+        for (const leg of pos.legs ?? []) {
+          if (leg.status === 'CLOSED') continue
+          keys.add(leg.instrumentKey)
+        }
+      }
+      stream.setSubscriptions(Array.from(keys))
+    },
+    [],
+  )
+
+  const stopStream = useCallback(() => {
+    if (streamDisplayTimerRef.current) {
+      clearInterval(streamDisplayTimerRef.current)
+      streamDisplayTimerRef.current = null
+    }
+    const stream = streamRef.current
+    if (stream) {
+      stream.stop()
+      streamRef.current = null
+    }
+  }, [])
+
+  const startStream = useCallback(() => {
+    if (streamRef.current) return
+    const config = getStrategyConfig()
+    if (config.useMarketStream === false) return
+    if (!token) return
+    const stream = createUpstoxMarketStream({
+      getToken: () => (stopRequestedRef.current ? null : token),
+      onTick: () => {
+        // Latest prices are held by the stream; the display timer applies them.
+      },
+      onStatus: (status, detail) => {
+        if (status === 'open') {
+          addLog(
+            mkLog(
+              'info',
+              'stream',
+              'Upstox market stream connected — tick-level prices active',
+            ),
+          )
+        } else if (status === 'reconnecting') {
+          addLog(
+            mkLog(
+              'warn',
+              'stream',
+              `market stream ${detail ?? 'reconnecting'}`,
+            ),
+          )
+        } else if (status === 'closed') {
+          addLog(
+            mkLog(
+              'warn',
+              'stream',
+              detail
+                ? `market stream closed — ${detail} (falling back to REST prices)`
+                : 'market stream closed (falling back to REST prices)',
+            ),
+          )
+        }
+      },
+    })
+    streamRef.current = stream
+    stream.start()
+    streamDisplayTimerRef.current = setInterval(
+      () => refreshDisplayedStreamPrices(),
+      5000,
+    )
+  }, [token, addLog, refreshDisplayedStreamPrices])
 
   useEffect(() => {
     mountedRef.current = true
@@ -58,8 +223,9 @@ export function useStrategyBot(token: string | null) {
       mountedRef.current = false
       abortRef.current?.abort()
       if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      stopStream()
     }
-  }, [])
+  }, [stopStream])
 
   const tick = useCallback(async () => {
     if (!token || stopRequestedRef.current) return
@@ -487,6 +653,7 @@ export function useStrategyBot(token: string | null) {
         curPositions,
         curTradesPerSym,
         lastExitTimes: lastExitTimesRef.current,
+        getStreamedPrice,
         addLog: (l) => addLog(l),
         onStaticIpError: () => {
           const hasActivePos = Object.values(curPositions).some(
@@ -557,6 +724,7 @@ export function useStrategyBot(token: string | null) {
           lastUpdated: new Date().toLocaleTimeString('en-IN'),
           error: undefined,
         })
+        syncStreamSubscriptions(curPositions)
       }
 
       const newlyEnteredPositions = await evaluateAndEnter(ctx)
@@ -591,6 +759,8 @@ export function useStrategyBot(token: string | null) {
     evaluateAndEnter,
     evaluateAndExit,
     statusRef,
+    getStreamedPrice,
+    syncStreamSubscriptions,
   ])
 
   const scheduleNext = useCallback(() => {
@@ -644,6 +814,7 @@ export function useStrategyBot(token: string | null) {
       ),
     )
     updateStatus({ state: 'RUNNING', error: null })
+    startStream()
     void Promise.resolve()
       .then(tick)
       .finally(() => {
@@ -655,7 +826,7 @@ export function useStrategyBot(token: string | null) {
           scheduleNext()
         }
       })
-  }, [token, tick, updateStatus, addLog, scheduleNext, statusRef])
+  }, [token, tick, updateStatus, addLog, scheduleNext, statusRef, startStream])
 
   const stop = useCallback(() => {
     stopRequestedRef.current = true
@@ -664,6 +835,7 @@ export function useStrategyBot(token: string | null) {
     timeoutRef.current = null
     liveArmedRef.current = false
     setLiveArmed(false)
+    stopStream()
     const current = statusRef.current
     const hasOpenPosition = Object.values(current.positions).some(
       (position) => position !== null,
@@ -673,7 +845,7 @@ export function useStrategyBot(token: string | null) {
       state: hasOpenPosition ? 'STOPPED' : 'IDLE',
       error: null,
     })
-  }, [updateStatus, addLog, statusRef])
+  }, [updateStatus, addLog, statusRef, stopStream])
 
   useEffect(() => {
     if (!token) {
@@ -717,6 +889,7 @@ export function useStrategyBot(token: string | null) {
         mkLog('info', 'bot', `resumed from persisted state=${persisted.state}`),
       )
     }
+    startStream()
 
     const resumeTimer = setTimeout(() => {
       void tick().finally(() => {
@@ -735,7 +908,7 @@ export function useStrategyBot(token: string | null) {
       if (timeoutRef.current) clearTimeout(timeoutRef.current)
       abortRef.current?.abort()
     }
-  }, [token, tick, addLog, scheduleNext, statusRef, updateStatus])
+  }, [token, tick, addLog, scheduleNext, statusRef, updateStatus, startStream])
 
   return { ...status, liveArmed, start, stop, clearLogs }
 }

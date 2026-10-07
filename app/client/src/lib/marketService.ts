@@ -1028,47 +1028,4 @@ export async function fetchMarketForSymbols(
 }
 
 // ─── WebSocket Stream Utility ───────────────────────────────────────────────
-export interface MarketStreamOptions {
-  wsUrl: string
-  onTick?: (data: unknown) => void
-  onError?: (err: Event | Error) => void
-  onClose?: () => void
-}
-
-export function createUpstoxMarketStream(options: MarketStreamOptions): {
-  close: () => void
-  send: (msg: unknown) => void
-} {
-  let ws: WebSocket | null = null
-  try {
-    ws = new WebSocket(options.wsUrl)
-    ws.onmessage = (evt) => {
-      try {
-        const parsed = JSON.parse(evt.data as string) as unknown
-        options.onTick?.(parsed)
-      } catch {
-        options.onTick?.(evt.data)
-      }
-    }
-    ws.onerror = (err) => options.onError?.(err)
-    ws.onclose = () => options.onClose?.()
-  } catch (err) {
-    options.onError?.(err as Error)
-  }
-
-  return {
-    close: () => {
-      if (
-        ws?.readyState === WebSocket.OPEN ||
-        ws?.readyState === WebSocket.CONNECTING
-      ) {
-        ws.close()
-      }
-    },
-    send: (msg: unknown) => {
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(typeof msg === 'string' ? msg : JSON.stringify(msg))
-      }
-    },
-  }
-}
+// The Upstox Market Data Feed V3 stream lives in `upstoxMarketStream.ts`.

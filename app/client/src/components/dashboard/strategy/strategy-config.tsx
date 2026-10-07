@@ -523,6 +523,22 @@ export function StrategyConfig({
               <option value="both">Both (Long or Short)</option>
             </select>
           </div>
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground flex items-center gap-1">
+              Live Price Stream
+              <InfoTooltip content="Stream tick-level prices for open positions from the Upstox Market Data Feed V3 WebSocket for faster exit checks and PnL updates. Falls back to REST polling automatically when unavailable." />
+            </label>
+            <select
+              value={local.useMarketStream === false ? 'false' : 'true'}
+              onChange={(e) =>
+                set('useMarketStream', e.target.value === 'true')
+              }
+              className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+            >
+              <option value="true">Enabled (WebSocket ticks)</option>
+              <option value="false">Disabled (REST polling only)</option>
+            </select>
+          </div>
         </div>
 
         <div className="flex gap-2">

@@ -31,6 +31,7 @@ import {
   handleUpstoxOi,
   handleUpstoxChangeOi,
   handleUpstoxSmartlistFutures,
+  handleFeedAuthorize,
 } from './upstoxProxy'
 import { handleGlobalIndices } from './globalIndices'
 import { handleTelegramNotify } from './telegram'
@@ -62,7 +63,7 @@ function corsHeaders(request: Request): Record<string, string> {
 function securityHeaders(): Record<string, string> {
   return {
     'Content-Security-Policy':
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.upstox.com https://www.vrdnation.com; img-src 'self' data:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.upstox.com https://www.vrdnation.com wss://*.upstox.com; img-src 'self' data:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'",
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'strict-origin-when-cross-origin',
@@ -219,6 +220,11 @@ export default {
       return captureResponse(await handleUpstoxPcr(request))
     if (url.pathname === '/api/market/vix' && request.method === 'POST')
       return captureResponse(await handleVix(request))
+    if (
+      url.pathname === '/api/market/feed-authorize' &&
+      request.method === 'POST'
+    )
+      return captureResponse(await handleFeedAuthorize(request))
     if (url.pathname === '/api/market/breadth' && request.method === 'POST')
       return captureResponse(await handleBreadth(request))
     if (url.pathname === '/api/market/upstox/fii' && request.method === 'POST')

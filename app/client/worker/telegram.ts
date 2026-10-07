@@ -24,7 +24,7 @@ export async function handleTelegramNotify(
 
   let body: TelegramNotifyBody
   try {
-    body = (await request.json())
+    body = await request.json()
   } catch {
     return Response.json({ error: 'Invalid JSON body' }, { status: 400 })
   }

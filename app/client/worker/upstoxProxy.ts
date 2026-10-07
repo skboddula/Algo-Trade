@@ -1182,3 +1182,68 @@ export async function handleUpstoxSmartlistFutures(
   }
   return Response.json(data, { status: upstream.status })
 }
+
+/**
+ * Exchange the user's Upstox access token for a one-time-use authorized
+ * WebSocket URL (Market Data Feed V3). Browsers cannot set Authorization
+ * headers on a WebSocket handshake, so clients call this first and then
+ * connect directly to the returned `authorized_redirect_uri`.
+ *
+ * See https://upstox.com/developer/api-documentation/get-market-data-feed-authorize-v3
+ */
+export async function handleFeedAuthorize(request: Request): Promise<Response> {
+  let body: { token: string }
+  try {
+    body = await request.json()
+  } catch {
+    return Response.json({ error: 'Invalid body' }, { status: 400 })
+  }
+  if (!body.token)
+    return Response.json({ error: 'Missing token' }, { status: 400 })
+
+  let upstream: Response
+  try {
+    upstream = await fetchWithTimeout(
+      'https://api.upstox.com/feed/market-data-feed/authorize',
+      {
+        headers: {
+          Authorization: `Bearer ${body.token}`,
+          Accept: 'application/json',
+        },
+      },
+    )
+  } catch {
+    return Response.json({ error: 'Failed to reach Upstox' }, { status: 502 })
+  }
+  let raw: unknown
+  try {
+    raw = await upstream.json()
+  } catch {
+    return Response.json(
+      { error: 'Invalid response from Upstox API' },
+      { status: 502 },
+    )
+  }
+  const data = raw as {
+    status?: string
+    data?: { authorized_redirect_uri?: string }
+  }
+  if (!upstream.ok || data.status !== 'success' || !data.data) {
+    return Response.json(
+      {
+        error: 'Upstox rejected the feed authorization request',
+        detail: raw,
+      },
+      { status: upstream.ok ? 502 : upstream.status },
+    )
+  }
+  const url = data.data.authorized_redirect_uri
+  if (!url?.startsWith('wss://')) {
+    return Response.json(
+      { error: 'Upstox returned an invalid feed URL' },
+      { status: 502 },
+    )
+  }
+  // The URL embeds a single-use auth code; never persist it server-side.
+  return Response.json({ url })
+}

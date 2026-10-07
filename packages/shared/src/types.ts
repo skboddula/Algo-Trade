@@ -241,6 +241,12 @@ export interface StrategyConfig {
   brentCrudeExtremeThreshold: number
   brentCrudeOverhangThreshold: number
   exitCooldownSec?: number
+  /**
+   * When true (default), open-position exit checks and displayed PnL prefer
+   * tick-level prices from the Upstox Market Data Feed V3 WebSocket when a
+   * live stream is available, falling back to REST option-chain prices.
+   */
+  useMarketStream?: boolean
 }
 
 export interface PaperAccount {
@@ -354,6 +360,7 @@ export const DEFAULT_CONFIG: StrategyConfig = {
   tradeType: 'buying',
   brentCrudeExtremeThreshold: 125,
   brentCrudeOverhangThreshold: 88,
+  useMarketStream: true,
 }
 
 export const ACCOUNTS_CHANGED_EVENT = 'algo-trade:accounts-changed'
