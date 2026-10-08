@@ -87,6 +87,13 @@ export interface IndicatorsResult {
   atr: { value: number; level: VolatilityLevel }
   pcr: SignalType
   pcrValue: number
+  /**
+   * Higher-timeframe (5-min resampled) EMA 10/42 trend direction.
+   * Used as a multi-timeframe confluence filter: BUY_CE signals are blocked
+   * when the 5-min trend is bearish, and BUY_PE signals are blocked when it
+   * is bullish. 'Hold' (neutral) or undefined does not block either direction.
+   */
+  higherTimeframeTrend?: SignalType
 }
 
 export interface NewsAlert {
@@ -249,6 +256,12 @@ export interface StrategyConfig {
    * live stream is available, falling back to REST option-chain prices.
    */
   useMarketStream?: boolean
+  /**
+   * When true (default), BUY_CE signals are blocked when the 5-min
+   * resampled EMA 10/42 trend is bearish, and BUY_PE signals are blocked
+   * when it is bullish. Filters out counter-trend entries from 1-min noise.
+   */
+  useMultiTimeframe?: boolean
 }
 
 export interface PaperAccount {
@@ -364,6 +377,7 @@ export const DEFAULT_CONFIG: StrategyConfig = {
   brentCrudeExtremeThreshold: 125,
   brentCrudeOverhangThreshold: 88,
   useMarketStream: true,
+  useMultiTimeframe: true,
 }
 
 export const ACCOUNTS_CHANGED_EVENT = 'algo-trade:accounts-changed'

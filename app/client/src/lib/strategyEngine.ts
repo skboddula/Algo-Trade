@@ -105,6 +105,39 @@ export function getFinalSignal(
   const positionSize =
     confidence === CONFIDENCE_STRONG ? POSITION_SIZE_FULL : POSITION_SIZE_HALF
 
+  // Multi-timeframe confluence filter: block counter-trend entries where the
+  // 1-min signal disagrees with the 5-min resampled EMA 10/42 trend. This
+  // prevents buying calls during a higher-timeframe downtrend (and vice
+  // versa) — the source of most counter-trend losses. Neutral ('hold')
+  // higher-timeframe trends do not block either direction.
+  if (config.useMultiTimeframe !== false && data.indicators) {
+    const htTrend = data.indicators.higherTimeframeTrend
+    if (signal === SIGNAL_BUY_CE && htTrend === SIGNAL_SELL) {
+      return {
+        signal: SIGNAL_NO_TRADE,
+        confidence,
+        positionSize: CONFIDENCE_NONE,
+        v3: data.v3,
+        v4,
+        bullScore: bull.score,
+        bearScore: bear.score,
+        scoreMax: scoreMax,
+      }
+    }
+    if (signal === SIGNAL_BUY_PE && htTrend === SIGNAL_BUY) {
+      return {
+        signal: SIGNAL_NO_TRADE,
+        confidence,
+        positionSize: CONFIDENCE_NONE,
+        v3: data.v3,
+        v4,
+        bullScore: bull.score,
+        bearScore: bear.score,
+        scoreMax: scoreMax,
+      }
+    }
+  }
+
   // Prevent entering a trade that would immediately trigger exit conditions
   const isBullishBias = signal === SIGNAL_BUY_CE
   const adRatio = data.vrd?.advancesDeclines?.ratio

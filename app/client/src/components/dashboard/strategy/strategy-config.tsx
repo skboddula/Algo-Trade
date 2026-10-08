@@ -547,6 +547,22 @@ export function StrategyConfig({
               <option value="false">Disabled (REST polling only)</option>
             </select>
           </div>
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground flex items-center gap-1">
+              Multi-Timeframe Filter
+              <InfoTooltip content="Block BUY_CE signals when the 5-min EMA 10/42 trend is bearish, and BUY_PE signals when it is bullish. Filters out counter-trend entries from 1-min noise. Recommended: Enabled." />
+            </label>
+            <select
+              value={local.useMultiTimeframe === false ? 'false' : 'true'}
+              onChange={(e) =>
+                set('useMultiTimeframe', e.target.value === 'true')
+              }
+              className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+            >
+              <option value="true">Enabled (5-min trend filter)</option>
+              <option value="false">Disabled (1-min signals only)</option>
+            </select>
+          </div>
         </div>
 
         <div className="flex gap-2">
