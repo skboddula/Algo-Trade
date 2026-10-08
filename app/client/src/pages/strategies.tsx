@@ -4,7 +4,7 @@ import type { StrategyBotController } from '@/hooks/useStrategyBot'
 import { getStrategyConfig, saveStrategyConfig } from '@/lib/strategyConfig'
 import { fetchPaperAccount } from '@/lib/paperTrading'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { Activity, BarChart3, Settings } from 'lucide-react'
+import { Activity, BarChart3, Settings, FlaskConical } from 'lucide-react'
 
 import { StrategyHeaderBar } from '@/components/dashboard/strategy/strategy-header-bar'
 import { HardStopBanner } from '@/components/dashboard/strategy/hard-stop-banner'
@@ -22,6 +22,7 @@ import { SourceStatusBar } from '@/components/dashboard/strategy/source-status-b
 import { NewsAlertsPanel } from '@/components/dashboard/strategy/news-alerts-panel'
 import { ThresholdOptimizer } from '@/components/dashboard/strategy/threshold-optimizer'
 import { DailyBacktestReport } from '@/components/dashboard/strategy/daily-backtest-report'
+import { BacktestPanel } from '@/components/dashboard/strategy/backtest-panel'
 
 interface StrategiesPageProps {
   bot: StrategyBotController
@@ -85,7 +86,7 @@ export function StrategiesPage({ bot, token }: StrategiesPageProps) {
         onValueChange={setActiveTab}
         className="w-full space-y-4"
       >
-        <TabsList className="grid w-full grid-cols-3 max-w-md">
+        <TabsList className="grid w-full grid-cols-4 max-w-lg">
           <TabsTrigger
             value="operations"
             className="flex items-center gap-1.5 text-xs"
@@ -106,6 +107,13 @@ export function StrategiesPage({ bot, token }: StrategiesPageProps) {
           >
             <Settings size={14} />
             <span>Config &amp; Tuning</span>
+          </TabsTrigger>
+          <TabsTrigger
+            value="backtest"
+            className="flex items-center gap-1.5 text-xs"
+          >
+            <FlaskConical size={14} />
+            <span>Backtest</span>
           </TabsTrigger>
         </TabsList>
 
@@ -198,6 +206,14 @@ export function StrategiesPage({ bot, token }: StrategiesPageProps) {
               setConfig(next)
             }}
           />
+        </TabsContent>
+
+        {/* ── TAB 4: Backtest ──────────────────────────────────────────────── */}
+        <TabsContent
+          value="backtest"
+          className="space-y-4 focus-visible:outline-none"
+        >
+          <BacktestPanel token={token} />
         </TabsContent>
       </Tabs>
     </div>
