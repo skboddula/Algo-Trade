@@ -48,7 +48,10 @@ export const API_MARKET_GLOBAL_INDICES = '/api/market/upstox/global-indices'
 export const API_MARKET_OPTION_CHAIN = '/api/market/option-chain'
 export const API_MARKET_QUOTES = '/api/market/quotes'
 export const API_MARKET_FEED_AUTHORIZE = '/api/market/feed-authorize'
+export const API_MARKET_INDICES = '/api/market/indices'
 export const API_NOTIFY_TELEGRAM = '/api/notify/telegram'
+
+// ─── India VIX Streaming ─────────────────────────────────────────────────────
 
 /** Upstox instrument key for streaming India VIX on Market Data Feed V3. */
 export const INDIA_VIX_INSTRUMENT_KEY = 'NSE_INDEX|India VIX'
@@ -56,7 +59,18 @@ export const INDIA_VIX_INSTRUMENT_KEY = 'NSE_INDEX|India VIX'
 /** VIX thresholds for early-warning alerts (hard stop bounds are 10 and 25). */
 export const VIX_ELEVATED_THRESHOLD = 18
 export const VIX_CRITICAL_THRESHOLD = 24
-export const API_MARKET_INDICES = '/api/market/indices'
+
+/**
+ * Streamed VIX older than this window is ignored in favor of the REST-polled
+ * value. Prevents trading on stale volatility data after a stream disconnect.
+ */
+export const VIX_FRESHNESS_WINDOW_MS = 120_000 // 2 minutes
+
+/**
+ * Minimum time between critical VIX Telegram alerts so boundary oscillation
+ * (VIX bouncing around the 24 threshold) doesn't spam the user's phone.
+ */
+export const VIX_CRITICAL_ALERT_COOLDOWN_MS = 5 * 60_000 // 5 minutes
 
 export const MCP_UPSTOX_URL = 'https://mcp.upstox.com/mcp'
 export const UPSTOX_MCP_DOCS_URL =

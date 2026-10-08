@@ -91,11 +91,6 @@ export async function handleTelegramNotify(
     )
   }
 
-  console.log(
-    '[telegram] DELIVERED — length:',
-    message.length,
-    'chars, chat_id:',
-    chatId,
-  )
+  console.log('[telegram] DELIVERED — length:', message.length, 'chars')
   return Response.json({ notified: true })
 }

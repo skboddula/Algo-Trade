@@ -38,6 +38,8 @@ import {
   INDIA_VIX_INSTRUMENT_KEY,
   VIX_ELEVATED_THRESHOLD,
   VIX_CRITICAL_THRESHOLD,
+  VIX_FRESHNESS_WINDOW_MS,
+  VIX_CRITICAL_ALERT_COOLDOWN_MS,
 } from '@/lib/constants'
 import { sendTelegramAlert } from '@/lib/telegram'
 import {
@@ -70,8 +72,11 @@ export function useStrategyBot(token: string | null) {
     null,
   )
   const visibilityCleanupRef = useRef<(() => void) | null>(null)
-  const streamedVixRef = useRef<number | null>(null)
+  const streamedVixTickRef = useRef<{ ltp: number; receivedAt: number } | null>(
+    null,
+  )
   const vixWarningLevelRef = useRef<'none' | 'elevated' | 'critical'>('none')
+  const lastCriticalAlertAtRef = useRef<number>(0)
 
   // ─── Upstox Market Data Feed V3 stream helpers ───────────────────────────
   const getStreamedPrice = useCallback(
@@ -81,8 +86,17 @@ export function useStrategyBot(token: string | null) {
     [],
   )
 
+  /**
+   * Returns the streamed India VIX LTP only if it was received within the
+   * freshness window (default 2 minutes). Returns null when the tick is
+   * stale (stream disconnected) so the caller falls back to the REST-polled
+   * VIX — prevents trading on outdated volatility data after a stream drop.
+   */
   const getStreamedVix = useCallback((): number | null => {
-    return streamedVixRef.current
+    const tick = streamedVixTickRef.current
+    if (!tick) return null
+    if (Date.now() - tick.receivedAt > VIX_FRESHNESS_WINDOW_MS) return null
+    return tick.ltp
   }, [])
 
   /**
@@ -185,8 +199,9 @@ export function useStrategyBot(token: string | null) {
       stream.stop()
       streamRef.current = null
     }
-    streamedVixRef.current = null
+    streamedVixTickRef.current = null
     vixWarningLevelRef.current = 'none'
+    lastCriticalAlertAtRef.current = 0
   }, [])
 
   /**
@@ -194,6 +209,9 @@ export function useStrategyBot(token: string | null) {
    * the elevated (≥18) or critical (≥24) threshold. Hard stop itself still
    * happens in the tick via runHardStopChecks; this is purely informational
    * so the user has lead time to manage mirrored positions.
+   *
+   * Critical alerts are further throttled by a cooldown timer so boundary
+   * oscillation (VIX bouncing around 24) does not spam the user's phone.
    */
   const checkVixEarlyWarning = useCallback(
     (vix: number) => {
@@ -208,6 +226,23 @@ export function useStrategyBot(token: string | null) {
       vixWarningLevelRef.current = level
 
       if (level === 'critical') {
+        // Cooldown: suppress critical alerts within the cooldown window so
+        // oscillation around the threshold doesn't spam Telegram.
+        const now = Date.now()
+        if (
+          now - lastCriticalAlertAtRef.current <
+          VIX_CRITICAL_ALERT_COOLDOWN_MS
+        ) {
+          addLog(
+            mkLog(
+              'info',
+              'stream',
+              `India VIX ${vix.toFixed(1)} ≥ ${VIX_CRITICAL_THRESHOLD} — critical (alert suppressed by cooldown, last sent ${Math.round((now - lastCriticalAlertAtRef.current) / 60000)}m ago)`,
+            ),
+          )
+          return
+        }
+        lastCriticalAlertAtRef.current = now
         addLog(
           mkLog(
             'warn',
@@ -243,7 +278,10 @@ export function useStrategyBot(token: string | null) {
       onTick: (tick) => {
         if (tick.instrumentKey !== INDIA_VIX_INSTRUMENT_KEY) return
         if (typeof tick.ltp !== 'number' || !Number.isFinite(tick.ltp)) return
-        streamedVixRef.current = tick.ltp
+        streamedVixTickRef.current = {
+          ltp: tick.ltp,
+          receivedAt: tick.receivedAt,
+        }
         checkVixEarlyWarning(tick.ltp)
       },
       onStatus: (status, detail) => {
