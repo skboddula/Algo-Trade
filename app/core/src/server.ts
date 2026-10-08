@@ -28,9 +28,22 @@ export function buildServer(opts?: { mockMode?: boolean; primaryToken?: string }
   })
 
   // Register Plugins
+  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',').map((o) => o.trim()) ?? [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://127.0.0.1:5173',
+  ]
+
   app.register(cors, {
-    origin: true,
+    origin: (origin, cb) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        cb(null, true)
+      } else {
+        cb(new Error('Origin not allowed'), false)
+      }
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    credentials: true,
   })
 
   app.register(rateLimit, {

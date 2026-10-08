@@ -152,6 +152,109 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     return reply.send({ success: true, balance: account.balance, userState: sanitizeUserState(userState) })
   })
 
+  // ── GET /api/bot/equity-curve ─────────────────────────────────────────────
+  // Returns trade history formatted for charting: running balance over time
+  fastify.get('/api/bot/equity-curve', async (request, reply) => {
+    const query = request.query as { userId?: string }
+    const userId = query.userId || 'default_user'
+    const account = orderGateway.getOrCreatePaperAccount(userId)
+    const trades = orderGateway.getPaperTrades(userId)
+
+    // Filter to CLOSED trades, sorted chronologically
+    const closed = trades
+      .filter((t) => t.status === 'CLOSED' && t.closedAt)
+      .sort((a, b) => new Date(a.closedAt!).getTime() - new Date(b.closedAt!).getTime())
+
+    if (closed.length === 0) {
+      return reply.send({
+        points: [],
+        stats: { totalTrades: 0, wins: 0, losses: 0, realizedPnl: 0, balance: account.balance },
+      })
+    }
+
+    // Reconstruct starting balance: current balance minus all realized P&L
+    const totalRealizedPnl = closed.reduce((s, t) => s + (t.realizedPnl ?? 0), 0)
+    const startBalance = account.balance - totalRealizedPnl
+
+    let running = startBalance
+    let peak = startBalance
+    let maxDrawdownPct = 0
+    let wins = 0
+    let losses = 0
+
+    const points = [{ time: 'Start', balance: startBalance, pnl: 0 }]
+    for (const t of closed) {
+      const pnl = t.realizedPnl ?? 0
+      running += pnl
+      peak = Math.max(peak, running)
+      const dd = peak > 0 ? ((peak - running) / peak) * 100 : 0
+      maxDrawdownPct = Math.max(maxDrawdownPct, dd)
+      if (pnl > 0) wins++
+      else losses++
+      points.push({
+        time: t.closedAt!,
+        balance: running,
+        pnl,
+      })
+    }
+
+    return reply.send({
+      points,
+      stats: {
+        startBalance,
+        currentBalance: account.balance,
+        totalTrades: closed.length,
+        wins,
+        losses,
+        winRatePct: closed.length > 0 ? Math.round((wins / closed.length) * 1000) / 10 : 0,
+        realizedPnl: totalRealizedPnl,
+        roiPct: startBalance > 0 ? Math.round((totalRealizedPnl / startBalance) * 10000) / 100 : 0,
+        maxDrawdownPct: Math.round(maxDrawdownPct * 100) / 100,
+      },
+    })
+  })
+
+  // ── GET /api/bot/stream-health ─────────────────────────────────────────────
+  // Returns the current WebSocket market stream status
+  fastify.get('/api/bot/stream-health', async (_request, reply) => {
+    const health = tenantManager.getStreamHealth()
+    return reply.send(health)
+  })
+
+  // ── GET /api/bot/signals ───────────────────────────────────────────────────
+  // Returns recent signal evaluations from the master ingestor snapshots
+  fastify.get('/api/bot/signals', async (request, reply) => {
+    const query = request.query as { limit?: string }
+    const limit = Math.min(parseInt(query.limit || '50', 10) || 50, 200)
+    const snapshots = masterIngestor.getAllSnapshots()
+    const signals: Array<{
+      symbol: string
+      signal: string
+      confidence: string
+      bullScore: number
+      bearScore: number
+      timestamp: string
+    }> = []
+
+    for (const [symbol, snapshot] of Object.entries(snapshots)) {
+      if (snapshot?.signal) {
+        signals.push({
+          symbol,
+          signal: snapshot.signal.signal,
+          confidence: snapshot.signal.confidence,
+          bullScore: snapshot.signal.bullScore,
+          bearScore: snapshot.signal.bearScore,
+          timestamp: snapshot.timestamp,
+        })
+      }
+    }
+
+    return reply.send({
+      count: signals.length,
+      signals: signals.slice(0, limit),
+    })
+  })
+
   // ── POST /api/bot/trade/exit ───────────────────────────────────────────────
   fastify.post('/api/bot/trade/exit', async (request, reply) => {
     const body = request.body as { userId?: string; symbol: UnderlyingSymbol; reason?: string } | null

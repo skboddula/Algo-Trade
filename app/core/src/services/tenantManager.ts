@@ -205,6 +205,22 @@ export class TenantManager extends EventEmitter {
     this.persistUserStates()
   }
 
+  /** Returns the current WebSocket market stream health status. */
+  public getStreamHealth(): {
+    status: string
+    vix: number | null
+    subscribedKeys: number
+    lastTickAt: number | null
+  } {
+    const vix = this.marketStream.getStreamedVix()
+    return {
+      status: this.marketStream.getStatus(),
+      vix,
+      subscribedKeys: 0, // Internal to the stream
+      lastTickAt: vix !== null ? Date.now() : null,
+    }
+  }
+
   /** Restores user bot states from disk on startup. */
   private restoreUserStates(): void {
     const saved = loadState<Record<string, UserBotState>>('user_states')
