@@ -6,6 +6,7 @@ import type {
   ActivePosition,
   MarketSnapshot,
   AllSignalData,
+  PaperTradeRecord,
 } from '../types'
 import { DEFAULT_STRATEGY_CONFIG } from '../constants'
 import { MasterIngestionEngine } from './masterIngestor'
@@ -13,17 +14,31 @@ import { OrderGateway } from './orderGateway'
 import { pickBestOptionContract } from './syntheticCalculators'
 import { runHardStopChecks } from './strategyEngine'
 import { getIndiaTime } from '../utils/timeUtils'
+import {
+  getTelegramConfig,
+  sendTelegramMessage,
+  formatEntryAlert,
+  formatExitAlert,
+  formatVixAlert,
+  formatDailySummary,
+  type TelegramConfig,
+} from './telegramAlerts'
 
 export class TenantManager extends EventEmitter {
   private users: Map<string, UserBotState> = new Map()
   private masterIngestor: MasterIngestionEngine
   private orderGateway: OrderGateway
+  private telegramConfig: TelegramConfig | null
+  private vixWarningLevel: 'none' | 'elevated' | 'critical' = 'none'
+  private lastVixAlertAt: number = 0
+  private dailySummaryDate: string | null = null
 
   constructor(masterIngestor: MasterIngestionEngine, orderGateway: OrderGateway) {
     super()
     this.setMaxListeners(100)
     this.masterIngestor = masterIngestor
     this.orderGateway = orderGateway
+    this.telegramConfig = getTelegramConfig()
 
     // Bind to master market ticks
     this.masterIngestor.on('marketTick', (tick) => {
@@ -123,6 +138,9 @@ export class TenantManager extends EventEmitter {
         reason,
       })
 
+      // Send Telegram exit alert
+      this.sendExitAlert(user, position, symbol, exitPrice, reason)
+
       user.positions[symbol] = null
       user.lastExitTimes[symbol] = Date.now()
       const hasOtherPositions = Object.values(user.positions).some((p) => p !== null)
@@ -134,8 +152,125 @@ export class TenantManager extends EventEmitter {
     return user
   }
 
+  /** Sends a Telegram entry alert after a successful order placement. */
+  private sendEntryAlert(
+    user: UserBotState,
+    position: ActivePosition,
+    symbol: UnderlyingSymbol,
+    selectedContract: { strikePrice?: number; expiry?: string },
+  ): void {
+    if (!this.telegramConfig) return
+    const message = formatEntryAlert({
+      symbol,
+      signal: position.direction === 'CE' ? 'BUY_CE' : 'BUY_PE',
+      confidence: 'moderate',
+      executionMode: user.executionMode === 'live' ? 'live' : 'paper',
+      strikePrice: selectedContract.strikePrice,
+      expiry: selectedContract.expiry,
+      entryPrice: position.entryPrice,
+      quantity: position.quantity,
+      lotSize: position.lotSize || 1,
+      tradeType: position.tradeType === 'selling' ? 'selling' : 'buying',
+      maxProfitPct: user.config.maxProfitPct,
+      maxLossPct: user.config.maxLossPct,
+      trailPct: user.config.trailPct,
+    })
+    sendTelegramMessage(this.telegramConfig, message).catch(() => {})
+  }
+
+  /** Sends a Telegram exit alert with PnL details. */
+  private sendExitAlert(
+    user: UserBotState,
+    position: ActivePosition,
+    symbol: UnderlyingSymbol,
+    exitPrice: number,
+    reason: string,
+  ): void {
+    if (!this.telegramConfig) return
+    const message = formatExitAlert({
+      symbol,
+      direction: position.direction === 'CE' ? 'CE' : 'PE',
+      executionMode: user.executionMode === 'live' ? 'live' : 'paper',
+      entryPrice: position.entryPrice,
+      exitPrice,
+      quantity: position.quantity,
+      lotSize: position.lotSize || 1,
+      tradeType: position.tradeType === 'selling' ? 'selling' : 'buying',
+      reason,
+      entryTime: position.entryTime,
+      exitTime: new Date().toISOString(),
+    })
+    sendTelegramMessage(this.telegramConfig, message).catch(() => {})
+  }
+
+  /** Sends a VIX early warning when thresholds are crossed (with 5-min cooldown). */
+  private checkVixWarning(vrdData: { vix?: number | null } | null | undefined): void {
+    if (!this.telegramConfig || !vrdData?.vix) return
+    const vix = vrdData.vix
+    const level = vix >= 24 ? 'critical' : vix >= 18 ? 'elevated' : 'none'
+    if (level === this.vixWarningLevel) return
+
+    this.vixWarningLevel = level
+    if (level === 'critical') {
+      const now = Date.now()
+      if (now - this.lastVixAlertAt < 5 * 60000) return // 5-min cooldown
+      this.lastVixAlertAt = now
+      sendTelegramMessage(
+        this.telegramConfig,
+        formatVixAlert({ vix, threshold: 25 }),
+      ).catch(() => {})
+    }
+  }
+
+  /** Sends a daily summary after EOD when all positions are closed. */
+  private checkDailySummary(user: UserBotState, istInfo: { dateString: string }): void {
+    if (!this.telegramConfig) return
+    if (this.dailySummaryDate === istInfo.dateString) return
+
+    const hasActivePositions = Object.values(user.positions).some((p) => p !== null)
+    if (hasActivePositions) return
+
+    // Only send after cutoff
+    this.dailySummaryDate = istInfo.dateString
+
+    const allTrades = this.orderGateway.getPaperTrades(user.userId)
+    const closedTrades = allTrades.filter(
+      (t) => t.status === 'CLOSED' && t.closedAt?.startsWith(istInfo.dateString),
+    )
+    if (closedTrades.length === 0) return
+
+    const wins = closedTrades.filter((t) => (t.realizedPnl ?? 0) > 0)
+    const losses = closedTrades.filter((t) => (t.realizedPnl ?? 0) <= 0)
+    const realizedPnl = closedTrades.reduce((s, t) => s + (t.realizedPnl ?? 0), 0)
+    const best = wins.length ? wins.reduce((a, b) => ((a.realizedPnl ?? 0) >= (b.realizedPnl ?? 0) ? a : b)) : undefined
+    const worst = losses.length ? losses.reduce((a, b) => ((a.realizedPnl ?? 0) <= (b.realizedPnl ?? 0) ? a : b)) : undefined
+
+    const getSymbol = (t: PaperTradeRecord): string => {
+      const meta = t.metadata as { underlyingSymbol?: string } | undefined
+      return meta?.underlyingSymbol ?? '—'
+    }
+
+    const message = formatDailySummary({
+      date: istInfo.dateString,
+      totalTrades: closedTrades.length,
+      wins: wins.length,
+      losses: losses.length,
+      realizedPnl,
+      paperBalance: user.paperBalance,
+      bestTrade: best ? { symbol: getSymbol(best), direction: best.direction, pnl: best.realizedPnl ?? 0 } : undefined,
+      worstTrade: worst ? { symbol: getSymbol(worst), direction: worst.direction, pnl: worst.realizedPnl ?? 0 } : undefined,
+    })
+    sendTelegramMessage(this.telegramConfig, message).catch(() => {})
+  }
+
   private async handleMarketTick(tick: { timestamp: string; snapshots: Record<UnderlyingSymbol, MarketSnapshot> }) {
     const istInfo = getIndiaTime()
+
+    // Check VIX early warning once per tick (uses primary symbol's VRD data)
+    const primarySnapshot = tick.snapshots['NIFTY 50'] ?? Object.values(tick.snapshots)[0]
+    if (primarySnapshot?.vrdData) {
+      this.checkVixWarning(primarySnapshot.vrdData)
+    }
 
     for (const [userId, user] of this.users.entries()) {
       if (user.state === 'IDLE' || user.state === 'STOPPED') continue
@@ -268,6 +403,11 @@ export class TenantManager extends EventEmitter {
                 user.paperBalance = this.orderGateway.getOrCreatePaperAccount(userId).balance
                 user.updatedAt = new Date().toISOString()
                 this.emitUserUpdate(user)
+
+                // Send Telegram entry alert
+                this.sendEntryAlert(user, newPos, symbol, {
+                  strikePrice: selectedContract.strike,
+                })
               } else {
                 user.error = orderRes.error
                 this.emitUserUpdate(user)
@@ -275,6 +415,11 @@ export class TenantManager extends EventEmitter {
             }
           }
         }
+      }
+
+      // After all symbols processed: check daily summary (after EOD, no positions)
+      if (afterCutoff) {
+        this.checkDailySummary(user, istInfo)
       }
     }
   }
