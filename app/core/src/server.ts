@@ -73,6 +73,7 @@ export function buildServer(opts?: { mockMode?: boolean; primaryToken?: string }
   // Graceful shutdown hooks
   app.addHook('onClose', async () => {
     masterIngestor.stop()
+    tenantManager.shutdown()
   })
 
   return { app, masterIngestor, tenantManager, orderGateway }

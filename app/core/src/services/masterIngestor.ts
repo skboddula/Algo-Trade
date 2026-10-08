@@ -50,6 +50,10 @@ export class MasterIngestionEngine extends EventEmitter {
     this.config.primaryUpstoxToken = token
   }
 
+  public getPrimaryToken(): string | null {
+    return this.config.primaryUpstoxToken ?? null
+  }
+
   public setMockMode(enabled: boolean) {
     this.config.mockMode = enabled
   }

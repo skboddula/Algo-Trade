@@ -23,6 +23,7 @@ import {
   formatDailySummary,
   type TelegramConfig,
 } from './telegramAlerts'
+import { UpstoxMarketStream, type StreamTick } from './marketStream'
 
 export class TenantManager extends EventEmitter {
   private users: Map<string, UserBotState> = new Map()
@@ -32,6 +33,7 @@ export class TenantManager extends EventEmitter {
   private vixWarningLevel: 'none' | 'elevated' | 'critical' = 'none'
   private lastVixAlertAt: number = 0
   private dailySummaryDate: string | null = null
+  private marketStream: UpstoxMarketStream
 
   constructor(masterIngestor: MasterIngestionEngine, orderGateway: OrderGateway) {
     super()
@@ -40,12 +42,79 @@ export class TenantManager extends EventEmitter {
     this.orderGateway = orderGateway
     this.telegramConfig = getTelegramConfig()
 
-    // Bind to master market ticks
+    // Initialize the WebSocket market stream for tick-level prices + VIX
+    this.marketStream = new UpstoxMarketStream({
+      getToken: () => masterIngestor.getPrimaryToken(),
+    })
+    this.marketStream.on('tick', (tick: StreamTick) => {
+      this.handleStreamTick(tick)
+    })
+    this.marketStream.on('status', (status, detail) => {
+      if (status === 'open') {
+        console.log('[stream] Upstox market stream connected — tick-level prices active')
+      } else if (status === 'closed' && detail) {
+        console.warn(`[stream] ${detail}`)
+      }
+    })
+    this.marketStream.start()
+
+    // Bind to master market ticks (REST polling — fallback/supplement to the stream)
     this.masterIngestor.on('marketTick', (tick) => {
       this.handleMarketTick(tick).catch((err) => {
         this.emit('error', err)
       })
     })
+  }
+
+  /** Applies streamed tick-level prices to open positions in real time. */
+  private handleStreamTick(tick: StreamTick): void {
+    // Skip VIX ticks (handled by getStreamedVix)
+    if (tick.instrumentKey === 'NSE_INDEX|India VIX') return
+
+    for (const user of this.users.values()) {
+      if (user.state !== 'RUNNING' && user.state !== 'ORDERED') continue
+      for (const position of Object.values(user.positions)) {
+        if (!position || position.instrumentKey !== tick.instrumentKey) continue
+
+        // Update current price and peak from the streamed tick
+        const prevPrice = position.currentPrice ?? position.entryPrice
+        position.currentPrice = tick.ltp
+
+        // Track peak favorable price (buying: max, selling: min)
+        if (position.tradeType === 'selling') {
+          position.peakFavorablePrice = position.peakFavorablePrice === undefined
+            ? tick.ltp
+            : Math.min(position.peakFavorablePrice, tick.ltp)
+        } else {
+          position.peakFavorablePrice = position.peakFavorablePrice === undefined
+            ? tick.ltp
+            : Math.max(position.peakFavorablePrice, tick.ltp)
+        }
+
+        // Recalculate unrealized PnL
+        const pnlPerUnit = position.tradeType === 'selling'
+          ? position.entryPrice - tick.ltp
+          : tick.ltp - position.entryPrice
+        position.unrealizedPnl = Math.round(pnlPerUnit * position.quantity * 100) / 100
+
+        // Only emit an update if the price changed meaningfully (>0.1%)
+        if (Math.abs(tick.ltp - prevPrice) / (prevPrice || 1) > 0.001) {
+          user.updatedAt = new Date().toISOString()
+          this.emitUserUpdate(user)
+        }
+      }
+    }
+  }
+
+  /** Syncs the stream subscriptions to all held position keys + India VIX. */
+  private syncStreamSubscriptions(): void {
+    const keys = new Set<string>(['NSE_INDEX|India VIX'])
+    for (const user of this.users.values()) {
+      for (const position of Object.values(user.positions)) {
+        if (position?.instrumentKey) keys.add(position.instrumentKey)
+      }
+    }
+    this.marketStream.setSubscriptions(Array.from(keys))
   }
 
   public getOrCreateUser(userId: string): UserBotState {
@@ -124,6 +193,11 @@ export class TenantManager extends EventEmitter {
     return user
   }
 
+  /** Stops the WebSocket market stream — called on server shutdown. */
+  public shutdown(): void {
+    this.marketStream.stop()
+  }
+
   public async manualExit(userId: string, symbol: UnderlyingSymbol, reason = 'Manual exit'): Promise<UserBotState> {
     const user = this.getOrCreateUser(userId)
     const position = user.positions[symbol]
@@ -148,6 +222,7 @@ export class TenantManager extends EventEmitter {
       user.paperBalance = this.orderGateway.getOrCreatePaperAccount(userId).balance
       user.updatedAt = new Date().toISOString()
       this.emitUserUpdate(user)
+      this.syncStreamSubscriptions()
     }
     return user
   }
@@ -205,8 +280,11 @@ export class TenantManager extends EventEmitter {
 
   /** Sends a VIX early warning when thresholds are crossed (with 5-min cooldown). */
   private checkVixWarning(vrdData: { vix?: number | null } | null | undefined): void {
-    if (!this.telegramConfig || !vrdData?.vix) return
-    const vix = vrdData.vix
+    if (!this.telegramConfig) return
+    // Prefer tick-level streamed VIX over the REST-polled value
+    const streamedVix = this.marketStream.getStreamedVix()
+    const vix = streamedVix ?? vrdData?.vix
+    if (!vix || !Number.isFinite(vix)) return
     const level = vix >= 24 ? 'critical' : vix >= 18 ? 'elevated' : 'none'
     if (level === this.vixWarningLevel) return
 
@@ -403,6 +481,7 @@ export class TenantManager extends EventEmitter {
                 user.paperBalance = this.orderGateway.getOrCreatePaperAccount(userId).balance
                 user.updatedAt = new Date().toISOString()
                 this.emitUserUpdate(user)
+                this.syncStreamSubscriptions()
 
                 // Send Telegram entry alert
                 this.sendEntryAlert(user, newPos, symbol, {

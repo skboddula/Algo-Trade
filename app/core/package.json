@@ -21,6 +21,7 @@
     "fastify": "^4.28.1",
     "pino": "^9.2.0",
     "pino-pretty": "^11.2.1",
+    "protobufjs": "^8.8.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
