@@ -35,6 +35,12 @@ import {
   setupVisibilityWarning,
 } from '@/lib/pwa'
 import {
+  INDIA_VIX_INSTRUMENT_KEY,
+  VIX_ELEVATED_THRESHOLD,
+  VIX_CRITICAL_THRESHOLD,
+} from '@/lib/constants'
+import { sendTelegramAlert } from '@/lib/telegram'
+import {
   fetchPaperHistory,
   getIndiaDateString,
   paperTradeToActivePosition,
@@ -64,6 +70,8 @@ export function useStrategyBot(token: string | null) {
     null,
   )
   const visibilityCleanupRef = useRef<(() => void) | null>(null)
+  const streamedVixRef = useRef<number | null>(null)
+  const vixWarningLevelRef = useRef<'none' | 'elevated' | 'critical'>('none')
 
   // ─── Upstox Market Data Feed V3 stream helpers ───────────────────────────
   const getStreamedPrice = useCallback(
@@ -72,6 +80,10 @@ export function useStrategyBot(token: string | null) {
     },
     [],
   )
+
+  const getStreamedVix = useCallback((): number | null => {
+    return streamedVixRef.current
+  }, [])
 
   /**
    * Applies tick-level streamed prices to open positions between polling
@@ -144,12 +156,12 @@ export function useStrategyBot(token: string | null) {
     updateStatus({ positions: nextPositions, position: primary })
   }, [statusRef, updateStatus])
 
-  /** Keeps the stream subscribed to exactly the held position leg keys. */
+  /** Keeps the stream subscribed to held position leg keys + India VIX. */
   const syncStreamSubscriptions = useCallback(
     (positions: Record<UnderlyingSymbol, ActivePosition | null>) => {
       const stream = streamRef.current
       if (!stream) return
-      const keys = new Set<string>()
+      const keys = new Set<string>([INDIA_VIX_INSTRUMENT_KEY])
       for (const pos of Object.values(positions)) {
         if (!pos) continue
         if (pos.instrumentKey) keys.add(pos.instrumentKey)
@@ -173,7 +185,53 @@ export function useStrategyBot(token: string | null) {
       stream.stop()
       streamRef.current = null
     }
+    streamedVixRef.current = null
+    vixWarningLevelRef.current = 'none'
   }, [])
+
+  /**
+   * Sends a throttled Telegram early warning when streamed India VIX crosses
+   * the elevated (≥18) or critical (≥24) threshold. Hard stop itself still
+   * happens in the tick via runHardStopChecks; this is purely informational
+   * so the user has lead time to manage mirrored positions.
+   */
+  const checkVixEarlyWarning = useCallback(
+    (vix: number) => {
+      const level =
+        vix >= VIX_CRITICAL_THRESHOLD
+          ? ('critical' as const)
+          : vix >= VIX_ELEVATED_THRESHOLD
+            ? ('elevated' as const)
+            : ('none' as const)
+      if (level === vixWarningLevelRef.current) return
+      const prevLevel = vixWarningLevelRef.current
+      vixWarningLevelRef.current = level
+
+      if (level === 'critical') {
+        addLog(
+          mkLog(
+            'warn',
+            'stream',
+            `India VIX ${vix.toFixed(1)} ≥ ${VIX_CRITICAL_THRESHOLD} — hard stop at 25 imminent`,
+          ),
+        )
+        void sendTelegramAlert(
+          `⚠️ VIX ALERT — India VIX at ${vix.toFixed(1)}\nHard stop threshold is 25 — entries will be blocked soon.\nManage your open positions accordingly.`,
+        ).catch(() => {
+          // Best-effort; hard stop evaluation still runs in the tick.
+        })
+      } else if (level === 'elevated' && prevLevel === 'none') {
+        addLog(
+          mkLog(
+            'info',
+            'stream',
+            `India VIX ${vix.toFixed(1)} elevated (≥${VIX_ELEVATED_THRESHOLD}) — sell bias scoring active`,
+          ),
+        )
+      }
+    },
+    [addLog],
+  )
 
   const startStream = useCallback(() => {
     if (streamRef.current) return
@@ -182,8 +240,11 @@ export function useStrategyBot(token: string | null) {
     if (!token) return
     const stream = createUpstoxMarketStream({
       getToken: () => (stopRequestedRef.current ? null : token),
-      onTick: () => {
-        // Latest prices are held by the stream; the display timer applies them.
+      onTick: (tick) => {
+        if (tick.instrumentKey !== INDIA_VIX_INSTRUMENT_KEY) return
+        if (typeof tick.ltp !== 'number' || !Number.isFinite(tick.ltp)) return
+        streamedVixRef.current = tick.ltp
+        checkVixEarlyWarning(tick.ltp)
       },
       onStatus: (status, detail) => {
         if (status === 'open') {
@@ -221,7 +282,7 @@ export function useStrategyBot(token: string | null) {
       () => refreshDisplayedStreamPrices(),
       5000,
     )
-  }, [token, addLog, refreshDisplayedStreamPrices])
+  }, [token, addLog, refreshDisplayedStreamPrices, checkVixEarlyWarning])
 
   /** Requests a screen wake lock and visibility warnings for always-on operation. */
   const startAlwaysOn = useCallback(() => {
@@ -557,11 +618,22 @@ export function useStrategyBot(token: string | null) {
             vrd: symVrdData,
             globalIndices: symMarket.globalIndices,
           }
-          const symSignal = getFinalSignal(symSignalData, config)
+          // Prefer tick-level India VIX from the WebSocket stream over the
+          // REST-polled value; falls back automatically when the stream is
+          // disconnected (getStreamedVix returns null).
+          const streamedVix = getStreamedVix()
+          const mergedVrd: VrdData =
+            streamedVix !== null && Number.isFinite(streamedVix)
+              ? { ...symVrdData, vix: streamedVix }
+              : symVrdData
+          const symSignal = getFinalSignal(
+            { ...symSignalData, vrd: mergedVrd },
+            config,
+          )
           symbolSignals[sym] = symSignal
           symbolIndicators[sym] = symIndicators
-          symbolVrds[sym] = symVrdData
-          symbolHardStops[sym] = runHardStopChecks(symVrdData)
+          symbolVrds[sym] = mergedVrd
+          symbolHardStops[sym] = runHardStopChecks(mergedVrd)
 
           log(
             'info',
@@ -794,6 +866,7 @@ export function useStrategyBot(token: string | null) {
     evaluateAndExit,
     statusRef,
     getStreamedPrice,
+    getStreamedVix,
     syncStreamSubscriptions,
   ])
 

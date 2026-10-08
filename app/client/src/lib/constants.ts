@@ -49,6 +49,13 @@ export const API_MARKET_OPTION_CHAIN = '/api/market/option-chain'
 export const API_MARKET_QUOTES = '/api/market/quotes'
 export const API_MARKET_FEED_AUTHORIZE = '/api/market/feed-authorize'
 export const API_NOTIFY_TELEGRAM = '/api/notify/telegram'
+
+/** Upstox instrument key for streaming India VIX on Market Data Feed V3. */
+export const INDIA_VIX_INSTRUMENT_KEY = 'NSE_INDEX|India VIX'
+
+/** VIX thresholds for early-warning alerts (hard stop bounds are 10 and 25). */
+export const VIX_ELEVATED_THRESHOLD = 18
+export const VIX_CRITICAL_THRESHOLD = 24
 export const API_MARKET_INDICES = '/api/market/indices'
 
 export const MCP_UPSTOX_URL = 'https://mcp.upstox.com/mcp'
