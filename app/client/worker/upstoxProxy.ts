@@ -1204,7 +1204,7 @@ export async function handleFeedAuthorize(request: Request): Promise<Response> {
   let upstream: Response
   try {
     upstream = await fetchWithTimeout(
-      'https://api.upstox.com/feed/market-data-feed/authorize',
+      'https://api.upstox.com/v3/feed/market-data-feed/authorize',
       {
         headers: {
           Authorization: `Bearer ${body.token}`,
