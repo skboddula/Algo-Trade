@@ -18,6 +18,7 @@ import {
   ExternalLink,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
+import { EquityCurveChart } from '@/components/dashboard/strategy/equity-curve-chart'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -1278,6 +1279,9 @@ export function LiveTradesPage() {
               {error}
             </div>
           )}
+
+          {/* Equity Curve — shows cumulative P&L over time */}
+          {mode === 'paper' && <EquityCurveChart />}
 
           {/* Loading skeleton */}
           {loading && !dataset && (
