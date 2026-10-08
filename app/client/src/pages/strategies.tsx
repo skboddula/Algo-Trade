@@ -68,6 +68,7 @@ export function StrategiesPage({ bot, token }: StrategiesPageProps) {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         logErrorCount={errorLogsCount}
+        streamHealth={bot.streamHealth}
       />
 
       {/* Data feed status */}

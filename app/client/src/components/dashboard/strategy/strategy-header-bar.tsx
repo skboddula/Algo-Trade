@@ -1,5 +1,6 @@
 import type { ExecutionMode, ActivePosition } from '@/lib/types'
 import type { BotState } from '@/hooks/useStrategyBot'
+import type { StreamHealth } from '@/hooks/useBotState'
 import { useEffect, useState, useMemo } from 'react'
 import {
   AlertTriangle,
@@ -33,6 +34,45 @@ const STATE_LABEL: Record<BotState, string> = {
   STOPPED: 'Stopped',
 }
 
+const STREAM_HEALTH_CONFIG: Record<
+  StreamHealth,
+  { icon: string; label: string; className: string; tooltip: string }
+> = {
+  connected: {
+    icon: '🟢',
+    label: 'Stream',
+    className: 'text-success border-success/30 bg-success/10',
+    tooltip:
+      'Upstox WebSocket stream connected — tick-level prices and India VIX streaming active',
+  },
+  connecting: {
+    icon: '🟡',
+    label: 'Connecting',
+    className: 'text-warning border-warning/30 bg-warning/10',
+    tooltip: 'Establishing WebSocket connection to Upstox Market Data Feed V3',
+  },
+  reconnecting: {
+    icon: '🟡',
+    label: 'Reconnecting',
+    className: 'text-warning border-warning/30 bg-warning/10',
+    tooltip:
+      'WebSocket connection lost — reconnecting with exponential backoff; REST polling continues',
+  },
+  disconnected: {
+    icon: '🔴',
+    label: 'Stream Down',
+    className: 'text-destructive border-destructive/30 bg-destructive/10',
+    tooltip:
+      'WebSocket stream disconnected — falling back to REST polling (60s intervals)',
+  },
+  disabled: {
+    icon: '⚪',
+    label: 'Stream Off',
+    className: 'text-muted-foreground border-border bg-muted',
+    tooltip: 'WebSocket stream disabled or bot stopped — REST polling only',
+  },
+}
+
 export function StrategyHeaderBar({
   state,
   position,
@@ -41,6 +81,7 @@ export function StrategyHeaderBar({
   pollingIntervalSec,
   start,
   stop,
+  streamHealth,
   executionMode,
   paperBalance,
   token,
@@ -63,6 +104,7 @@ export function StrategyHeaderBar({
   onTabChange: (tab: string) => void
   logErrorCount?: number
   underlyingMode?: string
+  streamHealth?: StreamHealth
 }) {
   const [secsUntilTick, setSecsUntilTick] = useState(pollingIntervalSec)
 
@@ -104,6 +146,17 @@ export function StrategyHeaderBar({
               >
                 {executionMode === 'paper' ? 'Paper' : 'Live'}
               </Badge>
+              {streamHealth && (
+                <span
+                  className={`flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full border ${STREAM_HEALTH_CONFIG[streamHealth].className}`}
+                  title={STREAM_HEALTH_CONFIG[streamHealth].tooltip}
+                >
+                  {STREAM_HEALTH_CONFIG[streamHealth].icon}
+                  <span className="hidden sm:inline">
+                    {STREAM_HEALTH_CONFIG[streamHealth].label}
+                  </span>
+                </span>
+              )}
               {(() => {
                 const niftyExp = getUpcomingIndexExpiry('NIFTY 50')
                 const bankExp = getUpcomingIndexExpiry('BANKNIFTY')

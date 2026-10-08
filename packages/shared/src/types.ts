@@ -231,6 +231,8 @@ export interface StrategyConfig {
   moderateGap: number
   maxProfitPct: number
   maxLossPct: number
+  /** Trailing stop percentage from peak favorable price (default 5). */
+  trailPct?: number
   maxTradesPerDay: number
   lastEntryTime: string
   pollingIntervalSec: number
@@ -351,6 +353,7 @@ export const DEFAULT_CONFIG: StrategyConfig = {
   moderateGap: 3,
   maxProfitPct: 10,
   maxLossPct: 5,
+  trailPct: 5,
   maxTradesPerDay: 3,
   lastEntryTime: '14:30',
   pollingIntervalSec: 60,

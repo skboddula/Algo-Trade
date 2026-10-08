@@ -146,7 +146,7 @@ export function shouldExit(
   position: ActivePosition,
   currentData: AllSignalData,
   currentPrice: number,
-  config: Pick<StrategyConfig, 'maxProfitPct' | 'maxLossPct'>,
+  config: Pick<StrategyConfig, 'maxProfitPct' | 'maxLossPct' | 'trailPct'>,
 ): { exit: boolean; reason: string } {
   let pct: number
   if (position.legs && position.legs.length > 0) {
@@ -177,6 +177,31 @@ export function shouldExit(
       exit: true,
       reason: `Stop loss -${Math.abs(pct).toFixed(1)}% triggered`,
     }
+
+  // Trailing stop: exit when the price retraces trailPct% from the peak
+  // favorable price, but only when the position is in profit.
+  const trailPct = config.trailPct
+  const peak = position.peakFavorablePrice
+  if (trailPct !== undefined && trailPct > 0 && peak !== undefined) {
+    const isSelling = position.tradeType === TRADE_TYPE_SELLING
+    if (isSelling && peak < position.entryPrice) {
+      const trailPrice = peak * (1 + trailPct / 100)
+      if (currentPrice >= trailPrice) {
+        return {
+          exit: true,
+          reason: `Trailing stop — price ${currentPrice.toFixed(2)} rose ${trailPct}% from peak ${peak.toFixed(2)}`,
+        }
+      }
+    } else if (!isSelling && peak > position.entryPrice) {
+      const trailPrice = peak * (1 - trailPct / 100)
+      if (currentPrice <= trailPrice) {
+        return {
+          exit: true,
+          reason: `Trailing stop — price ${currentPrice.toFixed(2)} dropped ${trailPct}% from peak ${peak.toFixed(2)}`,
+        }
+      }
+    }
+  }
 
   const v4 = getV4Signal(currentData.indicators)
   const isSellingMode = position.tradeType === TRADE_TYPE_SELLING

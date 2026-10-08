@@ -26,6 +26,13 @@ import type { SourceStatus, BotLog, GlobalIndexItem } from '@/lib/marketService'
 
 export type BotState = 'IDLE' | 'RUNNING' | 'ORDERED' | 'STOPPED'
 
+export type StreamHealth =
+  | 'disabled'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'disconnected'
+
 export interface BotStatus {
   state: BotState
   position: ActivePosition | null
@@ -41,6 +48,7 @@ export interface BotStatus {
     blockedDirection?: 'CE' | 'PE' | 'BOTH' | 'NONE'
     reasons: string[]
   }
+  streamHealth: StreamHealth
   lastUpdated: string | null
   error: string | null
   tradesCount: number
@@ -277,6 +285,7 @@ const INITIAL: BotStatus = {
   finalSignal: null,
   symbolSignals: {},
   hardStop: { blocked: false, blockedDirection: 'NONE', reasons: [] },
+  streamHealth: 'disabled',
   lastUpdated: null,
   error: null,
   tradesCount: 0,

@@ -77,6 +77,7 @@ export function useStrategyBot(token: string | null) {
   )
   const vixWarningLevelRef = useRef<'none' | 'elevated' | 'critical'>('none')
   const lastCriticalAlertAtRef = useRef<number>(0)
+  const dailySummaryDateRef = useRef<string | null>(null)
 
   // ─── Upstox Market Data Feed V3 stream helpers ───────────────────────────
   const getStreamedPrice = useCallback(
@@ -101,8 +102,9 @@ export function useStrategyBot(token: string | null) {
 
   /**
    * Applies tick-level streamed prices to open positions between polling
-   * ticks for live PnL display. Guarded by isTickingRef so it never races
-   * with an in-flight tick; ticks still own exit decisions.
+   * ticks for live PnL display and trailing-stop peak tracking. Guarded by
+   * isTickingRef so it never races with an in-flight tick; ticks still own
+   * final exit decisions, but the peak is captured at stream-tick precision.
    */
   const refreshDisplayedStreamPrices = useCallback(() => {
     const stream = streamRef.current
@@ -119,6 +121,21 @@ export function useStrategyBot(token: string | null) {
       if (!pos) continue
       const key = sym as UnderlyingSymbol
 
+      // Track the peak favorable price from streamed ticks (every 5s).
+      // Buying: peak = max; selling: peak = min.
+      const posStreamPrice = stream.getLatestPrice(pos.instrumentKey)
+      let newPeak: number | undefined
+      if (posStreamPrice != null) {
+        const isSelling = pos.tradeType === 'selling'
+        newPeak =
+          pos.peakFavorablePrice === undefined
+            ? posStreamPrice
+            : isSelling
+              ? Math.min(pos.peakFavorablePrice, posStreamPrice)
+              : Math.max(pos.peakFavorablePrice, posStreamPrice)
+        if (newPeak !== pos.peakFavorablePrice) changed = true
+      }
+
       if (pos.legs && pos.legs.length > 0) {
         let legChanged = false
         const updatedLegs = pos.legs.map((leg) => {
@@ -132,7 +149,7 @@ export function useStrategyBot(token: string | null) {
               : (streamed - leg.entryPrice) * leg.quantity
           return { ...leg, currentPrice: streamed, unrealizedPnl }
         })
-        if (legChanged) {
+        if (legChanged || newPeak !== undefined) {
           const totalUnrealizedPnl = updatedLegs.reduce(
             (sum, leg) => sum + (leg.unrealizedPnl ?? 0),
             0,
@@ -146,17 +163,27 @@ export function useStrategyBot(token: string | null) {
             legs: updatedLegs,
             currentPrice: primaryLeg?.currentPrice ?? pos.currentPrice,
             unrealizedPnl: totalUnrealizedPnl,
+            peakFavorablePrice: newPeak ?? pos.peakFavorablePrice,
           }
           changed = true
         }
       } else {
         const streamed = stream.getLatestPrice(pos.instrumentKey)
-        if (streamed != null && streamed !== pos.currentPrice) {
+        if (
+          (streamed != null && streamed !== pos.currentPrice) ||
+          newPeak !== undefined
+        ) {
           const isSelling = pos.tradeType === 'selling'
+          const price = streamed ?? pos.currentPrice ?? pos.entryPrice
           const unrealizedPnl = isSelling
-            ? (pos.entryPrice - streamed) * pos.quantity
-            : (streamed - pos.entryPrice) * pos.quantity
-          nextPositions[key] = { ...pos, currentPrice: streamed, unrealizedPnl }
+            ? (pos.entryPrice - price) * pos.quantity
+            : (price - pos.entryPrice) * pos.quantity
+          nextPositions[key] = {
+            ...pos,
+            currentPrice: streamed ?? pos.currentPrice,
+            unrealizedPnl,
+            peakFavorablePrice: newPeak ?? pos.peakFavorablePrice,
+          }
           changed = true
         }
       }
@@ -293,6 +320,7 @@ export function useStrategyBot(token: string | null) {
               'Upstox market stream connected — tick-level prices active',
             ),
           )
+          updateStatus({ streamHealth: 'connected' })
         } else if (status === 'reconnecting') {
           addLog(
             mkLog(
@@ -301,6 +329,7 @@ export function useStrategyBot(token: string | null) {
               `market stream ${detail ?? 'reconnecting'}`,
             ),
           )
+          updateStatus({ streamHealth: 'reconnecting' })
         } else if (status === 'closed') {
           addLog(
             mkLog(
@@ -311,6 +340,13 @@ export function useStrategyBot(token: string | null) {
                 : 'market stream closed (falling back to REST prices)',
             ),
           )
+          updateStatus({
+            streamHealth: stopRequestedRef.current
+              ? 'disabled'
+              : 'disconnected',
+          })
+        } else if (status === 'connecting') {
+          updateStatus({ streamHealth: 'connecting' })
         }
       },
     })
@@ -320,7 +356,103 @@ export function useStrategyBot(token: string | null) {
       () => refreshDisplayedStreamPrices(),
       5000,
     )
-  }, [token, addLog, refreshDisplayedStreamPrices, checkVixEarlyWarning])
+  }, [
+    token,
+    addLog,
+    refreshDisplayedStreamPrices,
+    checkVixEarlyWarning,
+    updateStatus,
+  ])
+
+  /**
+   * Sends a daily trading summary to Telegram after EOD, once per day.
+   * Triggered when the bot stops after cutoff with no open positions.
+   */
+  const sendDailySummary = useCallback(() => {
+    const today = getIndiaDateString()
+    if (dailySummaryDateRef.current === today) return
+    dailySummaryDateRef.current = today
+
+    void (async () => {
+      try {
+        const summary = await fetchPaperHistory()
+        const trades = (summary.trades ?? []).filter(
+          (t) => getIndiaDateString(new Date(t.opened_at)) === today,
+        )
+        const closed = trades.filter((t) => t.status === 'CLOSED')
+        const wins = closed.filter((t) => (t.realized_pnl ?? 0) > 0)
+        const losses = closed.filter((t) => (t.realized_pnl ?? 0) <= 0)
+        const realizedPnl = closed.reduce(
+          (s, t) => s + (t.realized_pnl ?? 0),
+          0,
+        )
+        const open = trades.filter((t) => t.status === 'OPEN')
+
+        const best = wins.length
+          ? wins.reduce((a, b) =>
+              (a.realized_pnl ?? 0) >= (b.realized_pnl ?? 0) ? a : b,
+            )
+          : null
+        const worst = losses.length
+          ? losses.reduce((a, b) =>
+              (a.realized_pnl ?? 0) <= (b.realized_pnl ?? 0) ? a : b,
+            )
+          : null
+
+        const fmtPnl = (paise: number) =>
+          `${paise >= 0 ? '+' : '−'}₹${(Math.abs(paise) / 100).toFixed(2)}`
+
+        const lines = [
+          `📊 DAILY SUMMARY — ${today}`,
+          `━━━━━━━━━━━━━━━━━━━━`,
+          `Trades: ${trades.length} | Wins: ${wins.length} | Losses: ${losses.length}${open.length ? ` | Open: ${open.length}` : ''}`,
+          `Realized PnL: ${fmtPnl(realizedPnl)}`,
+          `Paper Balance: ₹${(summary.account.balance / 100).toFixed(2)}`,
+        ]
+        if (best) {
+          const meta = JSON.parse(best.metadata_json ?? '{}') as {
+            underlyingSymbol?: string
+          }
+          lines.push(
+            `Best: ${meta.underlyingSymbol ?? '—'} ${best.direction} ${fmtPnl(best.realized_pnl ?? 0)}`,
+          )
+        }
+        if (worst) {
+          const meta = JSON.parse(worst.metadata_json ?? '{}') as {
+            underlyingSymbol?: string
+          }
+          lines.push(
+            `Worst: ${meta.underlyingSymbol ?? '—'} ${worst.direction} ${fmtPnl(worst.realized_pnl ?? 0)}`,
+          )
+        }
+        lines.push(`━━━━━━━━━━━━━━━━━━━━`)
+        if (streamedVixTickRef.current) {
+          lines.push(`VIX (last): ${streamedVixTickRef.current.ltp.toFixed(1)}`)
+        }
+        lines.push(`Stream: ${statusRef.current.streamHealth}`)
+
+        const sent = await sendTelegramAlert(lines.join('\n'))
+        if (sent) {
+          addLog(mkLog('info', 'bot', 'Daily summary sent to Telegram'))
+        } else {
+          addLog(mkLog('warn', 'bot', 'Daily summary Telegram alert not sent'))
+          // Allow retry on next tick if send failed.
+          dailySummaryDateRef.current = null
+        }
+      } catch (error) {
+        addLog(
+          mkLog(
+            'warn',
+            'bot',
+            `Daily summary failed: ${(error as Error).message}`,
+          ),
+        )
+        dailySummaryDateRef.current = null
+      }
+    })().catch(() => {
+      dailySummaryDateRef.current = null
+    })
+  }, [addLog, statusRef])
 
   /** Requests a screen wake lock and visibility warnings for always-on operation. */
   const startAlwaysOn = useCallback(() => {
@@ -869,6 +1001,11 @@ export function useStrategyBot(token: string | null) {
           error: undefined,
         })
         syncStreamSubscriptions(curPositions)
+
+        // Send the daily summary after EOD when all positions are closed.
+        if (afterCutoff && !hasActivePosition && nextState === 'STOPPED') {
+          sendDailySummary()
+        }
       }
 
       const newlyEnteredPositions = await evaluateAndEnter(ctx)
@@ -905,6 +1042,7 @@ export function useStrategyBot(token: string | null) {
     statusRef,
     getStreamedPrice,
     getStreamedVix,
+    sendDailySummary,
     syncStreamSubscriptions,
   ])
 

@@ -75,6 +75,28 @@ export function isTerminalPaperExitError(error: string): boolean {
   return /\[(TRADE_ALREADY_CLOSED|TRADE_NOT_FOUND)\]/.test(error)
 }
 
+/**
+ * Computes the updated peak favorable price for the trailing stop.
+ * Buying tracks the highest price; selling tracks the lowest.
+ * Returns undefined when the peak doesn't change (no update needed).
+ */
+export function updatePeakFavorablePrice(
+  position: ActivePosition,
+  currentPrice: number,
+): number | undefined {
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0) return undefined
+  const isSelling = position.tradeType === 'selling'
+  const current = position.peakFavorablePrice
+  if (isSelling) {
+    const peak =
+      current === undefined ? currentPrice : Math.min(current, currentPrice)
+    return peak !== current ? peak : undefined
+  }
+  const peak =
+    current === undefined ? currentPrice : Math.max(current, currentPrice)
+  return peak !== current ? peak : undefined
+}
+
 export function indexOptionPrices(
   optionChain: OptionData[],
 ): Map<string, number> {
@@ -747,11 +769,21 @@ export function useTradeExecution() {
             : (currentPrice - pos.entryPrice) * pos.quantity
         }
 
+        // Update the peak favorable price for the trailing stop before
+        // evaluating exit conditions and persisting the position.
+        // Buying tracks the highest price; selling tracks the lowest.
+        const updatedPeak = updatePeakFavorablePrice(pos, currentPrice)
+        const posForExit: ActivePosition =
+          updatedPeak !== undefined
+            ? { ...pos, peakFavorablePrice: updatedPeak }
+            : pos
+
         curPositions[sym] = {
           ...pos,
           currentPrice,
           unrealizedPnl: totalUnrealizedPnl,
           legs: updatedLegs,
+          peakFavorablePrice: updatedPeak ?? pos.peakFavorablePrice,
         }
 
         // Use per-symbol hard stop if available, fall back to shared primary hard stop
@@ -760,6 +792,7 @@ export function useTradeExecution() {
           afterCutoff ||
           (symHardStop.blocked && symHardStop.blockedDirection === 'BOTH')
         const exitIndicators = symbolIndicators[sym] ?? indicators
+
         let signalExit = false
         let signalReason = ''
         if (!forcedExit && exitIndicators) {
@@ -770,7 +803,12 @@ export function useTradeExecution() {
             globalIndices:
               symMarket?.globalIndices ?? primaryMarket.globalIndices,
           }
-          const decision = shouldExit(pos, symSigData, currentPrice, config)
+          const decision = shouldExit(
+            posForExit,
+            symSigData,
+            currentPrice,
+            config,
+          )
           signalExit = decision.exit
           signalReason = decision.reason
         }

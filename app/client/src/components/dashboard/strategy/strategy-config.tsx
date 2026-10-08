@@ -434,6 +434,14 @@ export function StrategyConfig({
               tooltip="Hard stop-loss percentage limit to close trade and prevent catastrophic loss."
             />
             <Field
+              label="Trailing Stop %"
+              value={local.trailPct ?? 5}
+              min={0}
+              step={0.5}
+              onChange={(v) => set('trailPct', Number(v))}
+              tooltip="Exit when the price retraces this percentage from the peak favorable price, locking in profits as the position moves favorably. Set to 0 to disable."
+            />
+            <Field
               label="Max Trades/Day"
               value={local.maxTradesPerDay}
               min={1}
