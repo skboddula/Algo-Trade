@@ -140,7 +140,7 @@ describe('V5 Strategy Scoring & Risk Engine Suite', () => {
 
     const result = runHardStopChecks(position, dummyData, DEFAULT_STRATEGY_CONFIG)
     expect(result.triggered).toBe(true)
-    expect(result.reason).toContain('Trailing Stop Loss')
+    expect(result.reason).toContain('Trailing stop')
   })
 
   it('triggers max loss stop when position exceeds maxLossPct', () => {

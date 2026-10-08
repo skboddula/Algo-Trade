@@ -12,6 +12,7 @@ import { computeAllIndicators } from './indicators'
 import { getFinalSignal } from './strategyEngine'
 import { DEFAULT_STRATEGY_CONFIG } from '../constants'
 import { getIndiaTime } from '../utils/timeUtils'
+import { fetchWithRetry } from '../utils/http/fetchRetry'
 
 export interface MasterIngestorConfig {
   pollingIntervalMs: number
@@ -136,7 +137,7 @@ export class MasterIngestionEngine extends EventEmitter {
         // Live Upstox fetch from primary token
         try {
           const instrumentKey = UNDERLYING_INSTRUMENT_KEYS[symbol]
-          const quoteRes = await fetch(
+          const quoteRes = await fetchWithRetry(
             `${this.config.upstoxApiBaseUrl}/market-quote/quotes?instrument_key=${encodeURIComponent(instrumentKey)}`,
             {
               headers: {

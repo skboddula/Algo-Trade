@@ -249,6 +249,38 @@ export function getFinalSignal(
   const positionSize =
     confidence === CONFIDENCE_STRONG ? POSITION_SIZE_FULL : POSITION_SIZE_HALF
 
+  // Multi-timeframe confluence filter: block counter-trend entries where the
+  // 1-min signal disagrees with the 5-min resampled EMA 10/42 trend.
+  // Prevents buying calls during a higher-timeframe downtrend (and vice versa).
+  // Neutral ('Hold') or undefined higherTimeframeTrend does not block.
+  if (config.useMultiTimeframe !== false && data.indicators) {
+    const htTrend = data.indicators.higherTimeframeTrend
+    if (signal === SIGNAL_BUY_CE && htTrend === SIGNAL_SELL) {
+      return {
+        signal: SIGNAL_NO_TRADE,
+        confidence,
+        positionSize: CONFIDENCE_NONE,
+        v3: data.v3,
+        v4,
+        bullScore: bull.score,
+        bearScore: bear.score,
+        scoreMax,
+      }
+    }
+    if (signal === SIGNAL_BUY_PE && htTrend === SIGNAL_BUY) {
+      return {
+        signal: SIGNAL_NO_TRADE,
+        confidence,
+        positionSize: CONFIDENCE_NONE,
+        v3: data.v3,
+        v4,
+        bullScore: bull.score,
+        bearScore: bear.score,
+        scoreMax,
+      }
+    }
+  }
+
   // Immediate exit check: prevent entering counter-trend trap
   const isBullishBias = signal === SIGNAL_BUY_CE
   const adRatio = data.vrd?.advancesDeclines?.ratio
@@ -304,22 +336,34 @@ export function runHardStopChecks(
     }
   }
 
-  // Trailing Stop Loss logic: if peak price ratcheted up, check drawdown from peak
+  // Trailing Stop Loss: configurable trail percentage from peak favorable price.
+  // Activates when the position is in profit (peak > entry for buying, peak < entry for selling).
+  // Uses config.trailPct (default 5% if not set).
   if (position.peakFavorablePrice && position.currentPrice && position.entryPrice > 0) {
     const isCE = position.direction === 'CE'
+    const isSelling = position.tradeType === 'selling'
     const peak = position.peakFavorablePrice
     const current = position.currentPrice
-    const drawdownFromPeak = isCE
-      ? ((peak - current) / peak) * 100
-      : ((current - peak) / peak) * 100
+    const trailPct = config.trailPct ?? 5
 
-    // If profit from entry was at least 10%, trailing SL is 5% from peak
-    const peakProfitPct = isCE
-      ? ((peak - position.entryPrice) / position.entryPrice) * 100
-      : ((position.entryPrice - peak) / position.entryPrice) * 100
+    // For buying CE or selling PE: favorable = price goes up → peak tracks max
+    // For buying PE or selling CE: favorable = price goes down → peak tracks min
+    // The peak already tracks the favorable direction (set in TenantManager)
+    const isInProfit = isSelling
+      ? peak < position.entryPrice // selling: lower price is favorable
+      : peak > position.entryPrice // buying: higher price is favorable
 
-    if (peakProfitPct >= 10 && drawdownFromPeak >= 5) {
-      return { triggered: true, reason: `Trailing Stop Loss triggered (-${drawdownFromPeak.toFixed(1)}% from peak)` }
+    if (isInProfit) {
+      const drawdownFromPeak = isCE
+        ? ((peak - current) / peak) * 100
+        : ((current - peak) / peak) * 100
+
+      if (drawdownFromPeak >= trailPct) {
+        return {
+          triggered: true,
+          reason: `Trailing stop — price dropped ${drawdownFromPeak.toFixed(1)}% from peak (trail: ${trailPct}%)`,
+        }
+      }
     }
   }
 
