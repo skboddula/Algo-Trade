@@ -43,6 +43,12 @@ export async function handleTelegramNotify(
   const botToken = env.TELEGRAM_BOT_TOKEN
   const chatId = env.TELEGRAM_CHAT_ID
   if (!botToken || !chatId) {
+    console.error(
+      '[telegram] NOT CONFIGURED — TELEGRAM_BOT_TOKEN:',
+      botToken ? 'SET' : 'MISSING',
+      '| TELEGRAM_CHAT_ID:',
+      chatId ? 'SET' : 'MISSING',
+    )
     return Response.json(
       {
         notified: false,
@@ -69,6 +75,12 @@ export async function handleTelegramNotify(
 
   if (!upstream.ok) {
     const detail = await upstream.text().catch(() => '')
+    console.error(
+      '[telegram] API ERROR',
+      upstream.status,
+      ':',
+      detail.slice(0, 200),
+    )
     return Response.json(
       {
         notified: false,
@@ -79,5 +91,11 @@ export async function handleTelegramNotify(
     )
   }
 
+  console.log(
+    '[telegram] DELIVERED — length:',
+    message.length,
+    'chars, chat_id:',
+    chatId,
+  )
   return Response.json({ notified: true })
 }
