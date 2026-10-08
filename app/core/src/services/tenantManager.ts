@@ -24,6 +24,7 @@ import {
   type TelegramConfig,
 } from './telegramAlerts'
 import { UpstoxMarketStream, type StreamTick } from './marketStream'
+import { loadState, saveState } from '../utils/store'
 
 export class TenantManager extends EventEmitter {
   private users: Map<string, UserBotState> = new Map()
@@ -57,6 +58,9 @@ export class TenantManager extends EventEmitter {
       }
     })
     this.marketStream.start()
+
+    // Restore user states from disk
+    this.restoreUserStates()
 
     // Bind to master market ticks (REST polling — fallback/supplement to the stream)
     this.masterIngestor.on('marketTick', (tick) => {
@@ -182,6 +186,7 @@ export class TenantManager extends EventEmitter {
     user.error = undefined
     user.updatedAt = new Date().toISOString()
     this.emitUserUpdate(user)
+    this.persistUserStates()
     return user
   }
 
@@ -190,12 +195,35 @@ export class TenantManager extends EventEmitter {
     user.state = 'STOPPED'
     user.updatedAt = new Date().toISOString()
     this.emitUserUpdate(user)
+    this.persistUserStates()
     return user
   }
 
   /** Stops the WebSocket market stream — called on server shutdown. */
   public shutdown(): void {
     this.marketStream.stop()
+    this.persistUserStates()
+  }
+
+  /** Restores user bot states from disk on startup. */
+  private restoreUserStates(): void {
+    const saved = loadState<Record<string, UserBotState>>('user_states')
+    if (!saved) return
+    for (const [userId, state] of Object.entries(saved)) {
+      this.users.set(userId, state)
+      console.log(
+        `[tenantManager] Restored user ${userId}: state=${state.state}, positions=${Object.values(state.positions).filter(Boolean).length}`,
+      )
+    }
+  }
+
+  /** Persists all user bot states to disk (call after significant changes). */
+  private persistUserStates(): void {
+    const states: Record<string, UserBotState> = {}
+    for (const [userId, state] of this.users.entries()) {
+      states[userId] = state
+    }
+    saveState('user_states', states)
   }
 
   public async manualExit(userId: string, symbol: UnderlyingSymbol, reason = 'Manual exit'): Promise<UserBotState> {
@@ -223,6 +251,7 @@ export class TenantManager extends EventEmitter {
       user.updatedAt = new Date().toISOString()
       this.emitUserUpdate(user)
       this.syncStreamSubscriptions()
+      this.persistUserStates()
     }
     return user
   }
@@ -482,6 +511,7 @@ export class TenantManager extends EventEmitter {
                 user.updatedAt = new Date().toISOString()
                 this.emitUserUpdate(user)
                 this.syncStreamSubscriptions()
+                this.persistUserStates()
 
                 // Send Telegram entry alert
                 this.sendEntryAlert(user, newPos, symbol, {

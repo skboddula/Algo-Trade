@@ -5,6 +5,12 @@ import type {
   PaperTradeRecord,
 } from '../types'
 import { DEFAULT_INITIAL_PAPER_BALANCE } from '../constants'
+import {
+  loadState,
+  saveState,
+  loadRecords,
+  appendRecord,
+} from '../utils/store'
 
 export interface OrderPlacementRequest {
   userId: string
@@ -42,6 +48,38 @@ export class OrderGateway {
 
   constructor(upstoxApiBaseUrl = 'https://api.upstox.com/v2') {
     this.upstoxApiBaseUrl = upstoxApiBaseUrl
+    this.restoreFromDisk()
+  }
+
+  /** Restores paper accounts and trade history from disk on startup. */
+  private restoreFromDisk(): void {
+    const accounts = loadState<Record<string, PaperAccount>>('paper_accounts')
+    if (accounts) {
+      for (const [userId, account] of Object.entries(accounts)) {
+        this.paperAccounts.set(userId, account)
+      }
+      console.log(`[orderGateway] Restored ${this.paperAccounts.size} paper account(s) from disk`)
+    }
+
+    const trades = loadRecords<PaperTradeRecord>('paper_trades')
+    for (const trade of trades) {
+      this.paperTrades.set(trade.id, trade)
+    }
+    console.log(`[orderGateway] Restored ${this.paperTrades.size} paper trade(s) from disk`)
+  }
+
+  /** Persists paper accounts to disk (call after balance changes). */
+  private persistAccounts(): void {
+    const accounts: Record<string, PaperAccount> = {}
+    for (const [userId, account] of this.paperAccounts.entries()) {
+      accounts[userId] = account
+    }
+    saveState('paper_accounts', accounts)
+  }
+
+  /** Persists a single trade record to the append-only JSONL log. */
+  private persistTrade(trade: PaperTradeRecord): void {
+    appendRecord('paper_trades', trade)
   }
 
   public getOrCreatePaperAccount(userId: string): PaperAccount {
@@ -134,6 +172,7 @@ export class OrderGateway {
     }
 
     this.paperTrades.set(tradeId, record)
+    this.persistTrade(record)
 
     return {
       success: true,
@@ -167,7 +206,11 @@ export class OrderGateway {
       record.realizedPnl = realizedPnlPaise
       record.closedAt = new Date().toISOString()
       record.metadata = { ...(record.metadata || {}), exitReason: req.reason }
+      this.persistTrade(record)
     }
+
+    // Persist the updated account balance after every exit
+    this.persistAccounts()
 
     return {
       success: true,
