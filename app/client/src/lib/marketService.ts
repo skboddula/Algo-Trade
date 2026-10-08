@@ -83,12 +83,37 @@ export function mkLog(
 }
 
 // ─── Safe JSON fetch — returns [data, null] or [null, errorMsg] ───────────────
+// Maximum seconds to wait before retrying a 429 — if Upstox says wait longer
+// than this, we skip the retry to avoid blocking the bot's 60s polling window.
+const MAX_429_WAIT_SEC = 10
+
+function parseRetryAfter(response: Response): number | null {
+  const raw = response.headers.get('Retry-After')
+  if (!raw) return null
+  const sec = parseInt(raw, 10)
+  if (!Number.isFinite(sec) || sec < 0) return null
+  return Math.min(sec, MAX_429_WAIT_SEC)
+}
+
 export async function safeFetch<T>(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<[T | null, string | null]> {
   try {
-    const res = await fetch(input, init)
+    let res = await fetch(input, init)
+
+    // ── 429 Retry: wait per Retry-After header, then retry once ──────────
+    // Prevents missing data (option chain, VIX, FII/DII) due to rate
+    // limiting — a 429'd option chain means the strategy engine evaluates
+    // signals without institutional data, potentially missing or corrupting
+    // entry decisions. One retry with the server-recommended delay keeps
+    // the tick within its 60-second window.
+    if (res.status === 429) {
+      const retryAfterSec = parseRetryAfter(res) ?? 2
+      await new Promise((resolve) => setTimeout(resolve, retryAfterSec * 1000))
+      res = await fetch(input, init)
+    }
+
     const data = (await res.json()) as
       | T
       | {
