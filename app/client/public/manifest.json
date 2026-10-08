@@ -1,0 +1,19 @@
+{
+  "name": "AlgoTrade Dashboard",
+  "short_name": "AlgoTrade",
+  "description": "Automated NIFTY50 Options Trading bot with real-time scoring, paper trading, and Telegram alerts.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

@@ -5,8 +5,11 @@ import './index.css'
 import App from './App.tsx'
 import { Auth0Provider } from '@auth0/auth0-react'
 import { auth0Config, isAuth0Enabled } from './lib/auth0-config.ts'
+import { registerServiceWorker } from './lib/pwa'
 
 const root = createRoot(document.getElementById('root')!)
+
+registerServiceWorker()
 
 if (isAuth0Enabled()) {
   root.render(

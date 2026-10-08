@@ -30,6 +30,11 @@ import {
 import { useTradeExecution, type ExecutionContext } from './useTradeExecution'
 import { createUpstoxMarketStream } from '@/lib/upstoxMarketStream'
 import {
+  requestWakeLock,
+  releaseWakeLock,
+  setupVisibilityWarning,
+} from '@/lib/pwa'
+import {
   fetchPaperHistory,
   getIndiaDateString,
   paperTradeToActivePosition,
@@ -58,6 +63,7 @@ export function useStrategyBot(token: string | null) {
   const streamDisplayTimerRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   )
+  const visibilityCleanupRef = useRef<(() => void) | null>(null)
 
   // ─── Upstox Market Data Feed V3 stream helpers ───────────────────────────
   const getStreamedPrice = useCallback(
@@ -217,6 +223,33 @@ export function useStrategyBot(token: string | null) {
     )
   }, [token, addLog, refreshDisplayedStreamPrices])
 
+  /** Requests a screen wake lock and visibility warnings for always-on operation. */
+  const startAlwaysOn = useCallback(() => {
+    void requestWakeLock().then((acquired) => {
+      if (!acquired) {
+        addLog(
+          mkLog(
+            'info',
+            'bot',
+            'Wake Lock not supported on this device — screen may sleep and pause the bot',
+          ),
+        )
+      }
+    })
+    visibilityCleanupRef.current?.()
+    visibilityCleanupRef.current = setupVisibilityWarning({
+      onHidden: (message) => {
+        addLog(mkLog('warn', 'bot', message))
+      },
+    })
+  }, [addLog])
+
+  const stopAlwaysOn = useCallback(() => {
+    void releaseWakeLock()
+    visibilityCleanupRef.current?.()
+    visibilityCleanupRef.current = null
+  }, [])
+
   useEffect(() => {
     mountedRef.current = true
     return () => {
@@ -224,8 +257,9 @@ export function useStrategyBot(token: string | null) {
       abortRef.current?.abort()
       if (timeoutRef.current) clearTimeout(timeoutRef.current)
       stopStream()
+      stopAlwaysOn()
     }
-  }, [stopStream])
+  }, [stopStream, stopAlwaysOn])
 
   const tick = useCallback(async () => {
     if (!token || stopRequestedRef.current) return
@@ -815,6 +849,7 @@ export function useStrategyBot(token: string | null) {
     )
     updateStatus({ state: 'RUNNING', error: null })
     startStream()
+    startAlwaysOn()
     void Promise.resolve()
       .then(tick)
       .finally(() => {
@@ -826,7 +861,16 @@ export function useStrategyBot(token: string | null) {
           scheduleNext()
         }
       })
-  }, [token, tick, updateStatus, addLog, scheduleNext, statusRef, startStream])
+  }, [
+    token,
+    tick,
+    updateStatus,
+    addLog,
+    scheduleNext,
+    statusRef,
+    startStream,
+    startAlwaysOn,
+  ])
 
   const stop = useCallback(() => {
     stopRequestedRef.current = true
@@ -836,6 +880,7 @@ export function useStrategyBot(token: string | null) {
     liveArmedRef.current = false
     setLiveArmed(false)
     stopStream()
+    stopAlwaysOn()
     const current = statusRef.current
     const hasOpenPosition = Object.values(current.positions).some(
       (position) => position !== null,
@@ -845,7 +890,7 @@ export function useStrategyBot(token: string | null) {
       state: hasOpenPosition ? 'STOPPED' : 'IDLE',
       error: null,
     })
-  }, [updateStatus, addLog, statusRef, stopStream])
+  }, [updateStatus, addLog, statusRef, stopStream, stopAlwaysOn])
 
   useEffect(() => {
     if (!token) {
@@ -890,6 +935,7 @@ export function useStrategyBot(token: string | null) {
       )
     }
     startStream()
+    startAlwaysOn()
 
     const resumeTimer = setTimeout(() => {
       void tick().finally(() => {
@@ -908,7 +954,16 @@ export function useStrategyBot(token: string | null) {
       if (timeoutRef.current) clearTimeout(timeoutRef.current)
       abortRef.current?.abort()
     }
-  }, [token, tick, addLog, scheduleNext, statusRef, updateStatus, startStream])
+  }, [
+    token,
+    tick,
+    addLog,
+    scheduleNext,
+    statusRef,
+    updateStatus,
+    startStream,
+    startAlwaysOn,
+  ])
 
   return { ...status, liveArmed, start, stop, clearLogs }
 }

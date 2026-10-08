@@ -20,6 +20,20 @@ export interface TelegramEntryAlert {
   maxLossPct: number
 }
 
+export interface TelegramExitAlert {
+  symbol: string
+  direction: 'CE' | 'PE'
+  executionMode: 'paper' | 'live'
+  entryPrice: number
+  exitPrice: number
+  quantity: number
+  lotSize: number
+  tradeType: 'buying' | 'selling'
+  reason: string
+  entryTime: string
+  exitTime: string
+}
+
 function fmtNum(value: number): string {
   return value.toFixed(2).replace(/\.00$/, '')
 }
@@ -68,6 +82,54 @@ export function buildEntryAlertMessage(alert: TelegramEntryAlert): string {
   }
 
   lines.push(`Signal: ${alert.signal} · ${alert.confidence} confidence`)
+  return lines.join('\n')
+}
+
+/**
+ * Builds an exit alert message with realized PnL, exit reason, and duration
+ * so the mirrored position in the other trading app can be closed manually.
+ */
+export function buildExitAlertMessage(alert: TelegramExitAlert): string {
+  const mode = alert.executionMode === 'live' ? 'LIVE' : 'PAPER'
+  const selling = alert.tradeType === 'selling'
+  const pnl = selling
+    ? (alert.entryPrice - alert.exitPrice) * alert.quantity
+    : (alert.exitPrice - alert.entryPrice) * alert.quantity
+  const entryValue = alert.entryPrice * alert.quantity
+  const pnlPct = entryValue > 0 ? (pnl / entryValue) * 100 : 0
+  const isProfit = pnl >= 0
+
+  const entryMs = new Date(alert.entryTime).getTime()
+  const exitMs = new Date(alert.exitTime).getTime()
+  const durationMin =
+    Number.isFinite(entryMs) && Number.isFinite(exitMs)
+      ? Math.max(0, Math.round((exitMs - entryMs) / 60000))
+      : null
+
+  const side = selling ? 'BUY (cover)' : 'SELL'
+  const lots =
+    alert.lotSize > 0 ? Math.round(alert.quantity / alert.lotSize) : 0
+
+  const lines: string[] = [
+    `${isProfit ? '🟢' : '🔴'} ALGO TRADE — ${mode} EXIT [${alert.symbol}]`,
+    `${side} ${alert.symbol} ${alert.direction} @ ${fmtNum(alert.exitPrice)}`,
+    `Entry: ${fmtNum(alert.entryPrice)} · Exit: ${fmtNum(alert.exitPrice)}`,
+    `Qty ${alert.quantity}${lots > 0 ? ` (${lots} lot${lots > 1 ? 's' : ''})` : ''}`,
+  ]
+  if (durationMin !== null) {
+    lines.push(
+      `Duration: ${durationMin < 60 ? `${durationMin} min` : `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`}`,
+    )
+  }
+  lines.push(
+    `PnL: ${isProfit ? '+' : '−'}₹${fmtNum(Math.abs(pnl))} (${isProfit ? '+' : '−'}${Math.abs(pnlPct).toFixed(1)}%)`,
+  )
+  lines.push(`Reason: ${alert.reason}`)
+  if (isProfit) {
+    lines.push(`✅ Close your mirrored position in the other app.`)
+  } else {
+    lines.push(`⚠️ Close your mirrored position in the other app.`)
+  }
   return lines.join('\n')
 }
 

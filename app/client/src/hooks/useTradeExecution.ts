@@ -22,7 +22,11 @@ import {
   type fetchMarket,
 } from '@/lib/marketService'
 import { getOtmStrike } from '@/lib/indicators'
-import { buildEntryAlertMessage, sendTelegramAlert } from '@/lib/telegram'
+import {
+  buildEntryAlertMessage,
+  buildExitAlertMessage,
+  sendTelegramAlert,
+} from '@/lib/telegram'
 import { notify } from '@/lib/notifications'
 import {
   isStaticIpRestrictionError,
@@ -887,6 +891,40 @@ export function useTradeExecution() {
             curPositions[sym] = null
             lastExitTimes[sym] = Date.now()
             addLog(mkLog('info', 'bot', `[${sym}] position exited: ${reason}`))
+
+            void (async () => {
+              const sent = await sendTelegramAlert(
+                buildExitAlertMessage({
+                  symbol: sym,
+                  direction: pos.direction,
+                  executionMode: isPaperPosition(pos) ? 'paper' : 'live',
+                  entryPrice: pos.entryPrice,
+                  exitPrice: currentPrice,
+                  quantity: pos.quantity,
+                  lotSize: pos.lotSize ?? 1,
+                  tradeType:
+                    pos.tradeType === 'selling'
+                      ? 'selling'
+                      : ('buying' as const),
+                  reason,
+                  entryTime: pos.entryTime,
+                  exitTime: new Date().toISOString(),
+                }),
+              )
+              if (!sent) {
+                addLog(
+                  mkLog(
+                    'warn',
+                    'order',
+                    `[${sym}] Telegram exit alert not sent`,
+                  ),
+                )
+              }
+            })().catch(() => {
+              addLog(
+                mkLog('warn', 'order', `[${sym}] Telegram exit alert failed`),
+              )
+            })
           } else {
             curPositions[sym] = {
               ...curPositions[sym],
