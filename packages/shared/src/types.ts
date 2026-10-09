@@ -227,6 +227,10 @@ export interface ActivePosition {
   legs?: PositionLeg[]
   exitedLegs?: string[]
   underlyingSymbol?: UnderlyingSymbol
+  /** Strike price of the (first) option leg, captured at entry for exit alerts. */
+  strikePrice?: number
+  /** Option expiry captured at entry for exit alerts. */
+  expiry?: string
 }
 
 export interface StrategyConfig {

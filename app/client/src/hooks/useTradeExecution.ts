@@ -582,6 +582,8 @@ export function useTradeExecution() {
             paperTradeId: positionLegs[0]?.paperTradeId,
             legs: positionLegs,
             underlyingSymbol: sym,
+            strikePrice: firstStrikePrice,
+            expiry: firstExpiry,
           }
           curTradesPerSym[sym] = (curTradesPerSym[sym] ?? 0) + 1
           newlyEnteredPositions.add(sym)
@@ -947,6 +949,8 @@ export function useTradeExecution() {
                   reason,
                   entryTime: pos.entryTime,
                   exitTime: new Date().toISOString(),
+                  strikePrice: pos.strikePrice,
+                  expiry: pos.expiry,
                 }),
               )
               if (!sent) {

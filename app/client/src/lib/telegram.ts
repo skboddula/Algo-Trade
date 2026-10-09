@@ -32,6 +32,8 @@ export interface TelegramExitAlert {
   reason: string
   entryTime: string
   exitTime: string
+  strikePrice?: number
+  expiry?: string
 }
 
 function fmtNum(value: number): string {
@@ -109,13 +111,17 @@ export function buildExitAlertMessage(alert: TelegramExitAlert): string {
   const side = selling ? 'BUY (cover)' : 'SELL'
   const lots =
     alert.lotSize > 0 ? Math.round(alert.quantity / alert.lotSize) : 0
+  const instrument = alert.strikePrice
+    ? `${alert.symbol} ${alert.strikePrice} ${alert.direction}`
+    : `${alert.symbol} ${alert.direction}`
 
   const lines: string[] = [
     `${isProfit ? '🟢' : '🔴'} ALGO TRADE — ${mode} EXIT [${alert.symbol}]`,
-    `${side} ${alert.symbol} ${alert.direction} @ ${fmtNum(alert.exitPrice)}`,
+    `${side} ${instrument} @ ${fmtNum(alert.exitPrice)}`,
     `Entry: ${fmtNum(alert.entryPrice)} · Exit: ${fmtNum(alert.exitPrice)}`,
     `Qty ${alert.quantity}${lots > 0 ? ` (${lots} lot${lots > 1 ? 's' : ''})` : ''}`,
   ]
+  if (alert.expiry) lines.push(`Expiry: ${alert.expiry}`)
   if (durationMin !== null) {
     lines.push(
       `Duration: ${durationMin < 60 ? `${durationMin} min` : `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`}`,
