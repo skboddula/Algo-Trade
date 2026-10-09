@@ -314,6 +314,7 @@ export class MasterIngestionEngine extends EventEmitter {
         indicators,
         vrdData,
         signal: finalSignal,
+        globalIndices: signalData.globalIndices ?? [],
       };
 
       this.latestSnapshots.set(symbol, snapshot);

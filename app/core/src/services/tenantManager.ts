@@ -24,6 +24,7 @@ import {
   type TelegramConfig,
 } from "./telegramAlerts";
 import { UpstoxMarketStream, type StreamTick } from "./marketStream";
+import type { BotLogService } from "./botLogService";
 import { loadState, saveState } from "../utils/store";
 
 export class TenantManager extends EventEmitter {
@@ -36,14 +37,19 @@ export class TenantManager extends EventEmitter {
   private dailySummaryDate: string | null = null;
   private marketStream: UpstoxMarketStream;
 
+  private botLogs: BotLogService | null;
+  private lastSignalBySymbol: Map<UnderlyingSymbol, string> = new Map();
+
   constructor(
     masterIngestor: MasterIngestionEngine,
     orderGateway: OrderGateway,
+    botLogs?: BotLogService,
   ) {
     super();
     this.setMaxListeners(100);
     this.masterIngestor = masterIngestor;
     this.orderGateway = orderGateway;
+    this.botLogs = botLogs ?? null;
     this.telegramConfig = getTelegramConfig();
 
     // Initialize the WebSocket market stream for tick-level prices + VIX
@@ -58,8 +64,10 @@ export class TenantManager extends EventEmitter {
         console.log(
           "[stream] Upstox market stream connected — tick-level prices active",
         );
+        this.log("info", "stream", "Upstox market stream connected — tick-level prices active");
       } else if (status === "closed" && detail) {
         console.warn(`[stream] ${detail}`);
+        this.log("warn", "stream", detail);
       }
     });
     this.marketStream.start();
@@ -201,6 +209,11 @@ export class TenantManager extends EventEmitter {
       (p) => p !== null,
     );
     user.state = hasOpenPosition ? "ORDERED" : "RUNNING";
+    this.log(
+      "info",
+      "bot",
+      `Bot started for ${userId} (${user.executionMode})${hasOpenPosition ? " — resuming open position supervision" : ""}`,
+    );
     user.error = undefined;
     user.updatedAt = new Date().toISOString();
     this.emitUserUpdate(user);
@@ -211,6 +224,12 @@ export class TenantManager extends EventEmitter {
   public stopBot(userId: string): UserBotState {
     const user = this.getOrCreateUser(userId);
     user.state = "STOPPED";
+    const openCount = Object.values(user.positions).filter((p) => p !== null).length;
+    this.log(
+      "warn",
+      "bot",
+      `Bot stopped for ${userId}${openCount > 0 ? ` — ${openCount} open position(s) left UNSUPERVISED` : ""}`,
+    );
     user.updatedAt = new Date().toISOString();
     this.emitUserUpdate(user);
     this.persistUserStates();
@@ -280,6 +299,12 @@ export class TenantManager extends EventEmitter {
 
       // Send Telegram exit alert
       this.sendExitAlert(user, position, symbol, exitPrice, reason);
+      const exitPnl = position.unrealizedPnl ?? 0;
+      this.log(
+        exitPnl >= 0 ? "info" : "warn",
+        "exit",
+        `[${symbol}] Exited ${position.direction} @ ${exitPrice.toFixed(2)} — ${reason} (PnL ₹${(exitPnl >= 0 ? "+" : "") + exitPnl.toFixed(2)})`,
+      );
 
       user.positions[symbol] = null;
       user.lastExitTimes[symbol] = Date.now();
@@ -324,7 +349,9 @@ export class TenantManager extends EventEmitter {
       maxLossPct: user.config.maxLossPct,
       trailPct: user.config.trailPct,
     });
-    sendTelegramMessage(this.telegramConfig, message).catch(() => {});
+    sendTelegramMessage(this.telegramConfig, message)
+      .then(() => this.log("info", "telegram", `[${symbol}] Entry alert sent`))
+      .catch(() => this.log("warn", "telegram", `[${symbol}] Entry alert failed`));
   }
 
   /** Sends a Telegram exit alert with PnL details. */
@@ -351,7 +378,9 @@ export class TenantManager extends EventEmitter {
       strikePrice: position.strikePrice,
       expiry: position.expiry,
     });
-    sendTelegramMessage(this.telegramConfig, message).catch(() => {});
+    sendTelegramMessage(this.telegramConfig, message)
+      .then(() => this.log("info", "telegram", `[${symbol}] Exit alert sent`))
+      .catch(() => this.log("warn", "telegram", `[${symbol}] Exit alert failed`));
   }
 
   /** Sends a VIX early warning when thresholds are crossed (with 5-min cooldown). */
@@ -367,6 +396,7 @@ export class TenantManager extends EventEmitter {
     if (level === this.vixWarningLevel) return;
 
     this.vixWarningLevel = level;
+    this.log("warn", "vix", `VIX ${vix.toFixed(2)} — ${level} level`);
     if (level === "critical") {
       const now = Date.now();
       if (now - this.lastVixAlertAt < 5 * 60000) return; // 5-min cooldown
@@ -401,6 +431,7 @@ export class TenantManager extends EventEmitter {
     );
     if (closedTrades.length === 0) return;
 
+    this.log("info", "summary", `[${user.userId}] Daily summary sent — ${closedTrades.length} closed trade(s) today`);
     const wins = closedTrades.filter((t) => (t.realizedPnl ?? 0) > 0);
     const losses = closedTrades.filter((t) => (t.realizedPnl ?? 0) <= 0);
     const realizedPnl = closedTrades.reduce(
@@ -527,6 +558,7 @@ export class TenantManager extends EventEmitter {
 
           // Check EOD auto square-off
           if (afterCutoff) {
+            this.log("info", "eod", `[${symbol}] 15:15 cutoff reached — squaring off open position`);
             await this.manualExit(
               userId,
               symbol,
@@ -578,8 +610,10 @@ export class TenantManager extends EventEmitter {
             // high-severity macro news block new entries entirely.
             const hardStop = checkEntryHardStops(snapshot.vrdData ?? null);
             if (hardStop.blocked) {
+              this.log("warn", "hard-stop", `[${symbol}] Entry blocked: ${hardStop.reasons.join("; ")}`);
               continue;
             }
+            this.trackSignalChange(symbol, signal.signal, signal.confidence);
             const direction = signal.signal === "BUY_CE" ? "CE" : "PE";
             const optionChain = snapshot.optionChain || [];
             const selectedContract = pickBestOptionContract(
@@ -603,6 +637,11 @@ export class TenantManager extends EventEmitter {
               });
 
               if (orderRes.success) {
+                this.log(
+                  "info",
+                  "entry",
+                  `[${symbol}] Entered ${direction} ${selectedContract.strike} @ ₹${orderRes.filledPrice.toFixed(2)} qty=${orderRes.quantity} (expiry ${optionChain[0]?.expiry ?? "?"})`,
+                );
                 const newPos: ActivePosition = {
                   instrumentKey: selectedContract.instrumentKey,
                   direction,
@@ -641,6 +680,7 @@ export class TenantManager extends EventEmitter {
                 });
               } else {
                 user.error = orderRes.error;
+                this.log("error", "entry", `[${symbol}] Order failed: ${orderRes.error}`);
                 this.emitUserUpdate(user);
               }
             }
@@ -652,6 +692,21 @@ export class TenantManager extends EventEmitter {
       if (afterCutoff) {
         this.checkDailySummary(user, istInfo);
       }
+    }
+  }
+
+  /** Appends a line to the bot activity log (no-op in tests without the service). */
+  private log(level: "info" | "warn" | "error" | "debug", source: string, msg: string): void {
+    this.botLogs?.add(level, source, msg);
+  }
+
+  /** Logs a line only when the evaluated entry signal for a symbol changes. */
+  private trackSignalChange(symbol: UnderlyingSymbol, signal: string, confidence: string): void {
+    const prev = this.lastSignalBySymbol.get(symbol);
+    if (prev === signal) return;
+    this.lastSignalBySymbol.set(symbol, signal);
+    if (signal === "BUY_CE" || signal === "BUY_PE" || (prev && (prev === "BUY_CE" || prev === "BUY_PE"))) {
+      this.log("info", "signal", `[${symbol}] ${signal} (${confidence})`);
     }
   }
 

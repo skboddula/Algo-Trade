@@ -27,9 +27,14 @@ import { BacktestPanel } from '@/components/dashboard/strategy/backtest-panel'
 interface StrategiesPageProps {
   bot: StrategyBotController
   token: string | null
+  daemonMode?: boolean
 }
 
-export function StrategiesPage({ bot, token }: StrategiesPageProps) {
+export function StrategiesPage({
+  bot,
+  token,
+  daemonMode,
+}: StrategiesPageProps) {
   const [config, setConfig] = useState<StrategyConfig>(getStrategyConfig)
   const [paperBalance, setPaperBalance] = useState<number | null>(null)
   const [activeTab, setActiveTab] = useState<string>('operations')
@@ -74,6 +79,18 @@ export function StrategiesPage({ bot, token }: StrategiesPageProps) {
 
       {/* Data feed status */}
       <SourceStatusBar sourceStatus={bot.sourceStatus} />
+
+      {/* Daemon mode banner — the bot runs on the always-on daemon */}
+      {daemonMode && (
+        <div className="rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs text-foreground flex items-center gap-2">
+          <span className="inline-block w-2 h-2 rounded-full bg-success animate-pulse" />
+          <span>
+            <span className="font-semibold">Daemon mode</span> — the bot runs on
+            the always-on daemon. You can close this tab anytime; Telegram
+            alerts and the daily summary keep flowing.
+          </span>
+        </div>
+      )}
 
       {/* Hard stop alert */}
       {bot.hardStop.blocked && (

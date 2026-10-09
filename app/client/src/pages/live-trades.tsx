@@ -19,6 +19,12 @@ import {
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { EquityCurveChart } from '@/components/dashboard/strategy/equity-curve-chart'
+import {
+  checkDaemonHealth,
+  daemonExitTrade,
+  fetchDaemonStatus,
+  type DaemonPaperTrade,
+} from '@/lib/daemon'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -1074,7 +1080,109 @@ export function LiveTradesPage() {
     }
   }, [])
 
+  // ── Daemon mode: the always-on daemon is the bot; render its state ──────
+  const [daemonMode, setDaemonMode] = useState(false)
+  const [daemonSummary, setDaemonSummary] =
+    useState<PaperAccountSummary | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const probe = () => {
+      void checkDaemonHealth().then((healthy) => {
+        if (!cancelled) setDaemonMode(healthy)
+      })
+    }
+    probe()
+    const interval = setInterval(probe, 10_000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
+
+  /** Maps the daemon's paise-denominated records to the rupee API shape. */
+  function mapDaemonTrade(t: DaemonPaperTrade) {
+    return {
+      id: t.id,
+      account_id: t.accountId ?? 'daemon',
+      status: t.status,
+      instrument_key: t.instrumentKey,
+      direction: t.direction,
+      quantity: t.quantity,
+      entry_price: t.entryPrice / 100,
+      entry_value: t.entryValue / 100,
+      exit_price: t.exitPrice != null ? t.exitPrice / 100 : null,
+      exit_value: t.exitValue != null ? t.exitValue / 100 : null,
+      realized_pnl: t.realizedPnl != null ? t.realizedPnl / 100 : null,
+      opened_at: t.openedAt,
+      closed_at: t.closedAt ?? null,
+      metadata_json: JSON.stringify(t.metadata ?? {}),
+    }
+  }
+
+  async function loadDaemon() {
+    setLoading(true)
+    setError(null)
+    try {
+      const status = await fetchDaemonStatus()
+      const user = (status.userState ?? {}) as {
+        state?: string
+        paperBalance?: number
+        positions?: Record<
+          string,
+          {
+            instrumentKey?: string
+            currentPrice?: number
+            entryPrice?: number
+            underlyingSymbol?: string
+          } | null
+        >
+      }
+      if (user.state) setBotState(user.state)
+
+      const trades = (status.paperTrades ?? []).map(mapDaemonTrade)
+      const openTrades = trades.filter((t) => t.status === 'OPEN')
+      const balance = Number(user.paperBalance ?? 0) / 100
+
+      // Live LTPs from daemon-managed positions (rupees)
+      const quotes: Record<string, { last_price?: number }> = {}
+      for (const pos of Object.values(user.positions ?? {})) {
+        if (pos?.instrumentKey) {
+          quotes[pos.instrumentKey] = {
+            last_price: pos.currentPrice ?? pos.entryPrice ?? undefined,
+          }
+        }
+      }
+
+      const summary: PaperAccountSummary = {
+        account: {
+          id: 'daemon',
+          mode: 'paper',
+          balance,
+          currency: 'INR',
+          updatedAt: new Date().toISOString(),
+        },
+        recentEntries: [],
+        openTradeCount: openTrades.length,
+        trades,
+        openTrades,
+      }
+      setDaemonSummary(summary)
+      setDataset(buildPaperDataset(summary, quotes))
+    } catch (err) {
+      setError((err as Error).message)
+      setDataset(null)
+      setDaemonSummary(null)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   async function load(m: TradeMode) {
+    if (daemonMode && m === 'paper') {
+      await loadDaemon()
+      return
+    }
     setLoading(true)
     setError(null)
     try {
@@ -1130,10 +1238,32 @@ export function LiveTradesPage() {
     }, 5000)
     return () => clearInterval(interval)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode])
+  }, [mode, daemonMode])
 
   const handleForceExit = async (tradeId: string, ltp: number | null) => {
     if (!confirm('Force exit this paper trade?')) return
+    if (daemonMode) {
+      try {
+        const trade = (daemonSummary?.trades ?? []).find(
+          (t) => t.id === tradeId,
+        )
+        const meta = (() => {
+          try {
+            return JSON.parse(trade?.metadata_json ?? '{}') as {
+              underlyingSymbol?: string
+            }
+          } catch {
+            return {}
+          }
+        })()
+        const symbol = meta.underlyingSymbol ?? 'NIFTY 50'
+        await daemonExitTrade(symbol, 'Manual Web Exit (daemon)')
+        await loadDaemon()
+      } catch (err) {
+        alert(err instanceof Error ? err.message : 'Daemon exit failed')
+      }
+      return
+    }
     try {
       const res = await fetch(API_PAPER_TRADES_EXIT, {
         method: 'POST',
@@ -1281,7 +1411,11 @@ export function LiveTradesPage() {
           )}
 
           {/* Equity Curve — shows cumulative P&L over time */}
-          {mode === 'paper' && <EquityCurveChart />}
+          {mode === 'paper' && (
+            <EquityCurveChart
+              summaryOverride={daemonMode ? daemonSummary : undefined}
+            />
+          )}
 
           {/* Loading skeleton */}
           {loading && !dataset && (

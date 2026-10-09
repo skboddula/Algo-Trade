@@ -448,6 +448,8 @@ export interface MarketSnapshot {
   indicators?: IndicatorsResult
   vrdData?: VrdData
   signal?: FinalSignal
+  /** Global indices (Brent, GIFT, US) for the dashboard markets panel. */
+  globalIndices?: McMarketItem[]
 }
 
 export interface UserBotState {

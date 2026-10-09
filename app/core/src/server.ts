@@ -6,6 +6,7 @@ import dotenv from 'dotenv'
 import { MasterIngestionEngine } from './services/masterIngestor'
 import { OrderGateway } from './services/orderGateway'
 import { TenantManager } from './services/tenantManager'
+import { BotLogService } from './services/botLogService'
 import { botRoutes } from './routes/botRoutes'
 
 dotenv.config()
@@ -65,7 +66,8 @@ export function buildServer(opts?: { mockMode?: boolean; primaryToken?: string }
   })
 
   const orderGateway = new OrderGateway(process.env.UPSTOX_API_URL || 'https://api.upstox.com/v2')
-  const tenantManager = new TenantManager(masterIngestor, orderGateway)
+  const botLogs = new BotLogService()
+  const tenantManager = new TenantManager(masterIngestor, orderGateway, botLogs)
 
   tenantManager.on('error', (err) => {
     app.log.error(err, 'Tenant Manager tick processing error')
@@ -76,6 +78,7 @@ export function buildServer(opts?: { mockMode?: boolean; primaryToken?: string }
     masterIngestor,
     tenantManager,
     orderGateway,
+    botLogs,
   })
 
   // Health check route
@@ -87,6 +90,7 @@ export function buildServer(opts?: { mockMode?: boolean; primaryToken?: string }
   app.addHook('onClose', async () => {
     masterIngestor.stop()
     tenantManager.shutdown()
+    botLogs.flush()
   })
 
   return { app, masterIngestor, tenantManager, orderGateway }

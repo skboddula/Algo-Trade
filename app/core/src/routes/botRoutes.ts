@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type { MasterIngestionEngine } from "../services/masterIngestor";
 import type { TenantManager } from "../services/tenantManager";
 import type { OrderGateway } from "../services/orderGateway";
+import type { BotLogService, BotLog } from "../services/botLogService";
 import type { UnderlyingSymbol, UserBotState } from "../types";
 import { UNDERLYING_INSTRUMENT_KEYS } from "../types";
 import {
@@ -23,13 +24,14 @@ export interface BotRoutesOptions {
   masterIngestor: MasterIngestionEngine;
   tenantManager: TenantManager;
   orderGateway: OrderGateway;
+  botLogs: BotLogService;
 }
 
 export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
   fastify,
   opts,
 ) => {
-  const { masterIngestor, tenantManager, orderGateway } = opts;
+  const { masterIngestor, tenantManager, orderGateway, botLogs } = opts;
 
   // Connected WebSocket clients: Map<userId, Set<WebSocket>>
   const activeSockets = new Map<string, Set<WebSocket>>();
@@ -418,6 +420,30 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
         .send({
           error: `Backtest failed: ${err instanceof Error ? err.message : String(err)}`,
         });
+    }
+  });
+
+  // ── GET /api/bot/logs ───────────────────────────────────────────────────────
+  // Recent bot activity lines (bounded ring buffer, oldest first).
+  fastify.get("/api/bot/logs", async (request, reply) => {
+    const query = request.query as { limit?: string };
+    const limit = Math.min(parseInt(query.limit || "200", 10) || 200, 500);
+    return reply.send({ logs: botLogs.get(limit) });
+  });
+
+  // Broadcast every bot log line to ALL connected dashboards
+  botLogs.on("log", (line: BotLog) => {
+    const payload = JSON.stringify({ type: "BOT_LOG", data: line });
+    for (const sockets of activeSockets.values()) {
+      for (const ws of sockets) {
+        if (ws.readyState === 1 /* OPEN */) {
+          try {
+            ws.send(payload);
+          } catch {
+            // Ignore send errors — heartbeat purges dead sockets
+          }
+        }
+      }
     }
   });
 

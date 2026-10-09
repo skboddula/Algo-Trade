@@ -13,7 +13,7 @@ import { TrendingUp, TrendingDown } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { InfoTooltip } from '@/components/ui/tooltip'
 import { fetchPaperHistory } from '@/lib/paperTrading'
-import type { PaperTrade } from '@/lib/types'
+import type { PaperAccountSummary, PaperTrade } from '@/lib/types'
 
 interface EquityPoint {
   time: string
@@ -55,13 +55,25 @@ function formatPct(value: number): string {
   return `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(2)}%`
 }
 
-export function EquityCurveChart() {
+export function EquityCurveChart({
+  summaryOverride,
+}: {
+  /** Daemon mode: pre-fetched account summary in rupees (skips the Worker fetch). */
+  summaryOverride?: PaperAccountSummary | null
+} = {}) {
   const [trades, setTrades] = useState<PaperTrade[]>([])
   const [accountBalance, setAccountBalance] = useState<number>(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    if (summaryOverride !== undefined) {
+      // Daemon mode: pre-fetched, already in rupees
+      setAccountBalance(summaryOverride?.account.balance ?? 0)
+      setTrades(summaryOverride?.trades ?? [])
+      setLoading(false)
+      return
+    }
     let cancelled = false
     void (async () => {
       try {
@@ -78,7 +90,7 @@ export function EquityCurveChart() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [summaryOverride])
 
   const { equityData, stats } = useMemo(() => {
     const closed = trades
@@ -102,10 +114,9 @@ export function EquityCurveChart() {
       (s, t) => s + (t.realized_pnl ?? 0),
       0,
     )
-    const startBalance =
-      (accountBalance * PAISE_TO_RUPEES - totalRealizedPnl) / PAISE_TO_RUPEES
+    const startBalance = accountBalance - totalRealizedPnl
 
-    let running = startBalance * PAISE_TO_RUPEES
+    let running = startBalance
     let peak = running
     let maxDrawdownPct = 0
     let wins = 0
@@ -117,7 +128,7 @@ export function EquityCurveChart() {
       {
         time: closed[0].closed_at!,
         timeLabel: 'Start',
-        balance: Number((running / PAISE_TO_RUPEES).toFixed(2)),
+        balance: Number(running.toFixed(2)),
         cumulativePnl: 0,
         tradePnl: 0,
         direction: '',
@@ -154,20 +165,15 @@ export function EquityCurveChart() {
           hour: '2-digit',
           minute: '2-digit',
         }),
-        balance: Number((running / PAISE_TO_RUPEES).toFixed(2)),
-        cumulativePnl: Number(
-          (
-            (running - startBalance * PAISE_TO_RUPEES) /
-            PAISE_TO_RUPEES
-          ).toFixed(2),
-        ),
-        tradePnl: Number((pnl / PAISE_TO_RUPEES).toFixed(2)),
+        balance: Number(running.toFixed(2)),
+        cumulativePnl: Number((running - startBalance).toFixed(2)),
+        tradePnl: Number(pnl.toFixed(2)),
         direction: t.direction,
         symbol: meta.underlyingSymbol ?? '',
       })
     }
 
-    const currentBalance = running / PAISE_TO_RUPEES
+    const currentBalance = running
     const totalPnl = currentBalance - startBalance
 
     return {
@@ -188,9 +194,9 @@ export function EquityCurveChart() {
             ? Number(((wins / closed.length) * 100).toFixed(1))
             : 0,
         maxDrawdownPct: Number(maxDrawdownPct.toFixed(2)),
-        peakBalance: Number((peak / PAISE_TO_RUPEES).toFixed(2)),
-        bestTrade: Number((best / PAISE_TO_RUPEES).toFixed(2)),
-        worstTrade: Number((worst / PAISE_TO_RUPEES).toFixed(2)),
+        peakBalance: Number(peak.toFixed(2)),
+        bestTrade: Number(best.toFixed(2)),
+        worstTrade: Number(worst.toFixed(2)),
       } satisfies EquityStats,
     }
   }, [trades, accountBalance])

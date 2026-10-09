@@ -4,6 +4,9 @@ import { Header } from '@/components/dashboard/header'
 import { getAccounts, hydrateAccounts } from '@/lib/accounts'
 import { hydrateStrategyConfig } from '@/lib/strategyConfig'
 import { useStrategyBot } from '@/hooks/useStrategyBot'
+import type { StrategyBotController } from '@/hooks/useStrategyBot'
+import { useDaemonBot } from '@/hooks/useDaemonBot'
+import { checkDaemonHealth } from '@/lib/daemon'
 import { ACCOUNTS_CHANGED_EVENT } from '@/lib/types'
 import { useAuth0 } from '@auth0/auth0-react'
 import { AuthService } from '@/lib/auth'
@@ -392,7 +395,33 @@ function DashboardShell({
   onSelect,
   brokerToken,
 }: DashboardShellProps) {
-  const strategyBot = useStrategyBot(brokerToken)
+  // Both hooks instantiate; only the ACTIVE controller drives the UI.
+  // When the daemon is reachable it is the bot (browser logic stays idle);
+  // without a daemon the classic in-tab bot remains fully functional.
+  const browserBot = useStrategyBot(brokerToken)
+  const daemonBot = useDaemonBot(brokerToken)
+  const [daemonAvailable, setDaemonAvailable] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const probe = () => {
+      void checkDaemonHealth().then((healthy) => {
+        if (!cancelled && healthy) setDaemonAvailable(true)
+        else if (!cancelled && !healthy) setDaemonAvailable(false)
+      })
+    }
+    probe()
+    const interval = setInterval(probe, 10_000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
+
+  const strategyBot = daemonAvailable
+    ? (daemonBot as unknown as StrategyBotController)
+    : browserBot
+  const isDaemonMode = daemonAvailable
 
   const renderPage = () => {
     switch (activeItem) {
@@ -403,7 +432,13 @@ function DashboardShell({
       case 'live-trades':
         return <LiveTradesPage />
       case 'strategies':
-        return <StrategiesPage bot={strategyBot} token={brokerToken} />
+        return (
+          <StrategiesPage
+            bot={strategyBot}
+            token={brokerToken}
+            daemonMode={isDaemonMode}
+          />
+        )
       case 'history':
         return <HistoryPage />
       case 'settings':

@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { CheckCircle, Loader2, XCircle } from 'lucide-react'
 import { addAccount, updateAccount } from '@/lib/accounts'
 import { API_UPSTOX_TOKEN } from '@/lib/constants'
+import { pushTokenToDaemon } from '@/lib/daemon'
 
 interface PendingAccount {
   id: string
@@ -85,6 +86,10 @@ export function BrokerCallbackPage() {
               connectedAt: new Date().toISOString(),
             })
           }
+          // Always-on daemon handoff: push the fresh token so the daemon
+          // can trade all day without any browser tab open. Best-effort —
+          // a daemon that is down simply keeps its previous token.
+          void pushTokenToDaemon(data.access_token).catch(() => null)
           setStatus('success')
           setTimeout(() => {
             if (window.opener) {
