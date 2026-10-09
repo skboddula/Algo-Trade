@@ -40,7 +40,9 @@ interface EquityStats {
   worstTrade: number
 }
 
-const PAISE_TO_RUPEES = 100
+// NOTE: all values in this component are RUPEES — the Worker API returns
+// prices/balances already converted (toRupees), and the daemon-mode mapping
+// in live-trades converts paise → rupees before passing them in.
 
 function formatRupees(value: number): string {
   const abs = Math.abs(value)
@@ -79,7 +81,8 @@ export function EquityCurveChart({
       try {
         const summary = await fetchPaperHistory()
         if (cancelled) return
-        setAccountBalance(summary.account.balance / PAISE_TO_RUPEES)
+        // The Worker API returns the account balance in RUPEES (toRupees)
+        setAccountBalance(summary.account.balance)
         setTrades(summary.trades ?? [])
       } catch (e) {
         if (!cancelled) setError((e as Error).message)

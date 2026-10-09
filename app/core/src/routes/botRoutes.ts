@@ -167,6 +167,12 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     if (!body?.token) {
       return reply.status(400).send({ error: "Missing token" });
     }
+    // Update BOTH token surfaces:
+    //  - masterIngestor: the primary token driving ALL market data
+    //    (quotes, candles, chains, VIX, sentiment) — the daily expiry
+    //    would otherwise silently kill data feeds tomorrow morning.
+    //  - tenant user: the per-user token for live order placement.
+    masterIngestor.setToken(body.token);
     const userState = tenantManager.setToken(userId, body.token);
     return reply.send({
       success: true,

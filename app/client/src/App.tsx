@@ -6,7 +6,7 @@ import { hydrateStrategyConfig } from '@/lib/strategyConfig'
 import { useStrategyBot } from '@/hooks/useStrategyBot'
 import type { StrategyBotController } from '@/hooks/useStrategyBot'
 import { useDaemonBot } from '@/hooks/useDaemonBot'
-import { checkDaemonHealth } from '@/lib/daemon'
+import { checkDaemonHealth, pushTokenToDaemon } from '@/lib/daemon'
 import { ACCOUNTS_CHANGED_EVENT } from '@/lib/types'
 import { useAuth0 } from '@auth0/auth0-react'
 import { AuthService } from '@/lib/auth'
@@ -404,10 +404,18 @@ function DashboardShell({
 
   useEffect(() => {
     let cancelled = false
+    let prevHealthy = false
     const probe = () => {
       void checkDaemonHealth().then((healthy) => {
-        if (!cancelled && healthy) setDaemonAvailable(true)
-        else if (!cancelled && !healthy) setDaemonAvailable(false)
+        if (cancelled) return
+        setDaemonAvailable(healthy)
+        // Token handoff resilience: whenever the daemon (re)appears while we
+        // hold a broker token, push it — covers the case where the daemon was
+        // down during the OAuth login (its .env token expires nightly).
+        if (healthy && !prevHealthy && brokerToken) {
+          void pushTokenToDaemon(brokerToken).catch(() => undefined)
+        }
+        prevHealthy = healthy
       })
     }
     probe()
@@ -416,7 +424,7 @@ function DashboardShell({
       cancelled = true
       clearInterval(interval)
     }
-  }, [])
+  }, [brokerToken])
 
   const strategyBot = daemonAvailable
     ? (daemonBot as unknown as StrategyBotController)

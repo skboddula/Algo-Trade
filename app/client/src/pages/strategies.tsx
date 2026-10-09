@@ -2,6 +2,7 @@ import type { StrategyConfig } from '@/lib/types'
 import { useEffect, useState } from 'react'
 import type { StrategyBotController } from '@/hooks/useStrategyBot'
 import { getStrategyConfig, saveStrategyConfig } from '@/lib/strategyConfig'
+import { daemonUpdateConfig } from '@/lib/daemon'
 import { fetchPaperAccount } from '@/lib/paperTrading'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Activity, BarChart3, Settings, FlaskConical } from 'lucide-react'
@@ -38,6 +39,15 @@ export function StrategiesPage({
   const [config, setConfig] = useState<StrategyConfig>(getStrategyConfig)
   const [paperBalance, setPaperBalance] = useState<number | null>(null)
   const [activeTab, setActiveTab] = useState<string>('operations')
+
+  // Daemon mode: propagate every config save to the daemon (it runs its own
+  // copy of the strategy config — localStorage means nothing to it).
+  useEffect(() => {
+    if (!daemonMode) return
+    void daemonUpdateConfig(config as unknown as Record<string, unknown>)
+      .then(() => undefined)
+      .catch(() => undefined)
+  }, [config, daemonMode])
 
   useEffect(() => {
     if (config.executionMode !== 'paper') return
