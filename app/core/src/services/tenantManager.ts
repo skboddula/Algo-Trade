@@ -11,7 +11,7 @@ import type {
 import { DEFAULT_STRATEGY_CONFIG } from "../constants";
 import { MasterIngestionEngine } from "./masterIngestor";
 import { OrderGateway } from "./orderGateway";
-import { pickBestOptionContract } from "./syntheticCalculators";
+import { getOtmStrike, getLotSizeForSymbol } from "./syntheticCalculators";
 import { runHardStopChecks, checkEntryHardStops } from "./strategyEngine";
 import { getIndiaTime } from "../utils/timeUtils";
 import {
@@ -34,7 +34,8 @@ export class TenantManager extends EventEmitter {
   private telegramConfig: TelegramConfig | null;
   private vixWarningLevel: "none" | "elevated" | "critical" = "none";
   private lastVixAlertAt: number = 0;
-  private dailySummaryDate: string | null = null;
+  private dailySummaryDate: string | null =
+    loadState<{ date?: string }>("daily_summary_date")?.date ?? null;
   private marketStream: UpstoxMarketStream;
 
   private botLogs: BotLogService | null;
@@ -64,7 +65,11 @@ export class TenantManager extends EventEmitter {
         console.log(
           "[stream] Upstox market stream connected — tick-level prices active",
         );
-        this.log("info", "stream", "Upstox market stream connected — tick-level prices active");
+        this.log(
+          "info",
+          "stream",
+          "Upstox market stream connected — tick-level prices active",
+        );
       } else if (status === "closed" && detail) {
         console.warn(`[stream] ${detail}`);
         this.log("warn", "stream", detail);
@@ -224,7 +229,9 @@ export class TenantManager extends EventEmitter {
   public stopBot(userId: string): UserBotState {
     const user = this.getOrCreateUser(userId);
     user.state = "STOPPED";
-    const openCount = Object.values(user.positions).filter((p) => p !== null).length;
+    const openCount = Object.values(user.positions).filter(
+      (p) => p !== null,
+    ).length;
     this.log(
       "warn",
       "bot",
@@ -351,7 +358,9 @@ export class TenantManager extends EventEmitter {
     });
     sendTelegramMessage(this.telegramConfig, message)
       .then(() => this.log("info", "telegram", `[${symbol}] Entry alert sent`))
-      .catch(() => this.log("warn", "telegram", `[${symbol}] Entry alert failed`));
+      .catch(() =>
+        this.log("warn", "telegram", `[${symbol}] Entry alert failed`),
+      );
   }
 
   /** Sends a Telegram exit alert with PnL details. */
@@ -380,7 +389,9 @@ export class TenantManager extends EventEmitter {
     });
     sendTelegramMessage(this.telegramConfig, message)
       .then(() => this.log("info", "telegram", `[${symbol}] Exit alert sent`))
-      .catch(() => this.log("warn", "telegram", `[${symbol}] Exit alert failed`));
+      .catch(() =>
+        this.log("warn", "telegram", `[${symbol}] Exit alert failed`),
+      );
   }
 
   /** Sends a VIX early warning when thresholds are crossed (with 5-min cooldown). */
@@ -421,8 +432,9 @@ export class TenantManager extends EventEmitter {
     );
     if (hasActivePositions) return;
 
-    // Only send after cutoff
+    // Only send after cutoff (date persisted — daemon restarts don't re-send)
     this.dailySummaryDate = istInfo.dateString;
+    saveState("daily_summary_date", { date: istInfo.dateString });
 
     const allTrades = this.orderGateway.getPaperTrades(user.userId);
     const closedTrades = allTrades.filter(
@@ -431,7 +443,11 @@ export class TenantManager extends EventEmitter {
     );
     if (closedTrades.length === 0) return;
 
-    this.log("info", "summary", `[${user.userId}] Daily summary sent — ${closedTrades.length} closed trade(s) today`);
+    this.log(
+      "info",
+      "summary",
+      `[${user.userId}] Daily summary sent — ${closedTrades.length} closed trade(s) today`,
+    );
     const wins = closedTrades.filter((t) => (t.realizedPnl ?? 0) > 0);
     const losses = closedTrades.filter((t) => (t.realizedPnl ?? 0) <= 0);
     const realizedPnl = closedTrades.reduce(
@@ -558,7 +574,11 @@ export class TenantManager extends EventEmitter {
 
           // Check EOD auto square-off
           if (afterCutoff) {
-            this.log("info", "eod", `[${symbol}] 15:15 cutoff reached — squaring off open position`);
+            this.log(
+              "info",
+              "eod",
+              `[${symbol}] 15:15 cutoff reached — squaring off open position`,
+            );
             await this.manualExit(
               userId,
               symbol,
@@ -610,17 +630,33 @@ export class TenantManager extends EventEmitter {
             // high-severity macro news block new entries entirely.
             const hardStop = checkEntryHardStops(snapshot.vrdData ?? null);
             if (hardStop.blocked) {
-              this.log("warn", "hard-stop", `[${symbol}] Entry blocked: ${hardStop.reasons.join("; ")}`);
+              this.log(
+                "warn",
+                "hard-stop",
+                `[${symbol}] Entry blocked: ${hardStop.reasons.join("; ")}`,
+              );
               continue;
             }
             this.trackSignalChange(symbol, signal.signal, signal.confidence);
             const direction = signal.signal === "BUY_CE" ? "CE" : "PE";
             const optionChain = snapshot.optionChain || [];
-            const selectedContract = pickBestOptionContract(
+            const otmRow = getOtmStrike(
               optionChain,
               direction,
               user.config.otmSkip,
             );
+            const lotSize = getLotSizeForSymbol(symbol);
+            const otmOption =
+              otmRow &&
+              (direction === "CE" ? otmRow.call_options : otmRow.put_options);
+            const selectedContract = otmOption
+              ? {
+                  strike: otmRow!.strike_price,
+                  instrumentKey: otmOption.instrument_key,
+                  price: otmOption.market_data?.ltp ?? 0,
+                  lotSize,
+                }
+              : null;
 
             if (selectedContract && selectedContract.price > 0) {
               const orderRes = await this.orderGateway.placeOrder({
@@ -634,6 +670,8 @@ export class TenantManager extends EventEmitter {
                 tradeType:
                   user.config.tradeType === "selling" ? "selling" : "buying",
                 underlyingSymbol: symbol,
+                strikePrice: selectedContract.strike,
+                expiry: optionChain[0]?.expiry,
               });
 
               if (orderRes.success) {
@@ -680,7 +718,11 @@ export class TenantManager extends EventEmitter {
                 });
               } else {
                 user.error = orderRes.error;
-                this.log("error", "entry", `[${symbol}] Order failed: ${orderRes.error}`);
+                this.log(
+                  "error",
+                  "entry",
+                  `[${symbol}] Order failed: ${orderRes.error}`,
+                );
                 this.emitUserUpdate(user);
               }
             }
@@ -696,16 +738,28 @@ export class TenantManager extends EventEmitter {
   }
 
   /** Appends a line to the bot activity log (no-op in tests without the service). */
-  private log(level: "info" | "warn" | "error" | "debug", source: string, msg: string): void {
+  private log(
+    level: "info" | "warn" | "error" | "debug",
+    source: string,
+    msg: string,
+  ): void {
     this.botLogs?.add(level, source, msg);
   }
 
   /** Logs a line only when the evaluated entry signal for a symbol changes. */
-  private trackSignalChange(symbol: UnderlyingSymbol, signal: string, confidence: string): void {
+  private trackSignalChange(
+    symbol: UnderlyingSymbol,
+    signal: string,
+    confidence: string,
+  ): void {
     const prev = this.lastSignalBySymbol.get(symbol);
     if (prev === signal) return;
     this.lastSignalBySymbol.set(symbol, signal);
-    if (signal === "BUY_CE" || signal === "BUY_PE" || (prev && (prev === "BUY_CE" || prev === "BUY_PE"))) {
+    if (
+      signal === "BUY_CE" ||
+      signal === "BUY_PE" ||
+      (prev && (prev === "BUY_CE" || prev === "BUY_PE"))
+    ) {
       this.log("info", "signal", `[${symbol}] ${signal} (${confidence})`);
     }
   }

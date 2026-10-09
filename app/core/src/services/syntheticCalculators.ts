@@ -156,10 +156,42 @@ export function computeMMI(
   return { score, label };
 }
 
+/**
+ * OTM strike picker — direct port of the browser's getOtmStrike:
+ * strictly above spot for CE / below for PE, positive LTP required, then
+ * the `skip`-th strike from spot. This (not ATM-closest) is the validated
+ * contract-selection behaviour.
+ */
+export function getOtmStrike(
+  optionChain: OptionData[],
+  direction: "CE" | "PE",
+  skip = 3,
+): OptionData | null {
+  if (!optionChain.length) return null;
+  const spot = optionChain[0].underlying_spot_price;
+  if (direction === "CE") {
+    const otm = optionChain
+      .filter(
+        (o) =>
+          o.strike_price > spot && (o.call_options?.market_data?.ltp ?? 0) > 0,
+      )
+      .sort((a, b) => a.strike_price - b.strike_price);
+    return otm[skip] ?? otm[otm.length - 1] ?? null;
+  }
+  const otm = optionChain
+    .filter(
+      (o) =>
+        o.strike_price < spot && (o.put_options?.market_data?.ltp ?? 0) > 0,
+    )
+    .sort((a, b) => b.strike_price - a.strike_price);
+  return otm[skip] ?? otm[otm.length - 1] ?? null;
+}
+
 export function pickBestOptionContract(
   chain: OptionData[],
   direction: "CE" | "PE",
   otmSkip = 0,
+  underlyingSymbol?: string,
 ): {
   strike: number;
   instrumentKey: string;
@@ -207,7 +239,7 @@ export function pickBestOptionContract(
     tradingSymbol:
       opt.trading_symbol || `${direction}_${selectedRow.strike_price}`,
     price: opt.market_data?.ltp || 0,
-    lotSize: getLotSizeForSymbol("NIFTY 50"),
+    lotSize: getLotSizeForSymbol(underlyingSymbol ?? "NIFTY 50"),
   };
 }
 

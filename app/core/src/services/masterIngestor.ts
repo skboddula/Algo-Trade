@@ -11,6 +11,7 @@ import { UNDERLYING_INSTRUMENT_KEYS } from "../types";
 import { computeAllIndicators } from "./indicators";
 import { getFinalSignal } from "./strategyEngine";
 import { SentimentIngestor } from "./sentimentIngestor";
+import { computeV3Signal } from "./v3Sentiment";
 import { DEFAULT_STRATEGY_CONFIG } from "../constants";
 import { getIndiaTime } from "../utils/timeUtils";
 import { fetchWithRetry } from "../utils/http/fetchRetry";
@@ -289,16 +290,30 @@ export class MasterIngestionEngine extends EventEmitter {
         }
       }
 
+      // V3 macro signal (browser parity): global sentiment + breadth
+      // advances + this symbol's chain OI ratio, through the shared mapping
+      // tables — NOT a copy of the EMA.
+      const globalIndices = this.sentimentIngestor.getGlobalIndices();
+      const marketWide =
+        await this.sentimentIngestor.getMarketWide(optionChain);
+      let chainPutOi = 0;
+      let chainCallOi = 0;
+      for (const row of optionChain) {
+        chainPutOi += row.put_options?.market_data?.oi ?? 0;
+        chainCallOi += row.call_options?.market_data?.oi ?? 0;
+      }
+      const v3 = computeV3Signal(
+        globalIndices,
+        marketWide.breadth?.advances ?? null,
+        chainPutOi,
+        chainCallOi,
+      );
+
       const signalData: AllSignalData = {
-        v3:
-          indicators.ema === "Buy"
-            ? "buy"
-            : indicators.ema === "Sell"
-              ? "sell"
-              : "hold",
+        v3,
         indicators,
         vrd: vrdData,
-        globalIndices: this.sentimentIngestor.getGlobalIndices(),
+        globalIndices,
       };
 
       const finalSignal = getFinalSignal(signalData, DEFAULT_STRATEGY_CONFIG);

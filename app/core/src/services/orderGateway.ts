@@ -50,6 +50,9 @@ export interface OrderPlacementRequest {
   price: number;
   tradeType: "buying" | "selling";
   underlyingSymbol?: string;
+  /** Strike + expiry recorded on the paper trade for dashboards/alerts. */
+  strikePrice?: number;
+  expiry?: string;
 }
 
 export interface OrderExitRequest {
@@ -206,6 +209,8 @@ export class OrderGateway {
       metadata: {
         tradeType: req.tradeType,
         underlyingSymbol: req.underlyingSymbol,
+        strikePrice: req.strikePrice,
+        expiry: req.expiry,
         entryCharges: {
           totalCharges: entryCharges.totalCharges,
           brokerage: entryCharges.brokerage,
