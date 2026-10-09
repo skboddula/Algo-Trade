@@ -81,6 +81,22 @@ describe('buildExitAlertMessage', () => {
     })
     expect(message).not.toContain('Duration:')
   })
+
+  it('includes strike price and expiry when provided', () => {
+    const message = buildExitAlertMessage({
+      ...baseAlert,
+      strikePrice: 64500,
+      expiry: '2026-10-13',
+    })
+    expect(message).toContain('SELL SENSEX 64500 CE @ 575')
+    expect(message).toContain('Expiry: 2026-10-13')
+  })
+
+  it('omits strike and expiry when not provided (legacy positions)', () => {
+    const message = buildExitAlertMessage(baseAlert)
+    expect(message).toContain('SELL SENSEX CE @ 575')
+    expect(message).not.toContain('Expiry:')
+  })
 })
 
 describe('buildEntryAlertMessage (regression)', () => {
