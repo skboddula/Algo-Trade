@@ -1,39 +1,39 @@
-import type { VrdScore } from '../types'
+import type { VrdScore, UpstoxNewsItem, NewsAlert } from "../types";
 
 export function scoreMMI(
   score: number | null,
-): VrdScore & { contrarian: boolean; direction: 'BULL' | 'BEAR' | 'NEUTRAL' } {
+): VrdScore & { contrarian: boolean; direction: "BULL" | "BEAR" | "NEUTRAL" } {
   if (score === null) {
     return {
       score: 0,
       max: 3,
-      label: 'MMI unavailable',
+      label: "MMI unavailable",
       contrarian: false,
-      direction: 'NEUTRAL',
-    }
+      direction: "NEUTRAL",
+    };
   }
-  let points: number
-  let label: string
-  let direction: 'BULL' | 'BEAR' | 'NEUTRAL'
-  let contrarian = false
+  let points: number;
+  let label: string;
+  let direction: "BULL" | "BEAR" | "NEUTRAL";
+  let contrarian = false;
   if (score < 30) {
-    points = 3
-    label = 'Extreme Fear — contrarian BUY'
-    direction = 'BULL'
-    contrarian = true
+    points = 3;
+    label = "Extreme Fear — contrarian BUY";
+    direction = "BULL";
+    contrarian = true;
   } else if (score < 50) {
-    points = 1
-    label = 'Fear — moderate buy signal'
-    direction = 'BULL'
+    points = 1;
+    label = "Fear — moderate buy signal";
+    direction = "BULL";
   } else if (score < 70) {
-    points = -1
-    label = 'Greed — be cautious'
-    direction = 'BEAR'
+    points = -1;
+    label = "Greed — be cautious";
+    direction = "BEAR";
   } else {
-    points = -3
-    label = 'Extreme Greed — avoid entries'
-    direction = 'BEAR'
-    contrarian = true
+    points = -3;
+    label = "Extreme Greed — avoid entries";
+    direction = "BEAR";
+    contrarian = true;
   }
   return {
     score: points,
@@ -42,92 +42,92 @@ export function scoreMMI(
     contrarian,
     direction,
     detail: `MMI: ${score}`,
-  }
+  };
 }
 
 export function scoreADRatio(
   advances: number | null,
   declines: number | null,
   ratio: number | null,
-): VrdScore & { direction: 'BULL' | 'BEAR' | 'NEUTRAL' } {
+): VrdScore & { direction: "BULL" | "BEAR" | "NEUTRAL" } {
   if (ratio === null) {
-    return { score: 0, max: 3, label: 'A/D unavailable', direction: 'NEUTRAL' }
+    return { score: 0, max: 3, label: "A/D unavailable", direction: "NEUTRAL" };
   }
-  let points: number
-  let direction: 'BULL' | 'BEAR' | 'NEUTRAL'
-  let label: string
+  let points: number;
+  let direction: "BULL" | "BEAR" | "NEUTRAL";
+  let label: string;
   if (ratio >= 2.0) {
-    points = 3
-    direction = 'BULL'
-    label = `Breadth Thrust A/D ${ratio.toFixed(1)}`
+    points = 3;
+    direction = "BULL";
+    label = `Breadth Thrust A/D ${ratio.toFixed(1)}`;
   } else if (ratio >= 1.2) {
-    points = 2
-    direction = 'BULL'
-    label = `Healthy Breadth A/D ${ratio.toFixed(1)}`
+    points = 2;
+    direction = "BULL";
+    label = `Healthy Breadth A/D ${ratio.toFixed(1)}`;
   } else if (ratio >= 0.8) {
-    points = 0
-    direction = 'NEUTRAL'
-    label = `Balanced A/D ${ratio.toFixed(1)}`
+    points = 0;
+    direction = "NEUTRAL";
+    label = `Balanced A/D ${ratio.toFixed(1)}`;
   } else if (ratio >= 0.5) {
-    points = -2
-    direction = 'BEAR'
-    label = `Weak Breadth A/D ${ratio.toFixed(1)}`
+    points = -2;
+    direction = "BEAR";
+    label = `Weak Breadth A/D ${ratio.toFixed(1)}`;
   } else {
-    points = -3
-    direction = 'BEAR'
-    label = `Persistent Weakness A/D ${ratio.toFixed(1)}`
+    points = -3;
+    direction = "BEAR";
+    label = `Persistent Weakness A/D ${ratio.toFixed(1)}`;
   }
   const detail =
     advances !== null && declines !== null
       ? `${advances}↑ ${declines}↓`
-      : undefined
-  return { score: points, max: 3, label, direction, detail }
+      : undefined;
+  return { score: points, max: 3, label, direction, detail };
 }
 
 export function scoreFiiLongShort(
   longPct: number | null,
   shortPct: number | null,
-  shortPctTrend?: 'Rising' | 'Falling' | 'Stable' | null,
-): VrdScore & { contrarian: boolean; direction: 'BULL' | 'BEAR' | 'NEUTRAL' } {
+  shortPctTrend?: "Rising" | "Falling" | "Stable" | null,
+): VrdScore & { contrarian: boolean; direction: "BULL" | "BEAR" | "NEUTRAL" } {
   if (longPct === null || shortPct === null) {
     return {
       score: 0,
       max: 3,
-      label: 'FII data unavailable',
+      label: "FII data unavailable",
       contrarian: false,
-      direction: 'NEUTRAL',
-    }
+      direction: "NEUTRAL",
+    };
   }
-  let points = 0
-  let label = ''
-  let direction: 'BULL' | 'BEAR' | 'NEUTRAL' = 'NEUTRAL'
-  let contrarian = false
+  let points = 0;
+  let label = "";
+  let direction: "BULL" | "BEAR" | "NEUTRAL" = "NEUTRAL";
+  let contrarian = false;
 
   if (longPct > 65) {
-    points = 3
-    label = `FII Heavily Long (${longPct.toFixed(0)}%)`
-    direction = 'BULL'
+    points = 3;
+    label = `FII Heavily Long (${longPct.toFixed(0)}%)`;
+    direction = "BULL";
   } else if (longPct > 55) {
-    points = 1.5
-    label = `FII Moderately Long (${longPct.toFixed(0)}%)`
-    direction = 'BULL'
+    points = 1.5;
+    label = `FII Moderately Long (${longPct.toFixed(0)}%)`;
+    direction = "BULL";
   } else if (shortPct > 65) {
-    points = -3
-    label = `FII Heavily Short (${shortPct.toFixed(0)}%)`
-    direction = 'BEAR'
-    contrarian = true
+    points = -3;
+    label = `FII Heavily Short (${shortPct.toFixed(0)}%)`;
+    direction = "BEAR";
+    contrarian = true;
   } else if (shortPct > 55) {
-    points = -1.5
-    label = `FII Moderately Short (${shortPct.toFixed(0)}%)`
-    direction = 'BEAR'
+    points = -1.5;
+    label = `FII Moderately Short (${shortPct.toFixed(0)}%)`;
+    direction = "BEAR";
   } else {
-    points = 0
-    label = `FII Balanced (L:${longPct.toFixed(0)}% S:${shortPct.toFixed(0)}%)`
-    direction = 'NEUTRAL'
+    points = 0;
+    label = `FII Balanced (L:${longPct.toFixed(0)}% S:${shortPct.toFixed(0)}%)`;
+    direction = "NEUTRAL";
   }
 
-  if (shortPctTrend === 'Rising' && points > 0) points -= 1
-  if (shortPctTrend === 'Falling' && points < 0) points += 1
+  if (shortPctTrend === "Rising" && points > 0) points -= 1;
+  if (shortPctTrend === "Falling" && points < 0) points += 1;
 
   return {
     score: Math.max(-3, Math.min(3, points)),
@@ -136,128 +136,260 @@ export function scoreFiiLongShort(
     contrarian,
     direction,
     detail: `L:${longPct.toFixed(0)}% S:${shortPct.toFixed(0)}%`,
-  }
+  };
 }
 
 export function scoreFiiPositioning(
   netPosition: number | null,
   consecutiveShortDays: number | null,
-): VrdScore & { direction: 'BULL' | 'BEAR' | 'NEUTRAL' } {
+): VrdScore & { direction: "BULL" | "BEAR" | "NEUTRAL" } {
   if (netPosition === null) {
-    return { score: 0, max: 2, label: 'FII flow unavailable', direction: 'NEUTRAL' }
+    return {
+      score: 0,
+      max: 2,
+      label: "FII flow unavailable",
+      direction: "NEUTRAL",
+    };
   }
-  let points = 0
-  let direction: 'BULL' | 'BEAR' | 'NEUTRAL' = 'NEUTRAL'
-  let label = ''
+  let points = 0;
+  let direction: "BULL" | "BEAR" | "NEUTRAL" = "NEUTRAL";
+  let label = "";
 
   if (netPosition > 1000) {
-    points = 2
-    direction = 'BULL'
-    label = `FII Strong Buying (+₹${netPosition}Cr)`
+    points = 2;
+    direction = "BULL";
+    label = `FII Strong Buying (+₹${netPosition}Cr)`;
   } else if (netPosition > 0) {
-    points = 1
-    direction = 'BULL'
-    label = `FII Net Buyers (+₹${netPosition}Cr)`
+    points = 1;
+    direction = "BULL";
+    label = `FII Net Buyers (+₹${netPosition}Cr)`;
   } else if (netPosition < -1000) {
-    points = -2
-    direction = 'BEAR'
-    label = `FII Heavy Selling (-₹${Math.abs(netPosition)}Cr)`
+    points = -2;
+    direction = "BEAR";
+    label = `FII Heavy Selling (-₹${Math.abs(netPosition)}Cr)`;
   } else {
-    points = -1
-    direction = 'BEAR'
-    label = `FII Net Sellers (-₹${Math.abs(netPosition)}Cr)`
+    points = -1;
+    direction = "BEAR";
+    label = `FII Net Sellers (-₹${Math.abs(netPosition)}Cr)`;
   }
 
   if (consecutiveShortDays && consecutiveShortDays >= 5 && points < 0) {
-    label += ` — ${consecutiveShortDays}d short streak`
+    label += ` — ${consecutiveShortDays}d short streak`;
   }
 
-  return { score: points, max: 2, label, direction }
+  return { score: points, max: 2, label, direction };
 }
 
 export function scoreNiftyPE(
   pe: number | null,
-): VrdScore & { direction: 'BULL' | 'BEAR' | 'NEUTRAL' } {
-  if (pe === null) {
-    return { score: 0, max: 2, label: 'PE unavailable', direction: 'NEUTRAL' }
-  }
-  let points: number
-  let direction: 'BULL' | 'BEAR' | 'NEUTRAL'
-  let label: string
-  if (pe < 18) {
-    points = 2
-    direction = 'BULL'
-    label = `Undervalued PE ${pe.toFixed(1)}`
-  } else if (pe < 22) {
-    points = 1
-    direction = 'BULL'
-    label = `Fair Value PE ${pe.toFixed(1)}`
-  } else if (pe < 25) {
-    points = -1
-    direction = 'BEAR'
-    label = `Elevated PE ${pe.toFixed(1)}`
+): VrdScore & { bias: "CE" | "PE" | "NEUTRAL" } {
+  if (pe === null)
+    return { score: 0, max: 2, label: "PE unavailable", bias: "NEUTRAL" };
+  let score: number;
+  let bias: "CE" | "PE" | "NEUTRAL";
+  let label: string;
+  if (pe > 28) {
+    score = -2;
+    bias = "PE";
+    label = `PE ${pe} — Overvalued, avoid CE`;
+  } else if (pe > 24) {
+    score = 0;
+    bias = "PE";
+    label = `PE ${pe} — Slightly overvalued`;
+  } else if (pe >= 18) {
+    score = 1;
+    bias = "NEUTRAL";
+    label = `PE ${pe} — Fair value`;
   } else {
-    points = -2
-    direction = 'BEAR'
-    label = `Expensive PE ${pe.toFixed(1)}`
+    score = 2;
+    bias = "CE";
+    label = `PE ${pe} — Undervalued, CE favoured`;
   }
-  return { score: points, max: 2, label, direction, detail: `PE: ${pe.toFixed(1)}` }
+  return { score, max: 2, label, bias };
 }
 
-export function scoreVix(
-  vix: number | null,
-): VrdScore & { regime: 'Low' | 'Moderate' | 'High' | 'Extreme'; direction: 'BULL' | 'BEAR' | 'NEUTRAL' } {
-  if (vix === null) {
-    return { score: 0, max: 2, label: 'VIX unavailable', regime: 'Moderate', direction: 'NEUTRAL' }
-  }
-  let points: number
-  let regime: 'Low' | 'Moderate' | 'High' | 'Extreme'
-  let direction: 'BULL' | 'BEAR' | 'NEUTRAL'
-  let label: string
-
-  if (vix < 13) {
-    points = 1
-    regime = 'Low'
-    direction = 'BULL'
-    label = `Low Volatility VIX ${vix.toFixed(1)}`
-  } else if (vix <= 17) {
-    points = 2
-    regime = 'Moderate'
-    direction = 'BULL'
-    label = `Optimal Trading VIX ${vix.toFixed(1)}`
-  } else if (vix <= 22) {
-    points = -1
-    regime = 'High'
-    direction = 'BEAR'
-    label = `Elevated Risk VIX ${vix.toFixed(1)}`
-  } else {
-    points = -2
-    regime = 'Extreme'
-    direction = 'BEAR'
-    label = `Extreme Volatility VIX ${vix.toFixed(1)}`
-  }
-  return { score: points, max: 2, label, regime, direction, detail: `VIX: ${vix.toFixed(1)}` }
+/**
+ * VIX tradeability check (browser parity): untradeable regimes hard-block
+ * new entries via the entry hard-stop gate. VIX is deliberately NOT scored
+ * as layer points — the browser strategy uses it only as this hard stop.
+ */
+export function scoreVix(vix: number | null): {
+  tradeable: boolean;
+  preferSell: boolean;
+  label: string;
+} {
+  if (vix === null)
+    return { tradeable: true, preferSell: false, label: "VIX unknown" };
+  if (vix > 25)
+    return {
+      tradeable: false,
+      preferSell: false,
+      label: `VIX ${vix} > 25 — too volatile`,
+    };
+  if (vix < 10)
+    return {
+      tradeable: false,
+      preferSell: false,
+      label: `VIX ${vix} < 10 — no volatility`,
+    };
+  if (vix >= 18)
+    return {
+      tradeable: true,
+      preferSell: true,
+      label: `VIX ${vix} — high vol, prefer sell`,
+    };
+  return { tradeable: true, preferSell: false, label: `VIX ${vix} — normal` };
 }
 
 export function scoreStraddleIV(
-  elevated: boolean | null,
   percentAboveAvg: number | null,
-): VrdScore & { direction: 'BULL' | 'BEAR' | 'NEUTRAL' } {
-  if (elevated === null) {
-    return { score: 0, max: 1, label: 'Straddle IV unavailable', direction: 'NEUTRAL' }
-  }
-  if (elevated) {
+): VrdScore & { preferBuy: boolean } {
+  if (percentAboveAvg === null)
+    return { score: 0, max: 1, label: "IV unavailable", preferBuy: false };
+  if (percentAboveAvg > 30)
     return {
       score: -1,
       max: 1,
-      label: `Elevated Straddle IV (+${(percentAboveAvg ?? 0).toFixed(0)}%)`,
-      direction: 'BEAR',
-    }
-  }
+      label: `IV ${percentAboveAvg.toFixed(1)}% above avg — prefer sell`,
+      preferBuy: false,
+    };
+  if (percentAboveAvg > 0)
+    return {
+      score: 0,
+      max: 1,
+      label: "IV slightly elevated",
+      preferBuy: false,
+    };
   return {
     score: 1,
     max: 1,
-    label: 'Normal Straddle IV',
-    direction: 'BULL',
+    label: "IV below avg — buying cheap",
+    preferBuy: true,
+  };
+}
+
+// ─── News classification (ported from client vrdSignals) ───────────────────
+
+const MACRO_KEYWORDS = [
+  "fed",
+  "fomc",
+  "rbi",
+  "interest rate",
+  "inflation",
+  "cpi",
+  "gdp",
+  "war",
+  "geopolitical",
+  "budget",
+  "crude oil",
+  "brent",
+];
+
+const EARNINGS_KEYWORDS = [
+  "earnings",
+  "q1",
+  "q2",
+  "q3",
+  "q4",
+  "net profit",
+  "dividend",
+  "quarterly results",
+  "earnings results",
+  "financial results",
+];
+
+function matchesKeyword(content: string, kw: string): boolean {
+  const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`\\b${escaped}s?\\b`, "i");
+  return regex.test(content);
+}
+
+export function classifyNews(items: UpstoxNewsItem[]): NewsAlert[] {
+  const alerts: NewsAlert[] = [];
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  let now: number;
+  try {
+    const serverTime = new Date().toISOString();
+    now = new Date(serverTime).getTime();
+  } catch {
+    now = Date.now();
   }
+  const seenHeadlines = new Set<string>();
+
+  for (const item of items) {
+    const headline = item.headline || "";
+
+    // 1. Time filter: skip items older than 24 hours or missing timestamp
+    if (
+      !item.published_timestamp ||
+      now - item.published_timestamp > ONE_DAY_MS
+    ) {
+      continue;
+    }
+
+    if (headline) {
+      if (seenHeadlines.has(headline)) {
+        continue;
+      }
+      seenHeadlines.add(headline);
+    }
+
+    // 2. Defensive checks for headline/summary
+    const summary = item.summary || "";
+    const content = `${headline} ${summary}`.toLowerCase();
+
+    const matchedMacro = MACRO_KEYWORDS.filter((kw) =>
+      matchesKeyword(content, kw),
+    );
+    const matchedEarnings = EARNINGS_KEYWORDS.filter((kw) =>
+      matchesKeyword(content, kw),
+    );
+
+    if (matchedMacro.length > 0 || matchedEarnings.length > 0) {
+      const type = matchedMacro.length > 0 ? "MACRO" : "EARNINGS";
+      let severity: "HIGH" | "MEDIUM" | "LOW" = "LOW";
+
+      if (
+        (matchesKeyword(content, "war") &&
+          !content.includes("price war") &&
+          !content.includes("trade war")) ||
+        matchesKeyword(content, "escalate") ||
+        (matchesKeyword(content, "rate hike") &&
+          !content.includes("no rate hike") &&
+          !content.includes("no interest rate hike")) ||
+        matchesKeyword(content, "shock") ||
+        matchesKeyword(content, "crash") ||
+        matchedMacro.length + matchedEarnings.length >= 3
+      ) {
+        severity = "HIGH";
+      } else if (
+        matchesKeyword(content, "earnings") ||
+        matchesKeyword(content, "profit") ||
+        matchesKeyword(content, "quarterly results") ||
+        matchedMacro.length + matchedEarnings.length >= 2
+      ) {
+        severity = "MEDIUM";
+      }
+
+      // 3. Deterministic ID generation based on published_timestamp and headline slug
+      const cleanHeadline = headline
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .slice(0, 20)
+        .replace(/^-+|-+$/g, ""); // trim leading/trailing dashes
+      const id = `${item.published_timestamp}-${cleanHeadline || "news"}`;
+
+      alerts.push({
+        id,
+        headline,
+        summary: item.summary,
+        type,
+        severity,
+        timestamp: item.published_timestamp,
+        matchedKeywords: [...matchedMacro, ...matchedEarnings],
+      });
+    }
+  }
+
+  return alerts;
 }

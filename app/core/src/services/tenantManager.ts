@@ -12,7 +12,7 @@ import { DEFAULT_STRATEGY_CONFIG } from "../constants";
 import { MasterIngestionEngine } from "./masterIngestor";
 import { OrderGateway } from "./orderGateway";
 import { pickBestOptionContract } from "./syntheticCalculators";
-import { runHardStopChecks } from "./strategyEngine";
+import { runHardStopChecks, checkEntryHardStops } from "./strategyEngine";
 import { getIndiaTime } from "../utils/timeUtils";
 import {
   getTelegramConfig,
@@ -574,6 +574,12 @@ export class TenantManager extends EventEmitter {
             signal &&
             (signal.signal === "BUY_CE" || signal.signal === "BUY_PE")
           ) {
+            // Entry hard-stop gate (browser parity): VIX tradeability band +
+            // high-severity macro news block new entries entirely.
+            const hardStop = checkEntryHardStops(snapshot.vrdData ?? null);
+            if (hardStop.blocked) {
+              continue;
+            }
             const direction = signal.signal === "BUY_CE" ? "CE" : "PE";
             const optionChain = snapshot.optionChain || [];
             const selectedContract = pickBestOptionContract(

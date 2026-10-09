@@ -10,6 +10,7 @@ import type {
 import { UNDERLYING_INSTRUMENT_KEYS } from "../types";
 import { computeAllIndicators } from "./indicators";
 import { getFinalSignal } from "./strategyEngine";
+import { SentimentIngestor } from "./sentimentIngestor";
 import { DEFAULT_STRATEGY_CONFIG } from "../constants";
 import { getIndiaTime } from "../utils/timeUtils";
 import { fetchWithRetry } from "../utils/http/fetchRetry";
@@ -40,6 +41,7 @@ export class MasterIngestionEngine extends EventEmitter {
   private lastChainFetchMs = new Map<UnderlyingSymbol, number>();
   private lastVixFetchMs = 0;
   private vixValue: number | null = null;
+  private sentimentIngestor!: SentimentIngestor;
   private expiryCache = new Map<
     UnderlyingSymbol,
     { expiry: string; fetchedMs: number }
@@ -63,10 +65,17 @@ export class MasterIngestionEngine extends EventEmitter {
     ] as UnderlyingSymbol[]) {
       this.candleBuffer.set(sym, this.generateSeedCandles(sym));
     }
+
+    // Live sentiment pipeline (breadth, FII, PCR, max pain, GIFT Nifty, news)
+    this.sentimentIngestor = new SentimentIngestor({
+      upstoxApiBaseUrl: this.config.upstoxApiBaseUrl,
+      token: this.config.primaryUpstoxToken,
+    });
   }
 
   public setToken(token: string) {
     this.config.primaryUpstoxToken = token;
+    this.sentimentIngestor.setToken(token);
   }
 
   public getPrimaryToken(): string | null {
@@ -228,7 +237,13 @@ export class MasterIngestionEngine extends EventEmitter {
 
       // Compute indicators and scoring ONCE
       const indicators = computeAllIndicators(candles, optionChain);
-      const vrdData: VrdData = this.latestVrd ?? {
+
+      // ── VRD sentiment layer ─────────────────────────────────────────────
+      // Live mode: assembled from real breadth/FII/PCR/max-pain/GIFT/news
+      // (SentimentIngestor) plus chain-derived walls/IV/MMI. Mock mode and
+      // pre-seed states keep the deterministic placeholder so tests stay
+      // reproducible.
+      const placeholderVrd: VrdData = {
         mmi: { score: 45, label: "Fear" },
         advancesDeclines: {
           advances: 30,
@@ -254,6 +269,26 @@ export class MasterIngestionEngine extends EventEmitter {
         fetchedAt: timestamp,
       };
 
+      let vrdData: VrdData;
+      if (this.latestVrd) {
+        vrdData = this.latestVrd;
+      } else if (this.config.mockMode || !this.config.primaryUpstoxToken) {
+        vrdData = placeholderVrd;
+      } else {
+        try {
+          const chainExpiry = optionChain[0]?.expiry ?? null;
+          vrdData = await this.sentimentIngestor.buildSymbolVrd(
+            symbol,
+            chainExpiry,
+            optionChain,
+            indicators,
+            this.vixValue,
+          );
+        } catch {
+          vrdData = placeholderVrd;
+        }
+      }
+
       const signalData: AllSignalData = {
         v3:
           indicators.ema === "Buy"
@@ -263,6 +298,7 @@ export class MasterIngestionEngine extends EventEmitter {
               : "hold",
         indicators,
         vrd: vrdData,
+        globalIndices: this.sentimentIngestor.getGlobalIndices(),
       };
 
       const finalSignal = getFinalSignal(signalData, DEFAULT_STRATEGY_CONFIG);
