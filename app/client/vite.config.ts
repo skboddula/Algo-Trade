@@ -12,8 +12,9 @@ export default defineConfig(({ mode }) => {
     server: {
       // Allow access via Tailscale MagicDNS hostname (tailnet HTTPS proxy)
       allowedHosts: ['.ts.net'],
-      // Bind to all interfaces so Tailscale MagicDNS can reach the dev server
-      host: false,
+      // Bind to IPv4 loopback — the Tailscale serve proxy targets
+      // 127.0.0.1:5173; binding only ::1 (the default) makes the proxy 502.
+      host: '127.0.0.1',
       port: 5173,
     },
     resolve: {
