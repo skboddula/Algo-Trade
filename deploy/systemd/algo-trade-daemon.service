@@ -1,0 +1,19 @@
+[Unit]
+Description=Algo-Trade always-on trading daemon (Fastify, port 3000)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/shiva/Downloads/Algo-Trade/app/core
+ExecStart=/home/shiva/Downloads/Algo-Trade/app/core/node_modules/.bin/tsx src/server.ts
+Environment=NODE_ENV=development
+# Restart on crash; back off 5s to avoid rapid restart loops
+Restart=on-failure
+RestartSec=5
+# Give the app a moment to shut down cleanly (flushes logs, persists state)
+TimeoutStopSec=15
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target

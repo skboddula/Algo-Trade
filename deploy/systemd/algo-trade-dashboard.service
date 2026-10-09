@@ -1,0 +1,16 @@
+[Unit]
+Description=Algo-Trade dashboard (Vite dev server, port 5173)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/shiva/Downloads/Algo-Trade/app/client
+ExecStart=/home/shiva/Downloads/Algo-Trade/app/client/node_modules/.bin/vite
+# Restart on crash; the Tailscale serve proxy targets this port
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target
