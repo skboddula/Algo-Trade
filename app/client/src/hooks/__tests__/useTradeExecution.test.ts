@@ -6,7 +6,8 @@ import {
   useTradeExecution,
   type ExecutionContext,
 } from '@/hooks/useTradeExecution'
-import type { OptionData } from '@/lib/types'
+import { safeFetch } from '@/lib/marketService'
+import type { OptionData, UnderlyingSymbol } from '@/lib/types'
 
 vi.mock('@/lib/marketService', () => ({
   safeFetch: vi.fn(),
@@ -30,9 +31,15 @@ vi.mock('@/lib/strategyEngine', () => ({
   shouldExit: vi.fn(() => ({ exit: false, reason: '' })),
 }))
 
+const marketHours = { open: true }
+vi.mock('@/lib/timeUtils', () => ({
+  getIndiaTime: () => ({ isMarketHours: marketHours.open }),
+}))
+
 describe('useTradeExecution', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    marketHours.open = true
   })
 
   it('should return a Set and skip entry when afterCutoff is true', async () => {
@@ -225,6 +232,47 @@ describe('useTradeExecution', () => {
     expect(mockCtx.curPositions['NIFTY 50']?.legs?.[0]?.tradeType).toBe(
       'selling',
     )
+  })
+
+  it('skips entry evaluation entirely when the market is closed', async () => {
+    marketHours.open = false
+    const { result } = renderHook(() => useTradeExecution())
+
+    const mockCtx = {
+      token: 'test-token',
+      config: {
+        executionMode: 'paper',
+        multiSymbolExecutionMode: 'independent',
+        otmSkip: 0,
+        tradeType: 'buying',
+        maxTradesPerDay: 3,
+        exitCooldownSec: 60,
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        strongGap: 1,
+        moderateGap: 1,
+        minConfidence: 'moderate',
+        maxProfitPct: 20,
+        maxLossPct: 15,
+      },
+      allowedSymbols: ['NIFTY 50'] as UnderlyingSymbol[],
+      marketMap: {},
+      symbolSignals: {},
+      symbolVrds: {},
+      hardStop: { blocked: false, blockedDirection: 'NONE', reasons: [] },
+      afterCutoff: false,
+      allowEntries: true,
+      curPositions: {},
+      curTradesPerSym: {},
+      lastExitTimes: {},
+      addLog: vi.fn(),
+      onStaticIpError: undefined,
+      abortSignal: undefined,
+    } as unknown as ExecutionContext
+
+    const newlyEntered = await result.current.evaluateAndEnter(mockCtx)
+    expect(newlyEntered.size).toBe(0)
+    expect(safeFetch).not.toHaveBeenCalled()
   })
 
   it('should exit positions when afterCutoff is true', async () => {

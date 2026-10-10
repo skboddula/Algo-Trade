@@ -21,6 +21,7 @@ import {
   type BotLog,
   type fetchMarket,
 } from '@/lib/marketService'
+import { getIndiaTime } from '@/lib/timeUtils'
 import { getOtmStrike } from '@/lib/indicators'
 import {
   buildEntryAlertMessage,
@@ -137,6 +138,14 @@ export function useTradeExecution() {
 
       const newlyEnteredPositions = new Set<UnderlyingSymbol>()
       if (afterCutoff || !allowEntries || abortSignal?.aborted) {
+        return newlyEnteredPositions
+      }
+
+      // Market-hours guard (shared policy with the daemon): when NSE is
+      // closed, snapshots are the previous session's frozen data — signals
+      // computed on them are meaningless, so never evaluate new entries.
+      // Position supervision/exits still run in the tick loop.
+      if (!getIndiaTime().isMarketHours) {
         return newlyEnteredPositions
       }
 
