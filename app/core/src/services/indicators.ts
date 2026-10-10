@@ -104,68 +104,67 @@ export function calcRSI(
     return { value: 50, signal: SIGNAL_HOLD };
   }
   const closes = candles.map((c) => c[4]);
+  // Seed with simple average of first period changes
   let avgGain = 0;
   let avgLoss = 0;
   for (let i = 1; i <= period; i++) {
     const diff = closes[i] - closes[i - 1];
     if (diff >= 0) avgGain += diff;
-    else avgLoss += Math.abs(diff);
+    else avgLoss -= diff;
   }
   avgGain /= period;
   avgLoss /= period;
-
+  // Wilder's smoothing: EMA factor = 1/period
   for (let i = period + 1; i < closes.length; i++) {
     const diff = closes[i] - closes[i - 1];
-    if (diff >= 0) {
-      avgGain = (avgGain * (period - 1) + diff) / period;
-      avgLoss = (avgLoss * (period - 1)) / period;
-    } else {
-      avgGain = (avgGain * (period - 1)) / period;
-      avgLoss = (avgLoss * (period - 1) + Math.abs(diff)) / period;
-    }
+    const gain = diff >= 0 ? diff : 0;
+    const loss = diff < 0 ? -diff : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
   }
   if (avgLoss === 0) return { value: 100, signal: MOMENTUM_OVERBOUGHT };
   const rs = avgGain / avgLoss;
-  const rsi = Math.round((100 - 100 / (1 + rs)) * 100) / 100;
-  let signal: MomentumType = SIGNAL_HOLD;
-  if (rsi >= overbought) signal = MOMENTUM_OVERBOUGHT;
-  else if (rsi <= oversold) signal = MOMENTUM_OVERSOLD;
-  return { value: rsi, signal };
+  const value = parseFloat((100 - 100 / (1 + rs)).toFixed(2));
+  const signal: MomentumType =
+    value >= overbought
+      ? MOMENTUM_OVERBOUGHT
+      : value <= oversold
+        ? MOMENTUM_OVERSOLD
+        : SIGNAL_HOLD;
+  return { value, signal };
 }
 
 export function calcStochastic(
   candles: Candle[],
-  kPeriod = 14,
-  dPeriod = 3,
-  overbought = 80,
-  oversold = 20,
+  period = 14,
+  smoothing = 3,
 ): { k: number; d: number; signal: SignalType } {
-  if (candles.length < kPeriod + dPeriod) {
-    return { k: 50, d: 50, signal: SIGNAL_HOLD };
-  }
+  const needed = period + smoothing - 1;
+  if (candles.length < needed) return { k: 50, d: 50, signal: SIGNAL_HOLD };
+  const recent = candles.slice(-needed);
   const kValues: number[] = [];
-  for (let i = kPeriod - 1; i < candles.length; i++) {
-    const slice = candles.slice(i - kPeriod + 1, i + 1);
-    const highestHigh = Math.max(...slice.map((c) => c[2]));
-    const lowestLow = Math.min(...slice.map((c) => c[3]));
-    const currentClose = candles[i][4];
-    const range = highestHigh - lowestLow;
-    const k = range === 0 ? 50 : ((currentClose - lowestLow) / range) * 100;
-    kValues.push(k);
+  for (let i = period - 1; i < recent.length; i++) {
+    const window = recent.slice(i - period + 1, i + 1);
+    const high = Math.max(...window.map((c) => c[2]));
+    const low = Math.min(...window.map((c) => c[3]));
+    const close = recent[i][4];
+    kValues.push(high === low ? 50 : ((close - low) / (high - low)) * 100);
   }
-  const dValues = computeEMAArray(kValues, dPeriod);
-  const lastK = Math.round((kValues[kValues.length - 1] ?? 50) * 100) / 100;
-  const lastD = Math.round((dValues[dValues.length - 1] ?? 50) * 100) / 100;
+  const k = parseFloat((kValues[kValues.length - 1] ?? 50).toFixed(2));
+  const dValues = kValues.slice(-smoothing);
+  const d = parseFloat(
+    (dValues.reduce((s, v) => s + v, 0) / dValues.length).toFixed(2),
+  );
   let signal: SignalType = SIGNAL_HOLD;
-  if (lastK > lastD && lastK < overbought) signal = SIGNAL_BUY;
-  else if (lastK < lastD && lastK > oversold) signal = SIGNAL_SELL;
-  return { k: lastK, d: lastD, signal };
+  if (k > d && k < 20) signal = SIGNAL_BUY;
+  else if (k < d && k > 80) signal = SIGNAL_SELL;
+  return { k, d, signal };
 }
 
 export function calcBollingerBands(
   candles: Candle[],
   period = 20,
-  stdDevMultiplier = 2,
+  mode: "breakout" | "reversion" = "breakout",
 ): {
   upper: number;
   middle: number;
@@ -183,22 +182,26 @@ export function calcBollingerBands(
       trend: "Neutral",
     };
   }
-  const slice = candles.slice(-period);
-  const closes = slice.map((c) => c[4]);
-  const mean = closes.reduce((a, b) => a + b, 0) / period;
-  const variance =
-    closes.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / period;
-  const stdDev = Math.sqrt(variance);
-  const upper = Math.round((mean + stdDevMultiplier * stdDev) * 100) / 100;
-  const lower = Math.round((mean - stdDevMultiplier * stdDev) * 100) / 100;
-  const middle = Math.round(mean * 100) / 100;
-  const current = closes[closes.length - 1];
+  const recent = candles.slice(-period);
+  const closes = recent.map((c) => c[4]);
+  const sma = closes.reduce((s, p) => s + p, 0) / period;
+  const stdDev = Math.sqrt(
+    closes.reduce((s, p) => s + Math.pow(p - sma, 2), 0) / period,
+  );
+  const upper = parseFloat((sma + 2 * stdDev).toFixed(2));
+  const lower = parseFloat((sma - 2 * stdDev).toFixed(2));
+  const middle = parseFloat(sma.toFixed(2));
+  const currentPrice = candles[candles.length - 1][4];
   let signal: SignalType = SIGNAL_HOLD;
-  if (current >= upper) signal = SIGNAL_SELL;
-  else if (current <= lower) signal = SIGNAL_BUY;
-  let trend: TrendType = "Neutral";
-  if (current > middle) trend = "Up";
-  else if (current < middle) trend = "Down";
+  if (mode === "breakout") {
+    if (currentPrice > upper) signal = SIGNAL_BUY;
+    else if (currentPrice < lower) signal = SIGNAL_SELL;
+  } else {
+    if (currentPrice > upper) signal = SIGNAL_SELL;
+    else if (currentPrice < lower) signal = SIGNAL_BUY;
+  }
+  const trend: TrendType =
+    currentPrice > middle ? "Up" : currentPrice < middle ? "Down" : "Neutral";
   return { upper, middle, lower, signal, trend };
 }
 
@@ -206,21 +209,18 @@ export function calcATR(
   candles: Candle[],
   period = 14,
 ): { value: number; level: VolatilityLevel } {
-  if (candles.length < period + 1) {
-    return { value: 0, level: "Neutral" };
-  }
+  if (candles.length < period + 1) return { value: 0, level: "Low" };
   const recent = candles.slice(-(period + 1));
-  const trs: number[] = [];
+  let trSum = 0;
   for (let i = 1; i < recent.length; i++) {
-    trs.push(trueRange(recent[i], recent[i - 1][4]));
+    trSum += trueRange(recent[i], recent[i - 1][4]);
   }
-  const atr = trs.reduce((a, b) => a + b, 0) / period;
-  const lastClose = candles[candles.length - 1][4];
-  const atrPct = lastClose > 0 ? (atr / lastClose) * 100 : 0;
-  let level: VolatilityLevel = "Neutral";
-  if (atrPct > 1.5) level = "High";
-  else if (atrPct < 0.5) level = "Low";
-  return { value: Math.round(atr * 100) / 100, level };
+  const atr = parseFloat((trSum / period).toFixed(2));
+  const spot = candles[candles.length - 1][4];
+  const pct = spot > 0 ? atr / spot : 0;
+  const level: VolatilityLevel =
+    pct >= 0.003 ? "High" : pct <= 0.001 ? "Low" : "Neutral";
+  return { value: atr, level };
 }
 
 export function calcSupertrend(

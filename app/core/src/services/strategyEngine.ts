@@ -469,7 +469,15 @@ export function getFinalSignal(
       : bear.score > bull.score
         ? "bear"
         : CONFIDENCE_NONE;
-  const scoreMax = Math.max(bull.max, bear.max, 1);
+  // Browser parity: the denominator is the DOMINANT side's max — using
+  // max-of-both deflates top/scoreMax and starves the ratio-based
+  // confidence fallbacks.
+  const scoreMax =
+    dominant === "bull"
+      ? Math.max(bull.max, 1)
+      : dominant === "bear"
+        ? Math.max(bear.max, 1)
+        : Math.max(bull.max, bear.max, 1);
 
   const ratio = scoreMax > 0 ? top / scoreMax : 0;
   let confidence: "strong" | "moderate" | "weak" | "none" = CONFIDENCE_NONE;
