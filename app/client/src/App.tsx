@@ -400,7 +400,7 @@ function DashboardShell({
   // without a daemon the classic in-tab bot remains fully functional.
   const browserBot = useStrategyBot(brokerToken)
   const daemonBot = useDaemonBot(brokerToken)
-  const [daemonAvailable, setDaemonAvailable] = useState(false)
+  const [daemonAvailable, setDaemonAvailable] = useState<boolean | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -429,7 +429,6 @@ function DashboardShell({
   const strategyBot = daemonAvailable
     ? (daemonBot as unknown as StrategyBotController)
     : browserBot
-  const isDaemonMode = daemonAvailable
 
   const renderPage = () => {
     switch (activeItem) {
@@ -444,7 +443,7 @@ function DashboardShell({
           <StrategiesPage
             bot={strategyBot}
             token={brokerToken}
-            daemonMode={isDaemonMode}
+            daemonMode={daemonAvailable ?? undefined}
           />
         )
       case 'history':
@@ -460,7 +459,7 @@ function DashboardShell({
     <div className="flex min-h-dvh bg-background">
       <Sidebar activeItem={activeItem} onSelect={onSelect} />
       <div className="flex flex-col flex-1 min-w-0">
-        <Header />
+        <Header daemonMode={daemonAvailable ?? undefined} />
         <main className="flex-1 overflow-y-auto">
           <Suspense
             fallback={

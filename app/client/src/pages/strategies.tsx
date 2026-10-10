@@ -90,6 +90,21 @@ export function StrategiesPage({
       {/* Data feed status */}
       <SourceStatusBar sourceStatus={bot.sourceStatus} />
 
+      {/* Browser-mode fallback banner — daemon unreachable */}
+      {daemonMode === false && (
+        <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-foreground flex items-center gap-2">
+          <span className="inline-block w-2 h-2 rounded-full bg-warning animate-pulse" />
+          <span>
+            <span className="font-semibold">Browser mode</span> — daemon
+            unreachable. Start/Stop controls the in-tab bot with its own
+            separate paper account. Switch back:{' '}
+            <code className="px-1 py-0.5 rounded bg-muted font-mono">
+              systemctl --user start algo-trade-daemon
+            </code>
+          </span>
+        </div>
+      )}
+
       {/* Daemon mode banner — the bot runs on the always-on daemon */}
       {daemonMode && (
         <div className="rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs text-foreground flex items-center gap-2">

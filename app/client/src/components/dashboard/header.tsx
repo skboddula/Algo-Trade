@@ -160,7 +160,7 @@ function useMarketStatus() {
   return info
 }
 
-export function Header() {
+export function Header({ daemonMode }: { daemonMode?: boolean }) {
   const { isOpen: isMarketOpen, hint: marketHint } = useMarketStatus()
   const { indices, isLive, refresh } = useIndices(isMarketOpen)
   const [showNotifications, setShowNotifications] = useState(false)
@@ -267,6 +267,19 @@ export function Header() {
           >
             {isMarketOpen ? '● NSE OPEN' : '○ NSE CLOSED'}
           </Badge>
+          {daemonMode !== undefined && (
+            <Badge
+              variant={daemonMode ? 'success' : 'warning'}
+              className="text-xs"
+              title={
+                daemonMode
+                  ? 'Bot logic runs on the always-on daemon — closing this tab never stops it'
+                  : 'Daemon unreachable — Start/Stop controls the in-tab browser bot (separate paper account). Fix: systemctl --user start algo-trade-daemon'
+              }
+            >
+              {daemonMode ? '● DAEMON' : '● BROWSER'}
+            </Badge>
+          )}
           {marketHint && (
             <span className="text-xs text-muted-foreground">{marketHint}</span>
           )}
