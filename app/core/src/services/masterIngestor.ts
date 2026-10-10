@@ -15,6 +15,7 @@ import { computeV3Signal } from "./v3Sentiment";
 import { DEFAULT_STRATEGY_CONFIG } from "../constants";
 import { getIndiaTime } from "../utils/timeUtils";
 import { fetchWithRetry } from "../utils/http/fetchRetry";
+import { loadState, saveState } from "../utils/store";
 
 export interface MasterIngestorConfig {
   pollingIntervalMs: number;
@@ -67,6 +68,13 @@ export class MasterIngestionEngine extends EventEmitter {
       this.candleBuffer.set(sym, this.generateSeedCandles(sym));
     }
 
+    // Prefer a token pushed by the dashboard over the static .env value —
+    // it was handed over after .env was written, so it is always newer.
+    const persisted = loadState<{ token?: string }>("primary_token");
+    if (persisted?.token) {
+      this.config.primaryUpstoxToken = persisted.token;
+    }
+
     // Live sentiment pipeline (breadth, FII, PCR, max pain, GIFT Nifty, news)
     this.sentimentIngestor = new SentimentIngestor({
       upstoxApiBaseUrl: this.config.upstoxApiBaseUrl,
@@ -77,6 +85,9 @@ export class MasterIngestionEngine extends EventEmitter {
   public setToken(token: string) {
     this.config.primaryUpstoxToken = token;
     this.sentimentIngestor.setToken(token);
+    // Persist so daemon restarts keep the freshest token (the static .env
+    // copy is only as fresh as the last manual edit — it expires daily).
+    saveState("primary_token", { token, pushedAt: new Date().toISOString() });
   }
 
   public getPrimaryToken(): string | null {
