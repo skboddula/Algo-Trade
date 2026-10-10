@@ -47,15 +47,20 @@ export function BotControls({
   daemonMode?: boolean
 }) {
   const [secsUntilTick, setSecsUntilTick] = useState(pollingIntervalSec)
+  // Daemon mode: seconds since the last daemon push — a live heartbeat that
+  // counts UP and resets on every update; a climbing number means the daemon
+  // (or the data feed) has stalled.
+  const [secsSinceUpdate, setSecsSinceUpdate] = useState(0)
 
   useEffect(() => {
     if (state !== 'RUNNING' && state !== 'ORDERED') return
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSecsUntilTick(pollingIntervalSec)
-    const id = setInterval(
-      () => setSecsUntilTick((s) => (s <= 1 ? pollingIntervalSec : s - 1)),
-      1000,
-    )
+    setSecsSinceUpdate(0)
+    const id = setInterval(() => {
+      setSecsUntilTick((s) => (s <= 1 ? pollingIntervalSec : s - 1))
+      setSecsSinceUpdate((s) => s + 1)
+    }, 1000)
     return () => clearInterval(id)
   }, [state, pollingIntervalSec, lastUpdated])
 
@@ -144,7 +149,7 @@ export function BotControls({
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Clock size={12} />
             {daemonMode
-              ? 'Live — daemon ticks every 2s'
+              ? `Updated ${secsSinceUpdate}s ago`
               : `Next tick in ${secsUntilTick}s`}
             {lastUpdated && (
               <span className="ml-auto">Last: {lastUpdated}</span>

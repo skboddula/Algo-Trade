@@ -109,15 +109,20 @@ export function StrategyHeaderBar({
   streamHealth?: StreamHealth
 }) {
   const [secsUntilTick, setSecsUntilTick] = useState(pollingIntervalSec)
+  // Daemon mode: seconds since the last daemon push — a live heartbeat that
+  // counts UP and resets on every update; a climbing number means the daemon
+  // (or the data feed) has stalled.
+  const [secsSinceUpdate, setSecsSinceUpdate] = useState(0)
 
   useEffect(() => {
     if (state !== 'RUNNING' && state !== 'ORDERED') return
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSecsUntilTick(pollingIntervalSec)
-    const id = setInterval(
-      () => setSecsUntilTick((s) => (s <= 1 ? pollingIntervalSec : s - 1)),
-      1000,
-    )
+    setSecsSinceUpdate(0)
+    const id = setInterval(() => {
+      setSecsUntilTick((s) => (s <= 1 ? pollingIntervalSec : s - 1))
+      setSecsSinceUpdate((s) => s + 1)
+    }, 1000)
     return () => clearInterval(id)
   }, [state, pollingIntervalSec, lastUpdated])
 
@@ -210,7 +215,7 @@ export function StrategyHeaderBar({
                   <span className="flex items-center gap-1">
                     {daemonMode ? (
                       <>
-                        <Clock size={11} /> Live — daemon ticks every 2s
+                        <Clock size={11} /> Updated {secsSinceUpdate}s ago
                       </>
                     ) : (
                       <>
