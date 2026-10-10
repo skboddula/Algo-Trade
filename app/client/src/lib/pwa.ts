@@ -16,6 +16,11 @@
 
 export function registerServiceWorker(): void {
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return
+  // DEV: never install a service worker against the vite dev server — its
+  // responses are live-transformed modules; caching them across code edits
+  // and server restarts duplicates React and crashes the app. The PWA
+  // cache applies to production builds only.
+  if (import.meta.env.DEV) return
   if (
     window.location.protocol !== 'https:' &&
     window.location.hostname !== 'localhost'
