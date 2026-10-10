@@ -30,3 +30,23 @@ journalctl --user -u algo-trade-daemon -f                          # live logs
   Tailscale serve proxy targets 127.0.0.1 — do not change the host).
 - The daemon reads `app/core/.env` (Upstox token etc.). Fresh tokens are
   pushed by the dashboard after each OAuth login.
+
+## Dashboard fallback behaviour (by design)
+
+The dashboard probes the daemon's `/health` every 10s:
+
+- **Daemon reachable** → daemon controller (Start/Stop act on the daemon). The
+  Strategies page shows a green "Daemon mode" banner — this is your visual
+  confirmation of which controller is active.
+- **Daemon unreachable** → the dashboard silently falls back to the legacy
+  in-tab browser bot (separate D1 paper account).
+
+⚠️ **Safety rule:** if the daemon is down and you click Start, you start the
+in-tab browser bot — a SECOND bot with its own account. If the daemon returns,
+both would trade and both would send Telegram alerts. Before clicking Start
+during market hours, check for the green "Daemon mode" banner. If it's
+missing, first run:
+
+```bash
+systemctl --user start algo-trade-daemon
+```
