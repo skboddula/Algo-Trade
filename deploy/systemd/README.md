@@ -43,9 +43,10 @@ The dashboard probes the daemon's `/health` every 10s:
 
 ⚠️ **Safety rule:** if the daemon is down and you click Start, you start the
 in-tab browser bot — a SECOND bot with its own account. If the daemon returns,
-both would trade and both would send Telegram alerts. Before clicking Start
-during market hours, check for the green "Daemon mode" banner. If it's
-missing, first run:
+both would trade and both would send Telegram alerts. Check the header badge
+on ANY page: `● DAEMON` (green) = daemon controller; `● BROWSER` (amber) =
+fallback active — plus an amber "Browser mode" banner on the Strategies page
+shows the exact fix command. If it says BROWSER, first run:
 
 ```bash
 systemctl --user start algo-trade-daemon
