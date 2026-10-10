@@ -194,7 +194,13 @@ export function Header({ daemonMode }: { daemonMode?: boolean }) {
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
-  const now = new Date()
+  // Dedicated 1s clock — render-driven time (the old approach) only updated
+  // when something else re-rendered, so the seconds jumped in 2-3s steps.
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(t)
+  }, [])
   const timeStr = now.toLocaleTimeString('en-IN', {
     hour: '2-digit',
     minute: '2-digit',
