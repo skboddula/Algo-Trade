@@ -72,10 +72,35 @@ self.addEventListener('fetch', (event) => {
   // Never intercept WebSocket upgrades.
   if (url.protocol === 'wss:' || url.protocol === 'ws:') return
 
-  // Cache-first for same-origin GET requests (app shell + static assets).
   if (event.request.method !== 'GET' || url.origin !== self.location.origin)
     return
 
+  // Navigation requests (the HTML shell): NETWORK-FIRST so new deploys
+  // propagate immediately — a cached index.html would pin users to the
+  // previous build's asset hashes until the cache name is bumped.
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response.ok) {
+            const clone = response.clone()
+            caches
+              .open(CACHE_NAME)
+              .then((cache) => cache.put(event.request, clone))
+              .catch(() => {})
+          }
+          return response
+        })
+        .catch(() =>
+          caches
+            .match(event.request)
+            .then((cached) => cached || caches.match('/index.html')),
+        ),
+    )
+    return
+  }
+
+  // Static assets: cache-first (hashed files are immutable).
   event.respondWith(
     caches
       .match(event.request)

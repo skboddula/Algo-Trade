@@ -16,11 +16,29 @@
 
 export function registerServiceWorker(): void {
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return
-  // DEV: never install a service worker against the vite dev server — its
-  // responses are live-transformed modules; caching them across code edits
-  // and server restarts duplicates React and crashes the app. The PWA
-  // cache applies to production builds only.
-  if (import.meta.env.DEV) return
+  if (import.meta.env.DEV) {
+    // DEV: actively remove any legacy worker + caches left by older builds —
+    // including registrations made under proxied origins (e.g. the Tailscale
+    // tailnet hostname) where the worker itself can't detect "dev". Cached
+    // dev modules are what duplicated React and crashed the app.
+    void navigator.serviceWorker
+      .getRegistrations()
+      .then((registrations) => {
+        for (const registration of registrations) {
+          void registration.unregister()
+        }
+      })
+      .catch(() => undefined)
+    if (typeof caches !== 'undefined') {
+      void caches
+        .keys()
+        .then((keys) => {
+          for (const key of keys) void caches.delete(key)
+        })
+        .catch(() => undefined)
+    }
+    return
+  }
   if (
     window.location.protocol !== 'https:' &&
     window.location.hostname !== 'localhost'
