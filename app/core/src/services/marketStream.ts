@@ -18,7 +18,8 @@ import { join } from "path";
 const FEED_URL = "wss://api.upstox.com/v3/feed/market-data-feed";
 const FEED_PACKAGE = "com.upstox.marketdatafeederv3udapi.rpc.proto";
 const INDIA_VIX_KEY = "NSE_INDEX|India VIX";
-const VIX_FRESHNESS_MS = 120_000;
+import { VIX_FRESHNESS_WINDOW_MS } from "../constants";
+const VIX_FRESHNESS_MS = VIX_FRESHNESS_WINDOW_MS;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
 
@@ -62,7 +63,11 @@ export interface MarketStreamOptions {
 }
 
 export type StreamStatus =
-  "idle" | "connecting" | "open" | "reconnecting" | "closed";
+  | "idle"
+  | "connecting"
+  | "open"
+  | "reconnecting"
+  | "closed";
 
 // ─── Stream Manager ─────────────────────────────────────────────────────────
 

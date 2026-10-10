@@ -1,6 +1,7 @@
 // Institutional signal scoring — converts live Upstox + synthetic data into scored points
 
 import type { VrdScore, UpstoxNewsItem, NewsAlert } from './types'
+import { VIX_HARD_STOP_MAX, VIX_HARD_STOP_MIN } from './constants'
 
 // ─── MMI ─────────────────────────────────────────────────────────────────────
 export function scoreMMI(
@@ -190,17 +191,17 @@ export function scoreVix(vix: number | null): {
 } {
   if (vix === null)
     return { tradeable: true, preferSell: false, label: 'VIX unknown' }
-  if (vix > 25)
+  if (vix > VIX_HARD_STOP_MAX)
     return {
       tradeable: false,
       preferSell: false,
-      label: `VIX ${vix} > 25 — too volatile`,
+      label: `VIX ${vix} > ${VIX_HARD_STOP_MAX} — too volatile`,
     }
-  if (vix < 10)
+  if (vix < VIX_HARD_STOP_MIN)
     return {
       tradeable: false,
       preferSell: false,
-      label: `VIX ${vix} < 10 — no volatility`,
+      label: `VIX ${vix} < ${VIX_HARD_STOP_MIN} — no volatility`,
     }
   if (vix >= 18)
     return {

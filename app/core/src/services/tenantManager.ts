@@ -8,7 +8,13 @@ import type {
   AllSignalData,
   PaperTradeRecord,
 } from "../types";
-import { DEFAULT_STRATEGY_CONFIG } from "../constants";
+import {
+  DEFAULT_STRATEGY_CONFIG,
+  VIX_CRITICAL_ALERT_COOLDOWN_MS,
+  VIX_CRITICAL_THRESHOLD,
+  VIX_ELEVATED_THRESHOLD,
+  VIX_HARD_STOP_MAX,
+} from "../constants";
 import { MasterIngestionEngine } from "./masterIngestor";
 import { OrderGateway } from "./orderGateway";
 import { getLotSizeForSymbol } from "./syntheticCalculators";
@@ -409,18 +415,23 @@ export class TenantManager extends EventEmitter {
     const streamedVix = this.marketStream.getStreamedVix();
     const vix = streamedVix ?? vrdData?.vix;
     if (!vix || !Number.isFinite(vix)) return;
-    const level = vix >= 24 ? "critical" : vix >= 18 ? "elevated" : "none";
+    const level =
+      vix >= VIX_CRITICAL_THRESHOLD
+        ? "critical"
+        : vix >= VIX_ELEVATED_THRESHOLD
+          ? "elevated"
+          : "none";
     if (level === this.vixWarningLevel) return;
 
     this.vixWarningLevel = level;
     this.log("warn", "vix", `VIX ${vix.toFixed(2)} — ${level} level`);
     if (level === "critical") {
       const now = Date.now();
-      if (now - this.lastVixAlertAt < 5 * 60000) return; // 5-min cooldown
+      if (now - this.lastVixAlertAt < VIX_CRITICAL_ALERT_COOLDOWN_MS) return; // cooldown
       this.lastVixAlertAt = now;
       sendTelegramMessage(
         this.telegramConfig,
-        buildVixAlertMessage({ vix, threshold: 25 }),
+        buildVixAlertMessage({ vix, threshold: VIX_HARD_STOP_MAX }),
       ).catch(() => {});
     }
   }

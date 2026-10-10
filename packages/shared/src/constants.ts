@@ -60,3 +60,25 @@ export const DEFAULT_STRATEGY_CONFIG = {
   brentCrudeOverhangThreshold: 85,
   exitCooldownSec: 60,
 };
+
+// ─── India VIX policy (shared by both runtimes) ─────────────────────────────
+
+/** Early-warning level thresholds (hard stop bounds live in scoreVix). */
+export const VIX_ELEVATED_THRESHOLD = 18;
+export const VIX_CRITICAL_THRESHOLD = 24;
+
+/**
+ * Minimum time between critical VIX Telegram alerts so boundary oscillation
+ * (VIX bouncing around the threshold) doesn't spam the user's phone.
+ */
+export const VIX_CRITICAL_ALERT_COOLDOWN_MS = 5 * 60_000; // 5 minutes
+
+/**
+ * Streamed VIX older than this window is ignored in favor of the REST-polled
+ * value. Prevents trading on stale volatility data after a stream disconnect.
+ */
+export const VIX_FRESHNESS_WINDOW_MS = 120_000; // 2 minutes
+
+/** Hard-stop tradeability band (see scoreVix in the client engine). */
+export const VIX_HARD_STOP_MAX = 25;
+export const VIX_HARD_STOP_MIN = 10;

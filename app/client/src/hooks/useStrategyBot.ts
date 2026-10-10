@@ -38,10 +38,15 @@ import {
   INDIA_VIX_INSTRUMENT_KEY,
   VIX_ELEVATED_THRESHOLD,
   VIX_CRITICAL_THRESHOLD,
+  VIX_HARD_STOP_MAX,
   VIX_FRESHNESS_WINDOW_MS,
   VIX_CRITICAL_ALERT_COOLDOWN_MS,
 } from '@/lib/constants'
-import { sendTelegramAlert } from '@/lib/telegram'
+import {
+  sendTelegramAlert,
+  buildVixAlertMessage,
+  buildDailySummaryMessage,
+} from '@/lib/telegram'
 import {
   fetchPaperHistory,
   getIndiaDateString,
@@ -278,7 +283,7 @@ export function useStrategyBot(token: string | null) {
           ),
         )
         void sendTelegramAlert(
-          `⚠️ VIX ALERT — India VIX at ${vix.toFixed(1)}\nHard stop threshold is 25 — entries will be blocked soon.\nManage your open positions accordingly.`,
+          buildVixAlertMessage({ vix, threshold: VIX_HARD_STOP_MAX }),
         ).catch(() => {
           // Best-effort; hard stop evaluation still runs in the tick.
         })
@@ -386,8 +391,6 @@ export function useStrategyBot(token: string | null) {
           (s, t) => s + (t.realized_pnl ?? 0),
           0,
         )
-        const open = trades.filter((t) => t.status === 'OPEN')
-
         const best = wins.length
           ? wins.reduce((a, b) =>
               (a.realized_pnl ?? 0) >= (b.realized_pnl ?? 0) ? a : b,
@@ -399,39 +402,45 @@ export function useStrategyBot(token: string | null) {
             )
           : null
 
-        const fmtPnl = (paise: number) =>
-          `${paise >= 0 ? '+' : '−'}₹${(Math.abs(paise) / 100).toFixed(2)}`
+        // Shared canonical builder. The Worker API returns RUPEES
+        // (toResponseTrade / toResponseAccount apply toRupees) — the old
+        // inline formatting divided by 100, showing 100x-too-small values.
+        const bestMeta = best
+          ? (JSON.parse(best.metadata_json ?? '{}') as {
+              underlyingSymbol?: string
+            })
+          : undefined
+        const worstMeta = worst
+          ? (JSON.parse(worst.metadata_json ?? '{}') as {
+              underlyingSymbol?: string
+            })
+          : undefined
 
-        const lines = [
-          `📊 DAILY SUMMARY — ${today}`,
-          `━━━━━━━━━━━━━━━━━━━━`,
-          `Trades: ${trades.length} | Wins: ${wins.length} | Losses: ${losses.length}${open.length ? ` | Open: ${open.length}` : ''}`,
-          `Realized PnL: ${fmtPnl(realizedPnl)}`,
-          `Paper Balance: ₹${(summary.account.balance / 100).toFixed(2)}`,
-        ]
-        if (best) {
-          const meta = JSON.parse(best.metadata_json ?? '{}') as {
-            underlyingSymbol?: string
-          }
-          lines.push(
-            `Best: ${meta.underlyingSymbol ?? '—'} ${best.direction} ${fmtPnl(best.realized_pnl ?? 0)}`,
-          )
-        }
-        if (worst) {
-          const meta = JSON.parse(worst.metadata_json ?? '{}') as {
-            underlyingSymbol?: string
-          }
-          lines.push(
-            `Worst: ${meta.underlyingSymbol ?? '—'} ${worst.direction} ${fmtPnl(worst.realized_pnl ?? 0)}`,
-          )
-        }
-        lines.push(`━━━━━━━━━━━━━━━━━━━━`)
-        if (streamedVixTickRef.current) {
-          lines.push(`VIX (last): ${streamedVixTickRef.current.ltp.toFixed(1)}`)
-        }
-        lines.push(`Stream: ${statusRef.current.streamHealth}`)
+        const message = buildDailySummaryMessage({
+          date: today,
+          totalTrades: closed.length,
+          wins: wins.length,
+          losses: losses.length,
+          realizedPnl,
+          paperBalance: summary.account.balance,
+          bestTrade: best
+            ? {
+                symbol: bestMeta?.underlyingSymbol ?? '—',
+                direction: best.direction,
+                pnl: best.realized_pnl ?? 0,
+              }
+            : undefined,
+          worstTrade: worst
+            ? {
+                symbol: worstMeta?.underlyingSymbol ?? '—',
+                direction: worst.direction,
+                pnl: worst.realized_pnl ?? 0,
+              }
+            : undefined,
+          vixLast: streamedVixTickRef.current?.ltp ?? undefined,
+        })
 
-        const sent = await sendTelegramAlert(lines.join('\n'))
+        const sent = await sendTelegramAlert(message)
         if (sent) {
           addLog(mkLog('info', 'bot', 'Daily summary sent to Telegram'))
         } else {
