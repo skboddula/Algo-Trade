@@ -7,7 +7,6 @@ import type {
 import { nowIso, makeId, getLotSizeForSymbol } from './utils'
 
 const PAPER_STARTING_CREDIT = 15000_00
-const PAPER_BROKERAGE_PAISE = 20_00
 export const MAX_PAPER_ENTRY_FEE_RATIO = 0.05
 
 function toPaise(value: number): number {
@@ -18,19 +17,14 @@ function toRupees(paise: number): number {
   return Math.round(paise) / 100
 }
 
-export function calculateOptionCharges(
-  tradeValuePaise: number,
-  isSelling: boolean,
-): { totalCharges: number; brokerage: number; statutoryTaxes: number } {
-  const brokerage = PAPER_BROKERAGE_PAISE
-  const stt = isSelling ? Math.round(tradeValuePaise * 0.001) : 0
-  const stampDuty = !isSelling ? Math.round(tradeValuePaise * 0.00003) : 0
-  const exchangeFee = Math.round(tradeValuePaise * 0.0003503)
-  const gst = Math.round((brokerage + exchangeFee) * 0.18)
-  const statutoryTaxes = stt + stampDuty + exchangeFee + gst
-  const totalCharges = brokerage + statutoryTaxes
-  return { totalCharges, brokerage, statutoryTaxes }
-}
+// Fee model — single source of truth in packages/shared/src/fees.ts
+// (shared with the daemon's order gateway so both paper accounts charge
+// identically). Re-exported here for existing consumers/tests.
+export {
+  calculateOptionCharges,
+  type OptionCharges,
+} from '../../../packages/shared/src/fees'
+import { calculateOptionCharges } from '../../../packages/shared/src/fees'
 
 export function calculatePaperExitSettlement(input: {
   entryValuePaise: number

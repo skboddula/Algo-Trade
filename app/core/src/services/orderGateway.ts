@@ -13,32 +13,13 @@ import {
 } from "../utils/store";
 
 /** Flat ₹20 brokerage per order, in paise (parity with the Worker engine). */
-const PAPER_BROKERAGE_PAISE = 20_00;
-
-export interface OptionCharges {
-  totalCharges: number;
-  brokerage: number;
-  statutoryTaxes: number;
-}
-
-/**
- * Realistic option order charges, in paise (direct port of the Worker's
- * calculateOptionCharges — STT on the sell leg, stamp duty on the buy leg,
- * exchange transaction fee, and GST on brokerage + exchange fee).
- */
-export function calculateOptionCharges(
-  tradeValuePaise: number,
-  isSelling: boolean,
-): OptionCharges {
-  const brokerage = PAPER_BROKERAGE_PAISE;
-  const stt = isSelling ? Math.round(tradeValuePaise * 0.001) : 0;
-  const stampDuty = !isSelling ? Math.round(tradeValuePaise * 0.00003) : 0;
-  const exchangeFee = Math.round(tradeValuePaise * 0.0003503);
-  const gst = Math.round((brokerage + exchangeFee) * 0.18);
-  const statutoryTaxes = stt + stampDuty + exchangeFee + gst;
-  const totalCharges = brokerage + statutoryTaxes;
-  return { totalCharges, brokerage, statutoryTaxes };
-}
+// Fee model — single source of truth in packages/shared/src/fees.ts
+// (shared with the Worker's D1 paper engine). Re-exported for consumers.
+export {
+  calculateOptionCharges,
+  type OptionCharges,
+} from "../../../../packages/shared/src/fees";
+import { calculateOptionCharges } from "../../../../packages/shared/src/fees";
 
 export interface OrderPlacementRequest {
   userId: string;
