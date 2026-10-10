@@ -78,6 +78,7 @@ export function StrategyHeaderBar({
   position,
   tradesCount,
   lastUpdated,
+  daemonMode,
   pollingIntervalSec,
   start,
   stop,
@@ -94,6 +95,7 @@ export function StrategyHeaderBar({
   position: ActivePosition | null
   tradesCount: number
   lastUpdated: string | null
+  daemonMode?: boolean
   pollingIntervalSec: number
   start: () => void
   stop: () => void
@@ -206,7 +208,15 @@ export function StrategyHeaderBar({
                 <>
                   <span>•</span>
                   <span className="flex items-center gap-1">
-                    <Clock size={11} /> Next tick: {secsUntilTick}s
+                    {daemonMode ? (
+                      <>
+                        <Clock size={11} /> Live — daemon ticks every 2s
+                      </>
+                    ) : (
+                      <>
+                        <Clock size={11} /> Next tick: {secsUntilTick}s
+                      </>
+                    )}
                   </span>
                 </>
               )}

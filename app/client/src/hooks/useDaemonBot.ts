@@ -121,7 +121,7 @@ export function useDaemonBot(_token: string | null) {
       const primaryTs = snap[PRIMARY]?.timestamp
       if (primaryTs) setLastUpdated(toIstDisplay(primaryTs))
       const balance = (user as { paperBalance?: number }).paperBalance
-      if (typeof balance === 'number') setPaperBalance(balance)
+      if (typeof balance === 'number') setPaperBalance(balance / 100)
       setConnected(true)
     } catch (e) {
       setConnected(false)

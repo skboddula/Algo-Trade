@@ -32,6 +32,7 @@ export function BotControls({
   stop,
   executionMode,
   paperBalance,
+  daemonMode,
 }: {
   state: BotState
   position: ActivePosition | null
@@ -43,6 +44,7 @@ export function BotControls({
   stop: () => void
   executionMode: ExecutionMode
   paperBalance: number | null
+  daemonMode?: boolean
 }) {
   const [secsUntilTick, setSecsUntilTick] = useState(pollingIntervalSec)
 
@@ -141,7 +143,9 @@ export function BotControls({
         {(state === 'RUNNING' || state === 'ORDERED') && (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Clock size={12} />
-            Next tick in {secsUntilTick}s
+            {daemonMode
+              ? 'Live — daemon ticks every 2s'
+              : `Next tick in ${secsUntilTick}s`}
             {lastUpdated && (
               <span className="ml-auto">Last: {lastUpdated}</span>
             )}

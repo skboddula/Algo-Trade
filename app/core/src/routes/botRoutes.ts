@@ -91,7 +91,8 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     if (sockets) {
       const payload = JSON.stringify({
         type: "USER_STATE_UPDATE",
-        data: state,
+        // Sanitized like the REST /status response — never leak upstoxToken
+        data: sanitizeUserState(state),
       });
       for (const ws of sockets) {
         if (ws.readyState === 1 /* OPEN */) {

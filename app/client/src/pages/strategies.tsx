@@ -49,7 +49,15 @@ export function StrategiesPage({
       .catch(() => undefined)
   }, [config, daemonMode])
 
+  // Daemon mode: the daemon controller carries its own paper balance —
+  // the Worker/D1 account belongs to the legacy browser bot.
+  const daemonBalance = daemonMode
+    ? ((bot as unknown as { paperBalance?: number | null }).paperBalance ??
+      null)
+    : null
+
   useEffect(() => {
+    if (daemonMode) return
     if (config.executionMode !== 'paper') return
     let cancelled = false
     void fetchPaperAccount()
@@ -79,12 +87,13 @@ export function StrategiesPage({
         start={bot.start}
         stop={bot.stop}
         executionMode={config.executionMode}
-        paperBalance={paperBalance}
+        paperBalance={daemonMode ? daemonBalance : paperBalance}
         token={token}
         activeTab={activeTab}
         onTabChange={setActiveTab}
         logErrorCount={errorLogsCount}
         streamHealth={bot.streamHealth}
+        daemonMode={daemonMode === true}
       />
 
       {/* Data feed status */}
@@ -165,7 +174,8 @@ export function StrategiesPage({
                 start={bot.start}
                 stop={bot.stop}
                 executionMode={config.executionMode}
-                paperBalance={paperBalance}
+                paperBalance={daemonMode ? daemonBalance : paperBalance}
+                daemonMode={daemonMode === true}
               />
             </div>
             <div className="lg:col-span-8">
