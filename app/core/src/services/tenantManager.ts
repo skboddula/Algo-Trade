@@ -165,7 +165,7 @@ export class TenantManager extends EventEmitter {
         lastExitTimes: {},
         totalRealizedPnl: 0,
         paperBalance: paperAccount.balance,
-        updatedAt: istInfo.date.toISOString(),
+        updatedAt: new Date().toISOString(),
       };
       this.users.set(userId, user);
     } else {

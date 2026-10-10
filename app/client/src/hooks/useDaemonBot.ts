@@ -42,6 +42,17 @@ const PRIMARY: UnderlyingSymbol = 'NIFTY 50'
 const SYMBOLS: UnderlyingSymbol[] = ['NIFTY 50', 'BANKNIFTY', 'FINNIFTY']
 const MAX_LOGS = 300
 
+/**
+ * Formats the daemon's ISO-UTC snapshot timestamps for display — always in
+ * IST, regardless of the viewing device's timezone (matches the browser
+ * bot's contract where lastUpdated was a pre-formatted display string).
+ */
+function toIstDisplay(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })
+}
+
 interface DaemonUserState {
   userId: string
   state: BotState
@@ -108,7 +119,7 @@ export function useDaemonBot(_token: string | null) {
       }
       setSnapshots(mapped)
       const primaryTs = snap[PRIMARY]?.timestamp
-      if (primaryTs) setLastUpdated(primaryTs)
+      if (primaryTs) setLastUpdated(toIstDisplay(primaryTs))
       const balance = (user as { paperBalance?: number }).paperBalance
       if (typeof balance === 'number') setPaperBalance(balance)
       setConnected(true)
@@ -187,7 +198,7 @@ export function useDaemonBot(_token: string | null) {
             const incoming = tick.snapshots ?? {}
             setSnapshots((prev) => ({ ...prev, ...incoming }))
             const ts = incoming[PRIMARY]?.timestamp
-            if (ts) setLastUpdated(ts)
+            if (ts) setLastUpdated(toIstDisplay(ts))
           } else if (msg.type === 'BOT_LOG') {
             const line = (msg.data ?? {}) as DaemonBotLog
             setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), line])

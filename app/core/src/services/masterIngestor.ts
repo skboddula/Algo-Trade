@@ -152,8 +152,10 @@ export class MasterIngestionEngine extends EventEmitter {
 
   public async fetchAndComputeMarketData() {
     const symbols: UnderlyingSymbol[] = ["NIFTY 50", "BANKNIFTY", "FINNIFTY"];
-    const istInfo = getIndiaTime();
-    const timestamp = istInfo.date.toISOString();
+    // True UTC — getIndiaTime().date.toISOString() would emit IST
+    // wall-clock with a bogus 'Z' suffix (double-shifts when clients
+    // parse it as UTC and convert to IST).
+    const timestamp = new Date().toISOString();
 
     for (const symbol of symbols) {
       let spotPrice = 24000;
