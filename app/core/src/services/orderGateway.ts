@@ -13,13 +13,22 @@ import {
 } from "../utils/store";
 
 /** Flat ₹20 brokerage per order, in paise (parity with the Worker engine). */
-// Fee model — single source of truth in packages/shared/src/fees.ts
-// (shared with the Worker's D1 paper engine). Re-exported for consumers.
+// Fee model + settlement — single source of truth in
+// packages/shared/src/fees.ts (shared with the Worker's D1 paper engine).
 export {
   calculateOptionCharges,
+  calculatePaperExitSettlement,
+  MAX_PAPER_ENTRY_FEE_RATIO,
   type OptionCharges,
+  type PaperExitSettlement,
+  type PaperExitSettlementInput,
 } from "../../../../packages/shared/src/fees";
-import { calculateOptionCharges } from "../../../../packages/shared/src/fees";
+import {
+  calculateOptionCharges,
+  calculatePaperExitSettlement,
+  MAX_PAPER_ENTRY_FEE_RATIO,
+} from "../../../../packages/shared/src/fees";
+import { getLotSizeForSymbol } from "../../../client/src/lib/syntheticCalculators";
 
 export interface OrderPlacementRequest {
   userId: string;
@@ -53,9 +62,25 @@ export interface OrderResult {
   error?: string;
 }
 
+/** Broker-style statement entry (cash-account ledger, Worker parity). */
+export interface PaperStatementEntry {
+  id: string;
+  accountId: string;
+  entryType: "paper_enter" | "paper_exit";
+  amountPaise: number;
+  balanceBeforePaise: number;
+  balanceAfterPaise: number;
+  note: string;
+  createdAt: string;
+}
+
+/** Default margin blocked per lot for short (selling) positions, in paise. */
+const MARGIN_PER_LOT_PAISE = 100000 * 100; // ₹1,00,000 per lot
+
 export class OrderGateway {
   private paperAccounts: Map<string, PaperAccount> = new Map();
   private paperTrades: Map<string, PaperTradeRecord> = new Map();
+  private paperStatements: PaperStatementEntry[] = [];
   private upstoxApiBaseUrl: string;
 
   constructor(upstoxApiBaseUrl = "https://api.upstox.com/v2") {
@@ -82,6 +107,12 @@ export class OrderGateway {
     console.log(
       `[orderGateway] Restored ${this.paperTrades.size} paper trade(s) from disk`,
     );
+
+    this.paperStatements =
+      loadRecords<PaperStatementEntry>("paper_statements").slice(-500);
+    console.log(
+      `[orderGateway] Restored ${this.paperStatements.length} statement(s) from disk`,
+    );
   }
 
   /** Persists paper accounts to disk (call after balance changes). */
@@ -96,6 +127,40 @@ export class OrderGateway {
   /** Persists a single trade record to the append-only JSONL log. */
   private persistTrade(trade: PaperTradeRecord): void {
     appendRecord("paper_trades", trade);
+  }
+
+  /** Records a broker-style statement row and persists it. */
+  private recordStatement(
+    account: PaperAccount,
+    entryType: PaperStatementEntry["entryType"],
+    amountPaise: number,
+    balanceBeforePaise: number,
+    note: string,
+  ): void {
+    const entry: PaperStatementEntry = {
+      id: `stmt_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      accountId: account.id,
+      entryType,
+      amountPaise,
+      balanceBeforePaise,
+      balanceAfterPaise: account.balance,
+      note,
+      createdAt: new Date().toISOString(),
+    };
+    this.paperStatements.push(entry);
+    if (this.paperStatements.length > 500) {
+      this.paperStatements.splice(0, this.paperStatements.length - 500);
+    }
+    appendRecord("paper_statements", entry);
+  }
+
+  /** Recent statement entries for an account (newest first). */
+  public getStatements(userId: string, limit = 50): PaperStatementEntry[] {
+    const account = this.getOrCreatePaperAccount(userId);
+    return this.paperStatements
+      .filter((s) => s.accountId === account.id)
+      .slice(-limit)
+      .reverse();
   }
 
   public getOrCreatePaperAccount(userId: string): PaperAccount {
@@ -159,24 +224,60 @@ export class OrderGateway {
   ): Promise<OrderResult> {
     const account = this.getOrCreatePaperAccount(req.userId);
 
-    // Add 0.1% simulated market slippage
+    // 0.1% simulated market slippage
     const slippageMultiplier = req.tradeType === "buying" ? 1.001 : 0.999;
     const filledPrice = Math.round(req.price * slippageMultiplier * 100) / 100;
     const entryValuePaise = Math.round(filledPrice * req.quantity * 100);
+    const isSelling = req.tradeType === "selling";
 
-    if (req.tradeType === "buying" && account.balance < entryValuePaise) {
+    const entryCharges = calculateOptionCharges(entryValuePaise, isSelling);
+
+    // Fee-ratio guard (Worker parity): reject fee-dominated trades
+    if (
+      entryValuePaise > 0 &&
+      entryCharges.totalCharges / entryValuePaise > MAX_PAPER_ENTRY_FEE_RATIO
+    ) {
       return {
         success: false,
         tradeId: "",
         filledPrice: 0,
         quantity: 0,
-        error: `Insufficient paper balance: ₹${(account.balance / 100).toFixed(2)} required ₹${(entryValuePaise / 100).toFixed(2)}`,
+        error: `Paper entry rejected: fees are ${((entryCharges.totalCharges / entryValuePaise) * 100).toFixed(2)}% of the trade value`,
+      };
+    }
+
+    // Cash model (Worker parity): selling blocks margin per lot; the
+    // premium is received minus fees. Buying pays premium plus fees.
+    const lotSize = getLotSizeForSymbol(
+      req.underlyingSymbol || req.instrumentKey,
+    );
+    const marginBlockedPaise = isSelling
+      ? Math.round((req.quantity / lotSize) * MARGIN_PER_LOT_PAISE)
+      : 0;
+    const netChangePaise = isSelling
+      ? entryValuePaise - entryCharges.totalCharges - marginBlockedPaise
+      : -(entryValuePaise + entryCharges.totalCharges);
+
+    // Affordability: buying needs premium + fees; selling needs the
+    // blocked margin + fees (the premium itself is received).
+    const requiredPaise = isSelling
+      ? marginBlockedPaise + entryCharges.totalCharges
+      : entryValuePaise + entryCharges.totalCharges;
+    if (account.balance < requiredPaise) {
+      return {
+        success: false,
+        tradeId: "",
+        filledPrice: 0,
+        quantity: 0,
+        error: `Insufficient paper balance: ₹${(account.balance / 100).toFixed(2)} required ₹${(requiredPaise / 100).toFixed(2)}`,
       };
     }
 
     const tradeId = `paper_tr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const isSelling = req.tradeType === "selling";
-    const entryCharges = calculateOptionCharges(entryValuePaise, isSelling);
+    const balanceBeforePaise = account.balance;
+    account.balance += netChangePaise;
+    account.updatedAt = new Date().toISOString();
+
     const record: PaperTradeRecord = {
       id: tradeId,
       accountId: account.id,
@@ -197,11 +298,23 @@ export class OrderGateway {
           brokerage: entryCharges.brokerage,
           statutoryTaxes: entryCharges.statutoryTaxes,
         },
+        // Rupees, matching the Worker's metadata convention
+        marginBlocked: marginBlockedPaise / 100,
       },
     };
 
     this.paperTrades.set(tradeId, record);
     this.persistTrade(record);
+    this.recordStatement(
+      account,
+      "paper_enter",
+      netChangePaise,
+      balanceBeforePaise,
+      isSelling
+        ? `Paper SELL ${req.direction} (Fee: ₹${(entryCharges.totalCharges / 100).toFixed(2)}, Margin blocked: ₹${(marginBlockedPaise / 100).toFixed(2)})`
+        : `Paper BUY ${req.direction} (Fee: ₹${(entryCharges.totalCharges / 100).toFixed(2)})`,
+    );
+    this.persistAccounts();
 
     return {
       success: true,
@@ -215,27 +328,18 @@ export class OrderGateway {
     const account = this.getOrCreatePaperAccount(req.userId);
     const position = req.position;
 
-    // Add 0.1% simulated exit slippage
+    // 0.1% simulated exit slippage
     const slippageMultiplier = position.tradeType === "selling" ? 1.001 : 0.999;
     const filledExitPrice =
       Math.round(req.exitPrice * slippageMultiplier * 100) / 100;
     const isSelling = position.tradeType === "selling";
 
-    const entryPrice = position.entryPrice;
-    const pnlPerUnit = isSelling
-      ? entryPrice - filledExitPrice
-      : filledExitPrice - entryPrice;
-    const grossPnlPaise = Math.round(pnlPerUnit * position.quantity * 100);
-
-    // Fee-adjusted settlement (parity with the Worker's paper engine):
-    // realized PnL = gross PnL − (entry charges + exit charges)
-    const exitValuePaise = Math.round(
-      filledExitPrice * position.quantity * 100,
-    );
-    const exitCharges = calculateOptionCharges(exitValuePaise, !isSelling);
     const storedRecord = position.paperTradeId
       ? this.paperTrades.get(position.paperTradeId)
       : undefined;
+    const entryValuePaise =
+      storedRecord?.entryValue ??
+      Math.round(position.entryPrice * position.quantity * 100);
     const entryChargesPaise = Math.round(
       (
         storedRecord?.metadata?.entryCharges as
@@ -243,34 +347,54 @@ export class OrderGateway {
           | undefined
       )?.totalCharges ?? 0,
     );
-    const totalTradeFeesPaise = entryChargesPaise + exitCharges.totalCharges;
-    const realizedPnlPaise = grossPnlPaise - totalTradeFeesPaise;
+    const marginBlockedPaise = Math.round(
+      ((storedRecord?.metadata?.marginBlocked as number | undefined) ?? 0) *
+        100,
+    );
 
-    account.balance += realizedPnlPaise;
+    // Cash-account settlement (shared canonical, Worker parity)
+    const settlement = calculatePaperExitSettlement({
+      entryValuePaise,
+      exitPricePaise: Math.round(filledExitPrice * 100),
+      quantity: position.quantity,
+      isSelling,
+      entryChargesPaise,
+      marginBlockedPaise,
+      isRollback: false,
+    });
+
+    const balanceBeforePaise = account.balance;
+    account.balance += settlement.netChangePaise;
     account.updatedAt = new Date().toISOString();
 
     if (position.paperTradeId && this.paperTrades.has(position.paperTradeId)) {
       const record = this.paperTrades.get(position.paperTradeId)!;
       record.status = "CLOSED";
       record.exitPrice = Math.round(filledExitPrice * 100);
-      record.exitValue = Math.round(filledExitPrice * position.quantity * 100);
-      record.realizedPnl = realizedPnlPaise;
+      record.exitValue = settlement.exitValuePaise;
+      record.realizedPnl = settlement.realizedPnlPaise;
       record.closedAt = new Date().toISOString();
       record.metadata = {
         ...(record.metadata || {}),
         exitReason: req.reason,
         exitCharges: {
-          totalCharges: exitCharges.totalCharges,
-          brokerage: exitCharges.brokerage,
-          statutoryTaxes: exitCharges.statutoryTaxes,
+          totalCharges: settlement.exitCharges.totalCharges,
+          brokerage: settlement.exitCharges.brokerage,
+          statutoryTaxes: settlement.exitCharges.statutoryTaxes,
         },
-        totalTradeFees: totalTradeFeesPaise,
-        grossPnl: grossPnlPaise,
+        totalTradeFees: settlement.totalTradeFeesPaise,
+        grossPnl: settlement.grossPnlPaise,
       };
       this.persistTrade(record);
     }
 
-    // Persist the updated account balance after every exit
+    this.recordStatement(
+      account,
+      "paper_exit",
+      settlement.netChangePaise,
+      balanceBeforePaise,
+      `Paper EXIT ${position.direction} (Fee: ₹${(settlement.exitCharges.totalCharges / 100).toFixed(2)}, PnL: ₹${(settlement.realizedPnlPaise / 100).toFixed(2)}) — ${req.reason}`,
+    );
     this.persistAccounts();
 
     return {

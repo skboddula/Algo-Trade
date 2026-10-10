@@ -7,7 +7,22 @@ import type {
 import { nowIso, makeId, getLotSizeForSymbol } from './utils'
 
 const PAPER_STARTING_CREDIT = 15000_00
-export const MAX_PAPER_ENTRY_FEE_RATIO = 0.05
+// Fee model + settlement — single source of truth in
+// packages/shared/src/fees.ts (shared with the daemon's order gateway).
+// Re-exported here for existing consumers/tests.
+export {
+  calculateOptionCharges,
+  calculatePaperExitSettlement,
+  MAX_PAPER_ENTRY_FEE_RATIO,
+  type OptionCharges,
+  type PaperExitSettlement,
+  type PaperExitSettlementInput,
+} from '../../../packages/shared/src/fees'
+import {
+  calculateOptionCharges,
+  calculatePaperExitSettlement,
+  MAX_PAPER_ENTRY_FEE_RATIO,
+} from '../../../packages/shared/src/fees'
 
 function toPaise(value: number): number {
   return Math.round(value * 100)
@@ -15,69 +30,6 @@ function toPaise(value: number): number {
 
 function toRupees(paise: number): number {
   return Math.round(paise) / 100
-}
-
-// Fee model — single source of truth in packages/shared/src/fees.ts
-// (shared with the daemon's order gateway so both paper accounts charge
-// identically). Re-exported here for existing consumers/tests.
-export {
-  calculateOptionCharges,
-  type OptionCharges,
-} from '../../../packages/shared/src/fees'
-import { calculateOptionCharges } from '../../../packages/shared/src/fees'
-
-export function calculatePaperExitSettlement(input: {
-  entryValuePaise: number
-  exitPricePaise: number
-  quantity: number
-  isSelling: boolean
-  entryChargesPaise: number
-  marginBlockedPaise: number
-  isRollback: boolean
-}): {
-  exitValuePaise: number
-  exitCharges: {
-    totalCharges: number
-    brokerage: number
-    statutoryTaxes: number
-  }
-  totalTradeFeesPaise: number
-  grossPnlPaise: number
-  realizedPnlPaise: number
-  netChangePaise: number
-} {
-  const exitValuePaise = Math.round(input.exitPricePaise * input.quantity)
-  if (input.isRollback) {
-    return {
-      exitValuePaise,
-      exitCharges: { totalCharges: 0, brokerage: 0, statutoryTaxes: 0 },
-      totalTradeFeesPaise: 0,
-      grossPnlPaise: 0,
-      realizedPnlPaise: 0,
-      netChangePaise: input.isSelling
-        ? -input.entryValuePaise +
-          input.entryChargesPaise +
-          input.marginBlockedPaise
-        : input.entryValuePaise + input.entryChargesPaise,
-    }
-  }
-
-  const exitCharges = calculateOptionCharges(exitValuePaise, !input.isSelling)
-  const totalTradeFeesPaise = input.entryChargesPaise + exitCharges.totalCharges
-  const grossPnlPaise = input.isSelling
-    ? input.entryValuePaise - exitValuePaise
-    : exitValuePaise - input.entryValuePaise
-
-  return {
-    exitValuePaise,
-    exitCharges,
-    totalTradeFeesPaise,
-    grossPnlPaise,
-    realizedPnlPaise: grossPnlPaise - totalTradeFeesPaise,
-    netChangePaise: input.isSelling
-      ? -exitValuePaise - exitCharges.totalCharges + input.marginBlockedPaise
-      : exitValuePaise - exitCharges.totalCharges,
-  }
 }
 
 function indiaDate(date = new Date()): string {

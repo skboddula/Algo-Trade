@@ -5,6 +5,7 @@ import type { OrderGateway } from "../services/orderGateway";
 import type { BotLogService, BotLog } from "../services/botLogService";
 import type { UnderlyingSymbol, UserBotState } from "../types";
 import { UNDERLYING_INSTRUMENT_KEYS } from "../types";
+import { DEFAULT_INITIAL_PAPER_BALANCE } from "../constants";
 import {
   fetchHistoricalCandles,
   getBacktestDefaults,
@@ -228,7 +229,9 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
       (s, t) => s + (t.realizedPnl ?? 0),
       0,
     );
-    const startBalance = account.balance - totalRealizedPnl;
+    // Known initial capital — robust under the cash model (balance dips
+    // while positions are open because entry premiums are deducted).
+    const startBalance = DEFAULT_INITIAL_PAPER_BALANCE;
 
     let running = startBalance;
     let peak = startBalance;
@@ -422,12 +425,21 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
         signalLog: result.signalLog.slice(-50),
       });
     } catch (err) {
-      return reply
-        .status(502)
-        .send({
-          error: `Backtest failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
+      return reply.status(502).send({
+        error: `Backtest failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
     }
+  });
+
+  // ── GET /api/bot/statements ────────────────────────────────────────────────
+  // Broker-style paper account ledger (entries, exits, balance walk).
+  fastify.get("/api/bot/statements", async (request, reply) => {
+    const query = request.query as { userId?: string; limit?: string };
+    const userId = query.userId || "default_user";
+    const limit = Math.min(parseInt(query.limit || "50", 10) || 50, 200);
+    return reply.send({
+      statements: orderGateway.getStatements(userId, limit),
+    });
   });
 
   // ── GET /api/bot/logs ───────────────────────────────────────────────────────
