@@ -522,6 +522,31 @@ export class TenantManager extends EventEmitter {
         user.config.lastEntryTime || "15:15",
       );
 
+      // ── Market-hours guard (NSE: Mon–Fri, 09:15–15:30 IST) ─────────────
+      // Weekend/off-hours snapshots are the previous session's frozen data:
+      // signals computed on them are meaningless, and any position held
+      // while the market is closed cannot be managed — square it off
+      // immediately and never evaluate new entries.
+      if (!istInfo.isMarketHours) {
+        for (const symbol of Object.keys(
+          user.positions,
+        ) as UnderlyingSymbol[]) {
+          if (user.positions[symbol]) {
+            this.log(
+              "warn",
+              "eod",
+              `[${symbol}] Market closed — squaring off position held outside market hours`,
+            );
+            await this.manualExit(
+              userId,
+              symbol,
+              "Market closed — position held outside trading hours",
+            );
+          }
+        }
+        continue;
+      }
+
       const targetSymbols: UnderlyingSymbol[] =
         user.config.underlyingMode === "ALL_PARALLEL"
           ? ["NIFTY 50", "BANKNIFTY", "FINNIFTY"]

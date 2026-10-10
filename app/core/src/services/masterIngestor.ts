@@ -128,10 +128,13 @@ export class MasterIngestionEngine extends EventEmitter {
       }
     } finally {
       if (this.isRunning) {
-        this.timer = setTimeout(
-          () => this.runTick(),
-          this.config.pollingIntervalMs,
-        );
+        // Off-hours (nights/weekends): relax the poll to 30s — snapshots are
+        // frozen anyway; this protects the daily Upstox rate-limit budget
+        // for the next live session while keeping dashboard data fresh.
+        const delay = getIndiaTime().isMarketHours
+          ? this.config.pollingIntervalMs
+          : Math.max(this.config.pollingIntervalMs, 30_000);
+        this.timer = setTimeout(() => this.runTick(), delay);
       }
     }
   }
