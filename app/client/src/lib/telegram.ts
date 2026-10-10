@@ -18,6 +18,8 @@ export interface TelegramEntryAlert {
   legs: TelegramAlertLeg[]
   maxProfitPct: number
   maxLossPct: number
+  /** Trailing stop context shown in the entry alert, when configured. */
+  trailPct?: number
 }
 
 export interface TelegramExitAlert {
@@ -82,8 +84,67 @@ export function buildEntryAlertMessage(alert: TelegramEntryAlert): string {
       `SL ≈ ${fmtNum(sl)} (${selling ? '+' : '−'}${fmtNum(alert.maxLossPct)}%) · Target ≈ ${fmtNum(target)} (${selling ? '−' : '+'}${fmtNum(alert.maxProfitPct)}%)`,
     )
   }
+  if (alert.trailPct && alert.trailPct > 0) {
+    lines.push(`Trail: ${fmtNum(alert.trailPct)}% from peak`)
+  }
 
   lines.push(`Signal: ${alert.signal} · ${alert.confidence} confidence`)
+  return lines.join('\n')
+}
+
+// ─── VIX + daily summary builders (canonical home; absorbed from the
+// daemon so both runtimes emit identical texts) ─────────────────────────────
+
+export interface TelegramVixAlert {
+  vix: number
+  threshold: number
+}
+
+export function buildVixAlertMessage(alert: TelegramVixAlert): string {
+  return [
+    `⚠️ VIX ALERT — India VIX at ${alert.vix.toFixed(1)}`,
+    `Hard stop threshold is ${alert.threshold} — entries will be blocked soon.`,
+    `Manage your open positions accordingly.`,
+  ].join('\n')
+}
+
+export interface TelegramDailySummary {
+  date: string
+  totalTrades: number
+  wins: number
+  losses: number
+  /** ALL MONEY VALUES IN RUPEES (convert paise before calling). */
+  realizedPnl: number
+  paperBalance: number
+  bestTrade?: { symbol: string; direction: string; pnl: number }
+  worstTrade?: { symbol: string; direction: string; pnl: number }
+  vixLast?: number
+}
+
+export function buildDailySummaryMessage(data: TelegramDailySummary): string {
+  const fmt = (v: number) => `${v >= 0 ? '+' : '−'}₹${Math.abs(v).toFixed(2)}`
+
+  const lines = [
+    `📊 DAILY SUMMARY — ${data.date}`,
+    `━━━━━━━━━━━━━━━━━━━━`,
+    `Trades: ${data.totalTrades} | Wins: ${data.wins} | Losses: ${data.losses}`,
+    `Realized PnL: ${fmt(data.realizedPnl)}`,
+    `Paper Balance: ₹${data.paperBalance.toFixed(2)}`,
+  ]
+  if (data.bestTrade) {
+    lines.push(
+      `Best: ${data.bestTrade.symbol} ${data.bestTrade.direction} ${fmt(data.bestTrade.pnl)}`,
+    )
+  }
+  if (data.worstTrade) {
+    lines.push(
+      `Worst: ${data.worstTrade.symbol} ${data.worstTrade.direction} ${fmt(data.worstTrade.pnl)}`,
+    )
+  }
+  lines.push(`━━━━━━━━━━━━━━━━━━━━`)
+  if (data.vixLast !== undefined) {
+    lines.push(`VIX (last): ${data.vixLast.toFixed(1)}`)
+  }
   return lines.join('\n')
 }
 

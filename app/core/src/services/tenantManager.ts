@@ -18,10 +18,10 @@ import { getIndiaTime } from "../utils/timeUtils";
 import {
   getTelegramConfig,
   sendTelegramMessage,
-  formatEntryAlert,
-  formatExitAlert,
-  formatVixAlert,
-  formatDailySummary,
+  buildEntryAlertMessage,
+  buildExitAlertMessage,
+  buildVixAlertMessage,
+  buildDailySummaryMessage,
   type TelegramConfig,
 } from "./telegramAlerts";
 import { UpstoxMarketStream, type StreamTick } from "./marketStream";
@@ -342,17 +342,22 @@ export class TenantManager extends EventEmitter {
     selectedContract: { strikePrice?: number; expiry?: string },
   ): void {
     if (!this.telegramConfig) return;
-    const message = formatEntryAlert({
+    const message = buildEntryAlertMessage({
       symbol,
       signal: position.direction === "CE" ? "BUY_CE" : "BUY_PE",
       confidence: "moderate",
       executionMode: user.executionMode === "live" ? "live" : "paper",
       strikePrice: selectedContract.strikePrice,
       expiry: selectedContract.expiry,
-      entryPrice: position.entryPrice,
-      quantity: position.quantity,
-      lotSize: position.lotSize || 1,
-      tradeType: position.tradeType === "selling" ? "selling" : "buying",
+      legs: [
+        {
+          direction: position.direction,
+          entryPrice: position.entryPrice,
+          quantity: position.quantity,
+          lotSize: position.lotSize || 1,
+          tradeType: position.tradeType === "selling" ? "selling" : "buying",
+        },
+      ],
       maxProfitPct: user.config.maxProfitPct,
       maxLossPct: user.config.maxLossPct,
       trailPct: user.config.trailPct,
@@ -373,7 +378,7 @@ export class TenantManager extends EventEmitter {
     reason: string,
   ): void {
     if (!this.telegramConfig) return;
-    const message = formatExitAlert({
+    const message = buildExitAlertMessage({
       symbol,
       direction: position.direction === "CE" ? "CE" : "PE",
       executionMode: user.executionMode === "live" ? "live" : "paper",
@@ -415,7 +420,7 @@ export class TenantManager extends EventEmitter {
       this.lastVixAlertAt = now;
       sendTelegramMessage(
         this.telegramConfig,
-        formatVixAlert({ vix, threshold: 25 }),
+        buildVixAlertMessage({ vix, threshold: 25 }),
       ).catch(() => {});
     }
   }
@@ -471,25 +476,28 @@ export class TenantManager extends EventEmitter {
       return meta?.underlyingSymbol ?? "—";
     };
 
-    const message = formatDailySummary({
+    // NOTE: trade records and the account store PAISE — the summary
+    // builder's contract is RUPEES. Convert here (this also fixes the
+    // 100x-too-large values the pre-unification summary displayed).
+    const message = buildDailySummaryMessage({
       date: istInfo.dateString,
       totalTrades: closedTrades.length,
       wins: wins.length,
       losses: losses.length,
-      realizedPnl,
-      paperBalance: user.paperBalance,
+      realizedPnl: realizedPnl / 100,
+      paperBalance: (user.paperBalance ?? 0) / 100,
       bestTrade: best
         ? {
             symbol: getSymbol(best),
             direction: best.direction,
-            pnl: best.realizedPnl ?? 0,
+            pnl: (best.realizedPnl ?? 0) / 100,
           }
         : undefined,
       worstTrade: worst
         ? {
             symbol: getSymbol(worst),
             direction: worst.direction,
-            pnl: worst.realizedPnl ?? 0,
+            pnl: (worst.realizedPnl ?? 0) / 100,
           }
         : undefined,
     });

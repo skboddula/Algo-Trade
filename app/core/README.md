@@ -92,3 +92,21 @@ yarn build
    pm2 startup
    pm2 save
    ```
+
+---
+
+## Engine unification (IMPORTANT for contributors)
+
+This daemon does NOT contain its own trading math. `src/services/indicators.ts`,
+`strategyEngine.ts`, `vrdSignals.ts`, `syntheticCalculators.ts`, `v3Sentiment.ts`,
+`backtestEngine.ts`, and `telegramAlerts.ts` are **thin re-exports of the browser
+client's files** (`../../client/src/lib/*`) — the single source of truth.
+
+- All strategy calculations, gates, exits, and alert wording changes go in
+  **`app/client/src/lib`** — the daemon picks them up automatically.
+- Never re-implement math or message formatting here: `src/__tests__/sharedIndicators.test.ts`
+  and `src/__tests__/telegramAlerts.test.ts` assert reference identity with the
+  client's exports and will fail.
+- Only environment adapters are daemon-owned: market-data polling, the
+  Upstox WebSocket stream, the order gateway (file-based paper store), the
+  tenant bot loop, bot logging, and the direct-Telegram sender.

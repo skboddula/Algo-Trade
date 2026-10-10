@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
 
-import { buildExitAlertMessage, buildEntryAlertMessage } from '../telegram'
+import {
+  buildExitAlertMessage,
+  buildEntryAlertMessage,
+  buildVixAlertMessage,
+  buildDailySummaryMessage,
+} from '../telegram'
 
 describe('buildExitAlertMessage', () => {
   const baseAlert = {
@@ -123,5 +128,101 @@ describe('buildEntryAlertMessage (regression)', () => {
     expect(message).toContain('🟢 ALGO TRADE — PAPER ENTRY [NIFTY 50]')
     expect(message).toContain('BUY NIFTY 50 24000 CE @ 100')
     expect(message).toContain('SL ≈ 90')
+  })
+})
+
+// ─── Absorbed builders: trail context, VIX warnings, daily summary ──────────
+
+describe('buildEntryAlertMessage trail context', () => {
+  it('renders the Trail line when trailPct is configured', () => {
+    const message = buildEntryAlertMessage({
+      symbol: 'NIFTY 50',
+      signal: 'BUY_CE',
+      confidence: 'strong',
+      executionMode: 'paper',
+      strikePrice: 22650,
+      expiry: '2026-10-13',
+      legs: [
+        {
+          direction: 'CE',
+          entryPrice: 44.69,
+          quantity: 65,
+          lotSize: 65,
+          tradeType: 'buying',
+        },
+      ],
+      maxProfitPct: 10,
+      maxLossPct: 5,
+      trailPct: 5,
+    })
+    expect(message).toContain('Trail: 5% from peak')
+  })
+
+  it('omits the Trail line when trailPct is absent', () => {
+    const message = buildEntryAlertMessage({
+      symbol: 'NIFTY 50',
+      signal: 'BUY_CE',
+      confidence: 'strong',
+      executionMode: 'paper',
+      legs: [
+        {
+          direction: 'CE',
+          entryPrice: 44.69,
+          quantity: 65,
+          lotSize: 65,
+          tradeType: 'buying',
+        },
+      ],
+      maxProfitPct: 10,
+      maxLossPct: 5,
+    })
+    expect(message).not.toContain('Trail:')
+  })
+})
+
+describe('buildVixAlertMessage', () => {
+  it('renders the VIX level and threshold', () => {
+    const message = buildVixAlertMessage({ vix: 25.4, threshold: 25 })
+    expect(message).toContain('VIX ALERT')
+    expect(message).toContain('25.4')
+    expect(message).toContain('threshold is 25')
+  })
+})
+
+describe('buildDailySummaryMessage (rupee contract)', () => {
+  it('renders trades, PnL, balance, best/worst in rupees', () => {
+    const message = buildDailySummaryMessage({
+      date: '2026-10-12',
+      totalTrades: 3,
+      wins: 2,
+      losses: 1,
+      realizedPnl: 1234.56,
+      paperBalance: 101234.56,
+      bestTrade: { symbol: 'NIFTY 50', direction: 'CE', pnl: 2100.5 },
+      worstTrade: { symbol: 'BANKNIFTY', direction: 'PE', pnl: -865.94 },
+      vixLast: 14.38,
+    })
+    expect(message).toContain('DAILY SUMMARY — 2026-10-12')
+    expect(message).toContain('Trades: 3 | Wins: 2 | Losses: 1')
+    expect(message).toContain('Realized PnL: +₹1234.56')
+    expect(message).toContain('Paper Balance: ₹101234.56')
+    expect(message).toContain('Best: NIFTY 50 CE +₹2100.50')
+    expect(message).toContain('Worst: BANKNIFTY PE −₹865.94')
+    expect(message).toContain('VIX (last): 14.4')
+  })
+
+  it('omits optional sections when absent', () => {
+    const message = buildDailySummaryMessage({
+      date: '2026-10-12',
+      totalTrades: 0,
+      wins: 0,
+      losses: 0,
+      realizedPnl: -328.47,
+      paperBalance: 99671.53,
+    })
+    expect(message).not.toContain('Best:')
+    expect(message).not.toContain('Worst:')
+    expect(message).not.toContain('VIX (last)')
+    expect(message).toContain('Realized PnL: −₹328.47')
   })
 })
