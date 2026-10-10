@@ -100,7 +100,10 @@ yarn build
 This daemon does NOT contain its own trading math. `src/services/indicators.ts`,
 `strategyEngine.ts`, `vrdSignals.ts`, `syntheticCalculators.ts`, `v3Sentiment.ts`,
 `backtestEngine.ts`, and `telegramAlerts.ts` are **thin re-exports of the browser
-client's files** (`../../client/src/lib/*`) — the single source of truth.
+client's files** (`../../client/src/lib/*`) — the single source of truth. VRD
+sentiment composition is likewise shared: `sentimentIngestor` calls
+`assembleVrdData` from `../../client/src/lib/vrdAssembly.ts` — only the
+fetching is daemon-owned.
 
 - All strategy calculations, gates, exits, and alert wording changes go in
   **`app/client/src/lib`** — the daemon picks them up automatically.

@@ -17,12 +17,10 @@ import {
   getV3Signal,
 } from '@/lib/v3Sentiment'
 import { classifyNews } from '@/lib/vrdSignals'
+import { assembleVrdData } from './vrdAssembly'
 import {
   evaluateNiftySentimentFromAdvanceCount,
   computeProxyFlow,
-  computeProxyValuation,
-  computeMMI,
-  computeStraddleIV,
 } from './syntheticCalculators'
 import {
   MARKET_DATA_NSE_FO_INDEX_FUTURES,
@@ -519,9 +517,6 @@ export async function fetchSymbolSentiment(
     sourceUpdate(`upstox/pcr/${underlyingSymbol}`, 'error')
   }
 
-  const effectivePcr = officialPcr ?? indicators.pcrValue
-  addLog(mkLog('info', 'pcr', 'Option PCR=' + effectivePcr.toFixed(3)))
-
   // Max Pain
   let maxPain: number | null = null
   if (maxPainRes.status === 'fulfilled' && !maxPainRes.value[1]) {
@@ -542,28 +537,26 @@ export async function fetchSymbolSentiment(
     sourceUpdate(`upstox/max-pain/${underlyingSymbol}`, 'error')
   }
 
-  // Support and Resistance walls from optionChain Open Interest
-  let supportWall: number | null = null
-  let resistanceWall: number | null = null
-  if (optionChain.length > 0) {
-    let maxPutOi = -1
-    let maxCallOi = -1
-    for (const strike of optionChain) {
-      const putOi = strike.put_options?.market_data?.oi ?? 0
-      const callOi = strike.call_options?.market_data?.oi ?? 0
-      if (putOi > maxPutOi) {
-        maxPutOi = putOi
-        supportWall = strike.strike_price
-      }
-      if (callOi > maxCallOi) {
-        maxCallOi = callOi
-        resistanceWall = strike.strike_price
-      }
-    }
-  }
+  const {
+    vrd: assembledVrd,
+    effectivePcr,
+    straddleIv,
+    proxyPe,
+    mmi,
+  } = assembleVrdData({
+    optionChain,
+    indicators,
+    vix: globalData.vix,
+    breadth,
+    fiiLongShort: globalData.fiiLongShort,
+    fiiPositioning: globalData.fiiPositioning,
+    giftNifty,
+    officialPcr,
+    maxPain,
+    newsAlerts: globalData.newsAlerts,
+  })
 
-  const ltp = optionChain[0]?.underlying_spot_price ?? 0
-  const straddleIv = computeStraddleIV(optionChain, ltp, globalData.vix)
+  addLog(mkLog('info', 'pcr', 'Option PCR=' + effectivePcr.toFixed(3)))
   addLog(
     mkLog(
       'debug',
@@ -579,31 +572,18 @@ export async function fetchSymbolSentiment(
         '% above avg',
     ),
   )
-
-  const adRatio = breadth?.ratio ?? null
-  const proxyValue = computeProxyValuation(
-    ltp,
-    indicators,
-    globalData.vix,
-    adRatio,
-  )
   sourceUpdate(`synthetic/value/${underlyingSymbol}`, 'ok')
-
-  const proxyPe = { pe: proxyValue.pe, label: proxyValue.label }
   addLog(
     mkLog(
       'info',
       `synthetic/value/${underlyingSymbol}`,
       `Computed proxy ${underlyingSymbol} PE valuation=` +
-        proxyValue.pe +
+        proxyPe.pe +
         ' (' +
-        proxyValue.label +
+        proxyPe.label +
         ')',
     ),
   )
-
-  // Synthetic MMI
-  const mmi = computeMMI(globalData.vix, indicators.rsi.value, effectivePcr)
   addLog(
     mkLog(
       'info',
@@ -622,47 +602,7 @@ export async function fetchSymbolSentiment(
     ),
   )
 
-  return {
-    mmi: { score: mmi.score, label: mmi.label },
-    advancesDeclines:
-      breadth !== null && breadth.advances !== null
-        ? {
-            advances: breadth.advances,
-            declines: breadth.declines,
-            ratio: breadth.ratio,
-            label: null,
-          }
-        : null,
-    fiiLongShort: globalData.fiiLongShort,
-    fiiPositioning: globalData.fiiPositioning,
-    pcr:
-      effectivePcr > 0
-        ? {
-            value: parseFloat(effectivePcr.toFixed(3)),
-            zone:
-              effectivePcr >= 1.6
-                ? 'Overbought'
-                : effectivePcr >= 1.0
-                  ? 'Bullish'
-                  : effectivePcr > 0.7
-                    ? 'Neutral'
-                    : 'Bearish',
-          }
-        : null,
-    straddleIv: {
-      elevated:
-        straddleIv.percentAboveAvg !== null && straddleIv.percentAboveAvg > 30,
-      percentAboveAvg: straddleIv.percentAboveAvg,
-    },
-    niftyPe: proxyPe,
-    vix: globalData.vix,
-    giftNifty,
-    supportWall,
-    resistanceWall,
-    maxPain,
-    newsAlerts: globalData.newsAlerts,
-    fetchedAt: new Date().toISOString(),
-  }
+  return assembledVrd
 }
 
 // ─── Market fetch ─────────────────────────────────────────────────────────────

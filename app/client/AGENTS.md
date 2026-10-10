@@ -71,6 +71,7 @@ The browser client and the always-on daemon (`app/core`) share ONE brain:
 
 - **All strategy math lives in `app/client/src/lib`** (indicators, strategyEngine, vrdSignals, syntheticCalculators, v3Sentiment, backtestEngine). The daemon's `app/core/src/services/*` are **thin re-export shims** — never add calculations there.
 - **All Telegram alert wording lives in `app/client/src/lib/telegram.ts`** (entry/exit/VIX/daily-summary builders). The daemon re-exports them; only the _transport_ differs per runtime (browser → Worker proxy, daemon → direct Telegram API).
+- **VRD sentiment composition lives in `app/client/src/lib/vrdAssembly.ts`** (`assembleVrdData`): both `fetchSymbolSentiment` (browser) and the daemon's `sentimentIngestor.buildSymbolVrd` call it with their own fetched inputs — only the _fetching_ is per-runtime, never the composition.
 - **What legitimately stays per-runtime**: market-data polling, WebSocket stream, order gateway/persistence, bot loop, logging — environment adapters only.
 
 **Enforcement:** reference-identity tests in `app/core/src/__tests__/` (sharedIndicators.test.ts, telegramAlerts.test.ts) assert `daemonExport === clientExport`. Any local re-implementation of shared logic fails CI. The live parity gate (`app/client/src/lib/__tests__/daemonLiveParity.test.ts`) verifies the daemon's data pipeline feeds the shared engine correctly on real snapshots (runs when the daemon is reachable, self-skips otherwise).

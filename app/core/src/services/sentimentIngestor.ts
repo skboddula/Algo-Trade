@@ -28,13 +28,9 @@ import type {
 import { UNDERLYING_INSTRUMENT_KEYS } from "../types";
 import { fetchWithRetry } from "../utils/http/fetchRetry";
 import { getIndiaTime } from "../utils/timeUtils";
-import {
-  computeMMI,
-  computeProxyFlow,
-  computeProxyValuation,
-  computeStraddleIV,
-} from "./syntheticCalculators";
+import { computeProxyFlow } from "./syntheticCalculators";
 import { classifyNews } from "./vrdSignals";
+import { assembleVrdData } from "../../../client/src/lib/vrdAssembly";
 
 // NIFTY 50 constituents (instrument keys) for market breadth.
 const NIFTY50_KEYS = [
@@ -308,75 +304,22 @@ export class SentimentIngestor {
       this.getOfficialPcr(symbol, expiry),
       this.getMaxPain(symbol, expiry),
     ]);
-    const effectivePcr = officialPcr ?? indicators.pcrValue;
 
-    // Support and resistance walls from option-chain open interest
-    let supportWall: number | null = null;
-    let resistanceWall: number | null = null;
-    if (optionChain.length > 0) {
-      let maxPutOi = -1;
-      let maxCallOi = -1;
-      for (const strike of optionChain) {
-        const putOi = strike.put_options?.market_data?.oi ?? 0;
-        const callOi = strike.call_options?.market_data?.oi ?? 0;
-        if (putOi > maxPutOi) {
-          maxPutOi = putOi;
-          supportWall = strike.strike_price;
-        }
-        if (callOi > maxCallOi) {
-          maxCallOi = callOi;
-          resistanceWall = strike.strike_price;
-        }
-      }
-    }
-
-    const ltp = optionChain[0]?.underlying_spot_price ?? 0;
-    const straddleIv = computeStraddleIV(optionChain, ltp, vix);
-    const adRatio = marketWide.breadth?.ratio ?? null;
-    const proxyPe = computeProxyValuation(ltp, indicators, vix, adRatio);
-    const mmi = computeMMI(vix, indicators.rsi.value, effectivePcr);
-
-    return {
-      mmi: { score: mmi.score, label: mmi.label },
-      advancesDeclines: marketWide.breadth
-        ? {
-            advances: marketWide.breadth.advances,
-            declines: marketWide.breadth.declines,
-            ratio: marketWide.breadth.ratio,
-            label: null,
-          }
-        : null,
+    // Composition is the shared canonical (client's vrdAssembly) — only
+    // the FETCHING above is daemon-specific.
+    const { vrd } = assembleVrdData({
+      optionChain,
+      indicators,
+      vix,
+      breadth: marketWide.breadth,
       fiiLongShort: marketWide.fiiLongShort,
       fiiPositioning: marketWide.fiiPositioning,
-      pcr:
-        effectivePcr > 0
-          ? {
-              value: parseFloat(effectivePcr.toFixed(3)),
-              zone:
-                effectivePcr >= 1.6
-                  ? "Overbought"
-                  : effectivePcr >= 1.0
-                    ? "Bullish"
-                    : effectivePcr > 0.7
-                      ? "Neutral"
-                      : "Bearish",
-            }
-          : null,
-      straddleIv: {
-        elevated:
-          straddleIv.percentAboveAvg !== null &&
-          straddleIv.percentAboveAvg > 30,
-        percentAboveAvg: straddleIv.percentAboveAvg,
-      },
-      niftyPe: { pe: proxyPe.pe, label: proxyPe.label },
-      vix,
       giftNifty: marketWide.giftNifty,
-      supportWall,
-      resistanceWall,
+      officialPcr,
       maxPain,
       newsAlerts: marketWide.newsAlerts,
-      fetchedAt: new Date().toISOString(),
-    };
+    });
+    return vrd;
   }
 
   // ── Private fetchers ──────────────────────────────────────────────────────
