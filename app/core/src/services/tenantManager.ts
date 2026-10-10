@@ -11,8 +11,9 @@ import type {
 import { DEFAULT_STRATEGY_CONFIG } from "../constants";
 import { MasterIngestionEngine } from "./masterIngestor";
 import { OrderGateway } from "./orderGateway";
-import { getOtmStrike, getLotSizeForSymbol } from "./syntheticCalculators";
-import { runHardStopChecks, checkEntryHardStops } from "./strategyEngine";
+import { getLotSizeForSymbol } from "./syntheticCalculators";
+import { getOtmStrike } from "./indicators";
+import { shouldExit, runHardStopChecks } from "./strategyEngine";
 import { getIndiaTime } from "../utils/timeUtils";
 import {
   getTelegramConfig,
@@ -626,12 +627,17 @@ export class TenantManager extends EventEmitter {
             vrd: snapshot.vrdData || null,
           };
 
-          const hardStop = runHardStopChecks(position, signalData, user.config);
-          if (hardStop.triggered) {
+          const exitDecision = shouldExit(
+            position,
+            signalData,
+            position.currentPrice ?? position.entryPrice,
+            user.config,
+          );
+          if (exitDecision.exit) {
             await this.manualExit(
               userId,
               symbol,
-              hardStop.reason || "Hard Stop / Trailing SL",
+              exitDecision.reason || "Hard Stop / Trailing SL",
             );
             continue;
           }
@@ -653,7 +659,7 @@ export class TenantManager extends EventEmitter {
           ) {
             // Entry hard-stop gate (browser parity): VIX tradeability band +
             // high-severity macro news block new entries entirely.
-            const hardStop = checkEntryHardStops(snapshot.vrdData ?? null);
+            const hardStop = runHardStopChecks(snapshot.vrdData ?? null);
             if (hardStop.blocked) {
               this.log(
                 "warn",

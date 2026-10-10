@@ -42,10 +42,10 @@ import {
 } from '../../../../core/src/services/vrdSignals'
 
 import { computeAllIndicators as daemonIndicators } from '../../../../core/src/services/indicators'
-import { getOtmStrike as daemonGetOtmStrike } from '../../../../core/src/services/syntheticCalculators'
+import { getOtmStrike as daemonGetOtmStrike } from '../../../../core/src/services/indicators'
 import {
   getFinalSignal as daemonGetFinalSignal,
-  runHardStopChecks as daemonRunHardStops,
+  shouldExit as daemonShouldExit,
 } from '../../../../core/src/services/strategyEngine'
 import {
   evaluateGlobalSentiment as daemonEvalGlobal,
@@ -313,12 +313,12 @@ describe('parity: exit engine', () => {
         maxLossPct: CONFIG.maxLossPct,
         trailPct: CONFIG.trailPct,
       })
-      const d = daemonRunHardStops(pos, data, {
+      const d = daemonShouldExit(pos, data, pos.currentPrice ?? 100, {
         maxProfitPct: CONFIG.maxProfitPct,
         maxLossPct: CONFIG.maxLossPct,
         trailPct: CONFIG.trailPct,
       })
-      expect(d.triggered).toBe(c.exit)
+      expect(d.exit).toBe(c.exit)
       if (c.exit) expect(d.reason).toBe(c.reason)
     })
   }
@@ -345,12 +345,12 @@ describe('parity: exit engine', () => {
       maxLossPct: 15,
       trailPct: 5,
     })
-    const d = daemonRunHardStops(pePos, bullData, {
+    const d = daemonShouldExit(pePos, bullData, 99, {
       maxProfitPct: 20,
       maxLossPct: 15,
       trailPct: 5,
     })
-    expect(d.triggered).toBe(c.exit)
+    expect(d.exit).toBe(c.exit)
     if (c.exit) expect(d.reason).toBe(c.reason)
   })
 })

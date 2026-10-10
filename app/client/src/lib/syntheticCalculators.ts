@@ -3,12 +3,29 @@ import type {
   OptionData,
   IndicatorsResult,
   ActivePosition,
-} from '@/lib/types'
+} from './types'
 import { STORAGE_KEY_PROXY_HISTORY } from './constants'
 
 const KEYS = {
   proxyHistory: STORAGE_KEY_PROXY_HISTORY,
 }
+
+// Storage adapter: browsers persist proxy-flow history via localStorage;
+// non-browser hosts (the Node daemon) get an in-memory equivalent. This is
+// the ONLY environment-aware line in the calculation engine.
+interface ProxyHistoryStorage {
+  getItem: (key: string) => string | null
+  setItem: (key: string, value: string) => void
+}
+const memoryProxyHistory = new Map<string, string>()
+const proxyHistoryStorage: ProxyHistoryStorage =
+  typeof (globalThis as { localStorage?: unknown }).localStorage !== 'undefined'
+    ? (globalThis as unknown as { localStorage: ProxyHistoryStorage })
+        .localStorage
+    : {
+        getItem: (k) => memoryProxyHistory.get(k) ?? null,
+        setItem: (k, v) => void memoryProxyHistory.set(k, v),
+      }
 
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -154,7 +171,9 @@ export function getAtmWindow(
 
 function loadProxyHistory(): { date: string; netPosition: number }[] {
   try {
-    return JSON.parse(localStorage.getItem(KEYS.proxyHistory) ?? '[]') as {
+    return JSON.parse(
+      proxyHistoryStorage.getItem(KEYS.proxyHistory) ?? '[]',
+    ) as {
       date: string
       netPosition: number
     }[]
@@ -165,7 +184,10 @@ function loadProxyHistory(): { date: string; netPosition: number }[] {
 
 function saveProxyHistory(history: { date: string; netPosition: number }[]) {
   try {
-    localStorage.setItem(KEYS.proxyHistory, JSON.stringify(history.slice(-20)))
+    proxyHistoryStorage.setItem(
+      KEYS.proxyHistory,
+      JSON.stringify(history.slice(-20)),
+    )
   } catch {
     /* ignore */
   }
