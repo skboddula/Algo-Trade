@@ -1,6 +1,15 @@
 /**
  * Upstox Market Data Feed V3 WebSocket stream for the Node.js daemon.
  *
+ * ⚠️ TRIPWIRE — this file has a parallel browser implementation at
+ * app/client/src/lib/upstoxMarketStream.ts (authorize-URL flow, browser
+ * WebSocket). The connect/subscribe/protobuf-decode protocol is duplicated
+ * between them BY DEFERRAL: if Upstox changes the feed (endpoint,
+ * MarketDataFeedV3 protobuf schema, auth flow), update BOTH — or better,
+ * extract the shared decode module at that point. Degradation when the
+ * stream breaks is graceful: exits run on the 2s REST tick loop; only
+ * trailing-stop peak precision and streamed-VIX freshness degrade.
+ *
  * Node.js can set Authorization headers directly on WebSocket connections
  * (unlike browsers), so this connects directly to the feed endpoint without
  * the authorize URL step the browser version needs.

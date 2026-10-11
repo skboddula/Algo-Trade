@@ -1,6 +1,15 @@
 /**
  * Upstox Market Data Feed V3 WebSocket stream.
  *
+ * ⚠️ TRIPWIRE — this file has a parallel Node implementation at
+ * app/core/src/services/marketStream.ts (direct-auth flow, 'ws' package).
+ * The connect/subscribe/protobuf-decode protocol is duplicated between
+ * them BY DEFERRAL: if Upstox changes the feed (endpoint, MarketDataFeedV3
+ * protobuf schema, auth flow), update BOTH — or better, extract the shared
+ * decode module at that point. Degradation when the stream breaks is
+ * graceful: exits run on the REST polling loop; only trailing-stop peak
+ * precision and streamed-VIX freshness degrade.
+ *
  * Connection flow (browser-safe):
  *  1. POST /api/market/feed-authorize with the Upstox access token; the Worker
  *     exchanges it for a one-time-use `authorized_redirect_uri` (browsers
