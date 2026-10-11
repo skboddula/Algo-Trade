@@ -5,6 +5,10 @@ describe('Fastify Bot Routes & API Suite', () => {
   let server: ReturnType<typeof buildServer>
 
   beforeAll(async () => {
+    // Route-behavior suite: build with auth disabled (server.ts loads .env
+    // at module scope, which now carries a real DAEMON_API_KEY). Enforcement
+    // has its own suite below.
+    delete process.env.DAEMON_API_KEY
     server = buildServer({ mockMode: true })
     await server.app.ready()
     await server.masterIngestor.fetchAndComputeMarketData()
@@ -122,5 +126,56 @@ describe('Fastify Bot Routes & API Suite', () => {
       const resultMock = validateEnvironment({ NODE_ENV: 'development', MOCK_MODE: 'true' })
       expect(resultMock.valid).toBe(true)
     })
+  })
+})
+
+
+// ─── API key enforcement ─────────────────────────────────────────────────────
+
+describe('Daemon API key enforcement', () => {
+  it('rejects /api/* without the x-api-key header when DAEMON_API_KEY is set', async () => {
+    process.env.DAEMON_API_KEY = 'test-secret-key'
+    const guarded = buildServer({ mockMode: true })
+    await guarded.app.ready()
+
+    const noKey = await guarded.app.inject({ method: 'GET', url: '/api/bot/status' })
+    expect(noKey.statusCode).toBe(401)
+
+    const badKey = await guarded.app.inject({
+      method: 'GET',
+      url: '/api/bot/status',
+      headers: { 'x-api-key': 'wrong' },
+    })
+    expect(badKey.statusCode).toBe(401)
+
+    const goodKey = await guarded.app.inject({
+      method: 'GET',
+      url: '/api/bot/status',
+      headers: { 'x-api-key': 'test-secret-key' },
+    })
+    expect(goodKey.statusCode).toBe(200)
+
+    // /health stays open (liveness probe)
+    const health = await guarded.app.inject({ method: 'GET', url: '/health' })
+    expect(health.statusCode).toBe(200)
+
+    // Writes are guarded too
+    const stop = await guarded.app.inject({
+      method: 'POST',
+      url: '/api/bot/stop',
+      headers: { 'x-api-key': 'wrong' },
+    })
+    expect(stop.statusCode).toBe(401)
+
+    await guarded.app.close()
+    delete process.env.DAEMON_API_KEY
+  })
+
+  it('is inert when DAEMON_API_KEY is unset (loopback-only mode)', async () => {
+    const open = buildServer({ mockMode: true })
+    await open.app.ready()
+    const res = await open.app.inject({ method: 'GET', url: '/api/bot/status' })
+    expect(res.statusCode).toBe(200)
+    await open.app.close()
   })
 })

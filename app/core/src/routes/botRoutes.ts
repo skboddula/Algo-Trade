@@ -468,9 +468,23 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
 
   // ── WebSocket /ws ──────────────────────────────────────────────────────────
   fastify.get("/ws", { websocket: true }, (connection, req) => {
-    const query = req.query as { userId?: string };
+    const query = req.query as { userId?: string; apiKey?: string };
     const userId = query.userId || "default_user";
     const ws = (connection as any).socket || connection;
+
+    // Handshake auth: browsers cannot set WebSocket headers, so the key
+    // arrives as ?apiKey=. Without a match the socket is closed before any
+    // state is sent or commands are accepted. (WebSocket connections are
+    // NOT covered by CORS — this is the cross-site-control guard.)
+    const expectedKey = process.env.DAEMON_API_KEY?.trim();
+    if (expectedKey && query.apiKey !== expectedKey) {
+      try {
+        ws.close(4001, "unauthorized");
+      } catch {
+        // Socket may already be gone
+      }
+      return;
+    }
 
     if (!activeSockets.has(userId)) {
       activeSockets.set(userId, new Set());

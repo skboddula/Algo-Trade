@@ -22,10 +22,28 @@ export function daemonBaseUrl(): string {
   return `http://${host}:${port}`
 }
 
+/** Shared secret for the daemon API (set in the daemon's .env and mirrored
+ *  here as VITE_DAEMON_API_KEY). Threat model: browser-context and network
+ *  attackers (cross-site WS control, DNS rebinding, scanners) — not local
+ *  malware, which can read the daemon's .env directly anyway. */
+export function daemonApiKey(): string | undefined {
+  const env = import.meta.env as Record<string, string | undefined>
+  const key = env.VITE_DAEMON_API_KEY
+  return typeof key === 'string' && key.length > 0 ? key : undefined
+}
+
 export function daemonWsUrl(userId = DAEMON_USER_ID): string {
   const http = daemonBaseUrl()
   const wsBase = http.replace(/^http/, 'ws')
-  return `${wsBase}/ws?userId=${encodeURIComponent(userId)}`
+  const key = daemonApiKey()
+  const auth = key ? `&apiKey=${encodeURIComponent(key)}` : ''
+  return `${wsBase}/ws?userId=${encodeURIComponent(userId)}${auth}`
+}
+
+/** Headers every authenticated daemon REST call must carry. */
+export function daemonHeaders(): Record<string, string> {
+  const key = daemonApiKey()
+  return key ? { 'x-api-key': key } : {}
 }
 
 // ─── REST helpers ─────────────────────────────────────────────────────────────
@@ -33,7 +51,11 @@ export function daemonWsUrl(userId = DAEMON_USER_ID): string {
 async function daemonFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${daemonBaseUrl()}${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      ...daemonHeaders(),
+      ...(init?.headers ?? {}),
+    },
   })
   if (!res.ok) {
     const err: { error?: string } = (await res.json().catch(() => ({}))) as {

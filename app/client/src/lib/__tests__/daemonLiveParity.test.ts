@@ -19,6 +19,7 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest'
 
+import { daemonHeaders } from '@/lib/daemon'
 import { computeAllIndicators } from '@/lib/indicators'
 import { getFinalSignal } from '@/lib/strategyEngine'
 import {
@@ -93,6 +94,7 @@ describe.skipIf(!daemonReachable)(
     beforeAll(async () => {
       const res = await fetch(
         `${DAEMON_URL}/api/bot/status?userId=default_user`,
+        { headers: daemonHeaders() },
       )
       interface StatusResponse {
         snapshots: Record<string, MarketSnapshot>
