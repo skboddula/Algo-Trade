@@ -973,6 +973,21 @@ export class TenantManager extends EventEmitter {
         const entriesEnabled =
           user.state === "RUNNING" || user.state === "ORDERED";
         if (!position && entriesEnabled && !afterCutoff) {
+          // CR-06 (entry-path gate): a critical state write failure means the
+          // daemon's persisted state no longer matches reality. BLOCK live
+          // entries immediately — every new position would be invisible to a
+          // restart. Paper entries are simulations; they may continue (the
+          // fault is already surfaced as an operational flag).
+          if (user.executionMode === "live" && this.persistenceFault !== null) {
+            this.log(
+              "error",
+              "persistence",
+              `[${symbol}] LIVE entry BLOCKED — persistence fault (${this.persistenceFault}). ` +
+                `Existing positions remain supervised; no new live positions until writes recover.`,
+              userId,
+            );
+            continue;
+          }
           // CR-14: optional GLOBAL cap across all symbols for the day
           if (
             user.config.maxTotalTradesPerDay !== undefined &&
@@ -1086,7 +1101,29 @@ export class TenantManager extends EventEmitter {
                 user.updatedAt = new Date().toISOString();
                 this.emitUserUpdate(user);
                 this.syncStreamSubscriptions();
+                const persistBefore = this.persistenceFault;
                 this.persistUserStates();
+                // CR-06 (post-entry safety): the order IS at the broker — we
+                // cannot undo it. If the state write failed, the position is
+                // supervised in-memory (the tick loop holds it) but would be
+                // LOST on restart. Surface CRITICAL, block further live
+                // entries via the fault flag, and continue supervising.
+                if (
+                  this.persistenceFault !== null &&
+                  persistBefore === null &&
+                  user.executionMode === "live"
+                ) {
+                  this.log(
+                    "error",
+                    "persistence",
+                    `CRITICAL: LIVE position ${newPos.instrumentKey} for ${userId} ` +
+                      `exists at the broker but could NOT be persisted — it will be ` +
+                      `lost on restart. Position remains supervised in memory. ` +
+                      `New live entries blocked until persistence recovers. ` +
+                      `Fault: ${this.persistenceFault}`,
+                    userId,
+                  );
+                }
 
                 // Send Telegram entry alert
                 this.sendEntryAlert(user, newPos, symbol, {
