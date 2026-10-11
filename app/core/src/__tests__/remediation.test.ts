@@ -324,6 +324,155 @@ describe("CR-06: persistence faults block live entries mid-session", () => {
   });
 });
 
+// ─── CR-01: paper/live execution isolation (fail-closed dispatch) ───────────
+
+describe("CR-01: paper/live execution isolation", () => {
+  const prevDataDirCR01Iso = process.env.DATA_DIR;
+  beforeEach(() => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "cr01iso-"));
+  });
+  afterEach(() => {
+    if (prevDataDirCR01Iso === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prevDataDirCR01Iso;
+  });
+
+  it("paper mode NEVER invokes the live broker order API (fetch spy)", async () => {
+    const gw = new OrderGateway();
+
+    // Spy on the live-path private methods — if either is called during
+    // paper operations, the test fails.
+    const liveEntryCalls: unknown[][] = [];
+    const liveExitCalls: unknown[][] = [];
+    const origEntry = (gw as unknown as Record<string, unknown>)
+      .placeLiveUpstoxOrder;
+    const origExit = (gw as unknown as Record<string, unknown>)
+      .exitLiveUpstoxOrder;
+    (gw as unknown as Record<string, unknown>).placeLiveUpstoxOrder = async (
+      ...args: unknown[]
+    ) => {
+      liveEntryCalls.push(args);
+      throw new Error(
+        "LIVE entry API invoked during paper test — ISOLATION VIOLATION",
+      );
+    };
+    (gw as unknown as Record<string, unknown>).exitLiveUpstoxOrder = async (
+      ...args: unknown[]
+    ) => {
+      liveExitCalls.push(args);
+      throw new Error(
+        "LIVE exit API invoked during paper test — ISOLATION VIOLATION",
+      );
+    };
+
+    // Paper entry
+    const entry = await gw.placeOrder({
+      userId: "iso_user",
+      executionMode: "paper",
+      instrumentKey: "NSE_FO|TEST",
+      direction: "CE",
+      quantity: 65,
+      price: 50,
+      tradeType: "buying",
+      underlyingSymbol: "NIFTY 50",
+    });
+    expect(entry.success).toBe(true);
+    expect(entry.status).toBe("filled");
+    expect(liveEntryCalls.length).toBe(0);
+
+    // Paper exit
+    const position = makePosition({
+      instrumentKey: "NSE_FO|TEST",
+      paperTradeId: entry.tradeId,
+      currentPrice: 55,
+    });
+    const exit = await gw.exitOrder({
+      userId: "iso_user",
+      executionMode: "paper",
+      position,
+      exitPrice: 55,
+      reason: "test exit",
+    });
+    expect(exit.success).toBe(true);
+    expect(liveExitCalls.length).toBe(0);
+
+    // Restore for cleanliness
+    (gw as unknown as Record<string, unknown>).placeLiveUpstoxOrder = origEntry;
+    (gw as unknown as Record<string, unknown>).exitLiveUpstoxOrder = origExit;
+  });
+
+  it("undefined/null/unknown executionMode is REJECTED, never falls to live", async () => {
+    const gw = new OrderGateway();
+    (gw as unknown as Record<string, unknown>).placeLiveUpstoxOrder =
+      async () => {
+        throw new Error(
+          "LIVE API invoked — should never happen for malformed mode",
+        );
+      };
+
+    const badModes: unknown[] = [undefined, null, "typo", "PAPER", "", 42, {}];
+    for (const mode of badModes) {
+      const result = await gw.placeOrder({
+        userId: "iso_bad",
+        executionMode: mode as "paper" | "live",
+        instrumentKey: "NSE_FO|TEST",
+        direction: "CE",
+        quantity: 1,
+        price: 100,
+        tradeType: "buying",
+      });
+      expect(result.success).toBe(false);
+      expect(result.status).toBe("rejected");
+      expect(result.error).toContain("Invalid executionMode");
+    }
+  });
+
+  it("paper mode isolation holds after a fresh gateway (restart simulation)", async () => {
+    // Create a gateway, place a paper trade, then "restart" (new gateway on
+    // the same data dir) — the new instance still must not hit live APIs
+    const gw1 = new OrderGateway();
+    const entry = await gw1.placeOrder({
+      userId: "restart_user",
+      executionMode: "paper",
+      instrumentKey: "NSE_FO|RESTART_TEST",
+      direction: "PE",
+      quantity: 30,
+      price: 100,
+      tradeType: "buying",
+      underlyingSymbol: "BANKNIFTY",
+    });
+    expect(entry.success).toBe(true);
+
+    // Simulate restart: fresh gateway on same DATA_DIR
+    const gw2 = new OrderGateway();
+    (gw2 as unknown as Record<string, unknown>).placeLiveUpstoxOrder =
+      async () => {
+        throw new Error("LIVE API invoked after restart — ISOLATION VIOLATION");
+      };
+
+    // The restored trade is still in paper mode
+    const trades = gw2.getPaperTrades("restart_user");
+    expect(trades.length).toBe(1);
+    expect(trades[0].status).toBe("OPEN");
+
+    // Exiting through paper mode still doesn't hit live
+    const position = makePosition({
+      instrumentKey: "NSE_FO|RESTART_TEST",
+      paperTradeId: trades[0].id,
+      currentPrice: 90,
+      quantity: 30,
+    });
+    const exit = await gw2.exitOrder({
+      userId: "restart_user",
+      executionMode: "paper",
+      position,
+      exitPrice: 90,
+      reason: "restart isolation test",
+    });
+    expect(exit.success).toBe(true);
+    expect(exit.status).toBe("filled");
+  });
+});
+
 // ─── CR-15: corrupt state files are preserved, not silently reset ────────────
 
 describe("CR-15: store corrupt-file preservation", () => {

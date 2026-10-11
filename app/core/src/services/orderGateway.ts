@@ -240,17 +240,42 @@ export class OrderGateway {
   }
 
   public async placeOrder(req: OrderPlacementRequest): Promise<OrderResult> {
+    // CR-01 isolation: fail-CLOSED. Only an explicit "live" can reach the
+    // broker order API. "paper" routes to the simulation. Anything else
+    // (undefined, null, malformed) is REJECTED — never silently treated
+    // as either mode. A typo or missing field cannot submit real orders.
+    if (req.executionMode === "live") {
+      return this.placeLiveUpstoxOrder(req);
+    }
     if (req.executionMode === "paper") {
       return this.placePaperOrder(req);
     }
-    return this.placeLiveUpstoxOrder(req);
+    return {
+      success: false,
+      status: "rejected",
+      tradeId: "",
+      filledPrice: 0,
+      quantity: 0,
+      error: `Invalid executionMode "${String(req.executionMode)}" — must be "paper" or "live". Order rejected.`,
+    };
   }
 
   public async exitOrder(req: OrderExitRequest): Promise<OrderResult> {
+    // CR-01 isolation: same fail-closed dispatch for exits
+    if (req.executionMode === "live") {
+      return this.exitLiveUpstoxOrder(req);
+    }
     if (req.executionMode === "paper") {
       return this.exitPaperOrder(req);
     }
-    return this.exitLiveUpstoxOrder(req);
+    return {
+      success: false,
+      status: "rejected",
+      tradeId: "",
+      filledPrice: 0,
+      quantity: 0,
+      error: `Invalid executionMode "${String(req.executionMode)}" — must be "paper" or "live". Exit rejected.`,
+    };
   }
 
   private async placePaperOrder(
