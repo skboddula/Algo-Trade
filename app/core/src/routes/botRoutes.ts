@@ -491,13 +491,18 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     }
     activeSockets.get(userId)!.add(ws);
 
-    // Send immediate initial sync
+    // Send immediate initial sync — SANITIZED exactly like the REST status
+    // response and the USER_STATE_UPDATE broadcasts: the raw UserBotState
+    // carries the user's Upstox token and must never leave the daemon.
     const initialSnapshots = masterIngestor.getAllSnapshots();
     const userState = tenantManager.getOrCreateUser(userId);
     ws.send(
       JSON.stringify({
         type: "INITIAL_STATE",
-        data: { snapshots: initialSnapshots, userState },
+        data: {
+          snapshots: initialSnapshots,
+          userState: sanitizeUserState(userState),
+        },
       }),
     );
 

@@ -72,11 +72,7 @@ export interface MarketStreamOptions {
 }
 
 export type StreamStatus =
-  | "idle"
-  | "connecting"
-  | "open"
-  | "reconnecting"
-  | "closed";
+  "idle" | "connecting" | "open" | "reconnecting" | "closed";
 
 // ─── Stream Manager ─────────────────────────────────────────────────────────
 
@@ -136,10 +132,15 @@ export class UpstoxMarketStream extends EventEmitter {
     }
     if (this.ws) {
       this.removeAllWsListeners();
+      // ws emits teardown failures ASYNCHRONOUSLY (terminate/close on a
+      // mid-handshake socket raises 'WebSocket was closed before the
+      // connection was established' via nextTick) — after removeAllListeners
+      // there is no error handler, so it would surface as an uncaught
+      // exception (e.g. during app.close() teardown). Absorb it here.
+      this.ws.on("error", () => {});
       if (this.ws.readyState === WebSocket.OPEN) {
         this.ws.close(1000, "client stopped");
       } else if (this.ws.readyState === WebSocket.CONNECTING) {
-        // ws.close() throws on a mid-handshake socket — terminate instead
         try {
           this.ws.terminate();
         } catch {
