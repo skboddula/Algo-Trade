@@ -123,24 +123,34 @@ export function appendRecord<T>(name: string, record: T): void {
  * expected and tolerated; anything else is surfaced.
  */
 export function loadRecords<T>(name: string): T[] {
-  const path = getFilePath(name);
-  if (!existsSync(path)) return [];
-  const raw = readFileSync(path, "utf-8");
-  const lines = raw.split("\n").filter((line) => line.length > 0);
-  const records: T[] = [];
-  let malformed = 0;
-  for (const line of lines) {
-    try {
-      records.push(JSON.parse(line) as T);
-    } catch {
-      malformed += 1;
+  try {
+    const path = getFilePath(name);
+    if (!existsSync(path)) return [];
+    const raw = readFileSync(path, "utf-8");
+    const lines = raw.split("\n").filter((line) => line.length > 0);
+    const records: T[] = [];
+    let malformed = 0;
+    for (const line of lines) {
+      try {
+        records.push(JSON.parse(line) as T);
+      } catch {
+        malformed += 1;
+      }
     }
-  }
-  if (malformed > 0) {
+    if (malformed > 0) {
+      console.warn(
+        `[store] Skipped ${malformed} malformed line(s) in ${name} ` +
+          `(a truncated final line from a crash mid-append is expected)`,
+      );
+    }
+    return records;
+  } catch (error) {
+    // exists-then-race or transient IO failure — history reads fail soft
+    // (state files use loadState's strict corrupt-preservation handling).
     console.warn(
-      `[store] Skipped ${malformed} malformed line(s) in ${name} ` +
-        `(a truncated final line from a crash mid-append is expected)`,
+      `[store] Failed to load records from ${name}:`,
+      (error as Error).message,
     );
+    return [];
   }
-  return records;
 }

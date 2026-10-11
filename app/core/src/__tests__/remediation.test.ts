@@ -56,7 +56,12 @@ import { EventEmitter } from "events";
 
 /** Stub ingestor: an EventEmitter is all the manager needs at construction. */
 function stubIngestor(): MasterIngestionEngine {
-  return new EventEmitter() as unknown as MasterIngestionEngine;
+  const emitter = new EventEmitter();
+  const stub = emitter as unknown as {
+    getPrimaryToken: () => string | null;
+  };
+  stub.getPrimaryToken = () => null; // no token → stream stays idle in tests
+  return emitter as unknown as MasterIngestionEngine;
 }
 
 function makeHarness(exitResult: OrderResult) {
