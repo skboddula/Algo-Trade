@@ -18,6 +18,20 @@ export function buildServer(opts?: {
   const app = fastify({
     logger: {
       level: process.env.LOG_LEVEL || "info",
+      // CR-05: credentials must never reach the logs — the WS ticket/apiKey
+      // arrive as URL query params and the REST key as a header.
+      redact: {
+        censor: "[REDACTED]",
+        paths: [
+          "req.headers.authorization",
+          "req.headers.x-api-key",
+          "req.headers.cookie",
+          "req.query.apiKey",
+          "req.query.ticket",
+          "res.headers.authorization",
+          'req.headers["x-api-key"]',
+        ],
+      },
       transport:
         process.env.NODE_ENV !== "production"
           ? {

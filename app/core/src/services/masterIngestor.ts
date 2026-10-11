@@ -44,6 +44,12 @@ export class MasterIngestionEngine extends EventEmitter {
   private lastVixFetchMs = 0;
   private vixValue: number | null = null;
   private sentimentIngestor!: SentimentIngestor;
+
+  // ── Per-source freshness (CR-11): last SUCCESS timestamps per symbol ──
+  private lastQuoteAtMs = new Map<UnderlyingSymbol, number>();
+  private lastCandlesAtMs = new Map<UnderlyingSymbol, number>();
+  private lastChainAtMs = new Map<UnderlyingSymbol, number>();
+  private lastVixAtMs: number | null = null;
   private expiryCache = new Map<
     UnderlyingSymbol,
     { expiry: string; fetchedMs: number }
@@ -88,6 +94,9 @@ export class MasterIngestionEngine extends EventEmitter {
     // Persist so daemon restarts keep the freshest token (the static .env
     // copy is only as fresh as the last manual edit — it expires daily).
     saveState("primary_token", { token, pushedAt: new Date().toISOString() });
+    // Let the stream manager replace its authenticated connection with the
+    // fresh token (the old one may be expired/revoked).
+    this.emit("tokenChanged", token);
   }
 
   public getPrimaryToken(): string | null {
@@ -213,6 +222,7 @@ export class MasterIngestionEngine extends EventEmitter {
               Object.values(data?.data ?? {})[0];
             if (typeof quote?.last_price === "number") {
               spotPrice = quote.last_price;
+              this.lastQuoteAtMs.set(symbol, Date.now());
             }
           }
         } catch {
@@ -346,6 +356,7 @@ export class MasterIngestionEngine extends EventEmitter {
         vrdData,
         signal: finalSignal,
         globalIndices: signalData.globalIndices ?? [],
+        sources: this.buildSourcesBlock(symbol),
       };
 
       this.latestSnapshots.set(symbol, snapshot);
@@ -356,6 +367,58 @@ export class MasterIngestionEngine extends EventEmitter {
       timestamp,
       snapshots: this.getAllSnapshots(),
     });
+  }
+
+  // ─── Per-source freshness (CR-11) ────────────────────────────────────────
+  // Maximum ages for data used in ENTRY decisions (market hours; off-hours
+  // entries are already blocked by the tenant manager's market-hours guard).
+  private static readonly QUOTE_MAX_AGE_MS = 30_000;
+  private static readonly CANDLES_MAX_AGE_MS = 120_000;
+  private static readonly CHAIN_MAX_AGE_MS = 60_000;
+  private static readonly VIX_MAX_AGE_MS = 300_000;
+
+  private buildSourcesBlock(
+    symbol: UnderlyingSymbol,
+  ): NonNullable<MarketSnapshot["sources"]> {
+    const now = Date.now();
+    const quoteAgeMs = this.lastQuoteAtMs.get(symbol) ?? null;
+    const candlesAgeMs = this.lastCandlesAtMs.get(symbol) ?? null;
+    const chainAgeMs = this.lastChainAtMs.get(symbol) ?? null;
+    const vixAgeMs = this.lastVixAtMs === null ? null : now - this.lastVixAtMs;
+    const entryBlockedReasons: string[] = [];
+    if (
+      quoteAgeMs === null ||
+      now - quoteAgeMs > MasterIngestionEngine.QUOTE_MAX_AGE_MS
+    ) {
+      entryBlockedReasons.push("underlying quote stale or missing");
+    }
+    if (
+      candlesAgeMs === null ||
+      now - candlesAgeMs > MasterIngestionEngine.CANDLES_MAX_AGE_MS
+    ) {
+      entryBlockedReasons.push("candles/indicators stale or missing");
+    }
+    if (
+      chainAgeMs === null ||
+      now - chainAgeMs > MasterIngestionEngine.CHAIN_MAX_AGE_MS
+    ) {
+      entryBlockedReasons.push("option chain stale or missing");
+    }
+    if (vixAgeMs === null || vixAgeMs > MasterIngestionEngine.VIX_MAX_AGE_MS) {
+      entryBlockedReasons.push("VIX stale or missing");
+    }
+    return {
+      quoteAgeMs: quoteAgeMs === null ? null : now - quoteAgeMs,
+      candlesAgeMs: candlesAgeMs === null ? null : now - candlesAgeMs,
+      chainAgeMs: chainAgeMs === null ? null : now - chainAgeMs,
+      vixAgeMs,
+      entryBlockedReasons,
+    };
+  }
+
+  /** Public accessor: entry blockers for a symbol (CR-11 gate for callers). */
+  public getEntryBlockers(symbol: UnderlyingSymbol): string[] {
+    return this.buildSourcesBlock(symbol).entryBlockedReasons;
   }
 
   // ── Live Upstox data fetchers ─────────────────────────────────────────────
@@ -391,6 +454,7 @@ export class MasterIngestionEngine extends EventEmitter {
     );
     if (!candles.length) return fallback;
     this.candleBuffer.set(symbol, candles);
+    this.lastCandlesAtMs.set(symbol, Date.now());
     return candles;
   }
 
@@ -429,6 +493,7 @@ export class MasterIngestionEngine extends EventEmitter {
     const chain = data?.data ?? [];
     if (!chain.length) return fallback;
     this.latestOptionChains.set(symbol, chain);
+    this.lastChainAtMs.set(symbol, Date.now());
     return chain;
   }
 
@@ -443,11 +508,20 @@ export class MasterIngestionEngine extends EventEmitter {
     headers: Record<string, string>,
   ): Promise<string | null> {
     const cached = this.expiryCache.get(symbol);
+    const today = getIndiaTime().dateString;
+    // CR-12: a cached expiry is valid only while it has not PASSED. A
+    // long-running daemon crossing expiry day must never keep requesting
+    // the expired contract, even inside the TTL window.
     if (
       cached &&
-      Date.now() - cached.fetchedMs < MasterIngestionEngine.EXPIRY_TTL_MS
+      Date.now() - cached.fetchedMs < MasterIngestionEngine.EXPIRY_TTL_MS &&
+      cached.expiry >= today
     ) {
       return cached.expiry;
+    }
+    if (cached) {
+      // Expired cache entry: drop it before refetching.
+      this.expiryCache.delete(symbol);
     }
     const res = await fetchWithRetry(
       `${this.config.upstoxApiBaseUrl}/option/contract?instrument_key=${encodeURIComponent(instrumentKey)}`,
@@ -455,7 +529,6 @@ export class MasterIngestionEngine extends EventEmitter {
     );
     if (!res.ok) return cached?.expiry ?? null;
     const data = (await res.json()) as { data?: { expiry?: string }[] };
-    const today = getIndiaTime().dateString;
     const expiries = [
       ...new Set(
         (data?.data ?? [])
@@ -492,6 +565,7 @@ export class MasterIngestionEngine extends EventEmitter {
         Object.values(data?.data ?? {})[0];
       if (typeof quote?.last_price === "number") {
         this.vixValue = quote.last_price;
+        this.lastVixAtMs = Date.now();
       }
     } catch {
       // Keep previous VIX on transient failure

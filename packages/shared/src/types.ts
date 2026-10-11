@@ -231,6 +231,8 @@ export interface ActivePosition {
   strikePrice?: number
   /** Option expiry captured at entry for exit alerts. */
   expiry?: string
+  /** CR-01 guard: an exit for this position is in flight (dedup). */
+  pendingExit?: boolean
 }
 
 export interface StrategyConfig {
@@ -245,6 +247,8 @@ export interface StrategyConfig {
   /** Trailing stop percentage from peak favorable price (default 5). */
   trailPct?: number
   maxTradesPerDay: number
+  /** Optional GLOBAL cap across all symbols for the day (undefined = off). */
+  maxTotalTradesPerDay?: number
   lastEntryTime: string
   pollingIntervalSec: number
   minConfidence: 'strong' | 'moderate'
@@ -273,6 +277,8 @@ export interface PaperAccount {
   mode?: string
   userId?: string
   balance: number
+  /** Capital the account started with (equity-curve baseline). */
+  startingBalance?: number
   currency: string
   updatedAt?: string
   updated_at?: string
@@ -450,6 +456,14 @@ export interface MarketSnapshot {
   signal?: FinalSignal
   /** Global indices (Brent, GIFT, US) for the dashboard markets panel. */
   globalIndices?: McMarketItem[]
+  /** Per-source data ages (ms since last successful fetch) — CR-11. */
+  sources?: {
+    quoteAgeMs: number | null
+    candlesAgeMs: number | null
+    chainAgeMs: number | null
+    vixAgeMs: number | null
+    entryBlockedReasons: string[]
+  }
 }
 
 export interface UserBotState {

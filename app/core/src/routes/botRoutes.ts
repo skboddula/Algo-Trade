@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type { MasterIngestionEngine } from "../services/masterIngestor";
 import type { TenantManager } from "../services/tenantManager";
@@ -14,11 +15,43 @@ import {
 import type { WebSocket } from "ws";
 
 /** Strip sensitive credentials before sending state to clients */
-function sanitizeUserState(
-  state: UserBotState,
-): Omit<UserBotState, "upstoxToken"> {
-  const { upstoxToken: _token, ...safe } = state;
-  return safe;
+/**
+ * CR-06: explicit ALLOWLIST DTO for user state sent to clients. Fields are
+ * PICKED, never omitted-by-deletion — new UserBotState fields do not leak
+ * into client payloads by default; they must be added here deliberately.
+ */
+export interface PublicUserState {
+  userId: string;
+  state: UserBotState["state"];
+  executionMode: "paper" | "live";
+  config: UserBotState["config"];
+  positions: UserBotState["positions"];
+  tradesCountToday: number;
+  tradesCountPerSymbol: Record<string, number>;
+  lastTradeDate: string;
+  lastExitTimes: Record<string, number>;
+  totalRealizedPnl: number;
+  paperBalance: number;
+  error?: string;
+  updatedAt: string;
+}
+
+function sanitizeUserState(state: UserBotState): PublicUserState {
+  return {
+    userId: state.userId,
+    state: state.state,
+    executionMode: state.executionMode === "live" ? "live" : "paper",
+    config: state.config,
+    positions: state.positions,
+    tradesCountToday: state.tradesCountToday ?? 0,
+    tradesCountPerSymbol: state.tradesCountPerSymbol ?? {},
+    lastTradeDate: state.lastTradeDate,
+    lastExitTimes: state.lastExitTimes ?? {},
+    totalRealizedPnl: state.totalRealizedPnl ?? 0,
+    paperBalance: state.paperBalance ?? 0,
+    error: state.error,
+    updatedAt: state.updatedAt,
+  };
 }
 
 export interface BotRoutesOptions {
@@ -36,6 +69,30 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
 
   // Connected WebSocket clients: Map<userId, Set<WebSocket>>
   const activeSockets = new Map<string, Set<WebSocket>>();
+
+  // ── CR-05: one-time WS tickets — long-lived API keys never appear in
+  // URLs (which leak into logs/proxy histories). A client POSTs
+  // /api/bot/ws-ticket (header-authenticated) and connects with the
+  // returned short-lived, single-use ticket.
+  const wsTickets = new Map<string, { expiresAt: number }>();
+  const WS_TICKET_TTL_MS = 30_000;
+  function issueWsTicket(): string {
+    // Prune expired tickets (bounded map)
+    const now = Date.now();
+    for (const [t, entry] of wsTickets.entries()) {
+      if (entry.expiresAt <= now) wsTickets.delete(t);
+    }
+    const ticket = randomUUID();
+    wsTickets.set(ticket, { expiresAt: now + WS_TICKET_TTL_MS });
+    return ticket;
+  }
+  function consumeWsTicket(ticket: string | undefined): boolean {
+    if (!ticket) return false;
+    const entry = wsTickets.get(ticket);
+    if (!entry) return false;
+    wsTickets.delete(ticket); // single-use
+    return entry.expiresAt > Date.now();
+  }
 
   // Periodic heartbeat every 30s to purge dead sockets
   const heartbeatInterval = setInterval(() => {
@@ -120,67 +177,151 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
       snapshots,
       userState: sanitizeUserState(userState),
       paperTrades,
+      recovery: tenantManager.getRecoveryStatus(),
+      persistenceFault: tenantManager.getPersistenceFault(),
     });
   });
+
+  // ── CR-17: runtime validation schemas (TypeScript casts are not
+  // runtime validation — malformed bodies must fail with 400s, not casts)
+  const START_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      userId: { type: "string", minLength: 1, maxLength: 64 },
+      executionMode: { type: "string", enum: ["paper", "live"] },
+    },
+  } as const;
+  const USER_ID_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    properties: { userId: { type: "string", minLength: 1, maxLength: 64 } },
+  } as const;
+  const CONFIG_SCHEMA = {
+    type: "object",
+    required: ["config"],
+    additionalProperties: false,
+    properties: {
+      userId: { type: "string", minLength: 1, maxLength: 64 },
+      config: {
+        type: "object",
+        additionalProperties: true, // strategy config is a partial merge
+        properties: {
+          strongThreshold: { type: "number", minimum: 1, maximum: 100 },
+          moderateThreshold: { type: "number", minimum: 1, maximum: 100 },
+          maxProfitPct: { type: "number", minimum: 0.1, maximum: 100 },
+          maxLossPct: { type: "number", minimum: 0.1, maximum: 100 },
+          trailPct: { type: "number", minimum: 0.1, maximum: 50 },
+          maxTradesPerDay: { type: "integer", minimum: 1, maximum: 50 },
+          maxTotalTradesPerDay: { type: "integer", minimum: 1, maximum: 150 },
+          otmSkip: { type: "integer", minimum: 0, maximum: 10 },
+          exitCooldownSec: { type: "integer", minimum: 0, maximum: 3600 },
+          minConfidence: { type: "string", enum: ["strong", "moderate"] },
+          executionMode: { type: "string", enum: ["paper", "live"] },
+          tradeType: { type: "string", enum: ["buying", "selling"] },
+          underlyingMode: { type: "string" },
+        },
+      },
+    },
+  } as const;
+  const TOKEN_SCHEMA = {
+    type: "object",
+    required: ["token"],
+    additionalProperties: false,
+    properties: {
+      userId: { type: "string", minLength: 1, maxLength: 64 },
+      token: { type: "string", minLength: 10, maxLength: 4096 },
+    },
+  } as const;
+  const TRADE_EXIT_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      userId: { type: "string", minLength: 1, maxLength: 64 },
+      symbol: { type: "string", enum: ["NIFTY 50", "BANKNIFTY", "FINNIFTY"] },
+      reason: { type: "string", maxLength: 200 },
+    },
+  } as const;
 
   // ── POST /api/bot/start ────────────────────────────────────────────────────
-  fastify.post("/api/bot/start", async (request, reply) => {
-    const body = request.body as {
-      userId?: string;
-      executionMode?: "paper" | "live";
-    } | null;
-    const userId = body?.userId || "default_user";
-    const userState = tenantManager.startBot(userId, body?.executionMode);
-    return reply.send({
-      success: true,
-      userState: sanitizeUserState(userState),
-    });
-  });
+  fastify.post(
+    "/api/bot/start",
+    { schema: { body: START_SCHEMA } },
+    async (request, reply) => {
+      const body = request.body as {
+        userId?: string;
+        executionMode?: "paper" | "live";
+      } | null;
+      const userId = body?.userId || "default_user";
+      try {
+        const userState = tenantManager.startBot(userId, body?.executionMode);
+        return reply.send({
+          success: true,
+          userState: sanitizeUserState(userState),
+        });
+      } catch (err) {
+        // CR-08: live-trading arming / recovery / persistence rejections
+        return reply.code(403).send({ error: (err as Error).message });
+      }
+    },
+  );
 
   // ── POST /api/bot/stop ─────────────────────────────────────────────────────
-  fastify.post("/api/bot/stop", async (request, reply) => {
-    const body = request.body as { userId?: string } | null;
-    const userId = body?.userId || "default_user";
-    const userState = tenantManager.stopBot(userId);
-    return reply.send({
-      success: true,
-      userState: sanitizeUserState(userState),
-    });
-  });
+  fastify.post(
+    "/api/bot/stop",
+    { schema: { body: USER_ID_SCHEMA } },
+    async (request, reply) => {
+      const body = request.body as { userId?: string } | null;
+      const userId = body?.userId || "default_user";
+      const userState = tenantManager.stopBot(userId);
+      return reply.send({
+        success: true,
+        userState: sanitizeUserState(userState),
+      });
+    },
+  );
 
   // ── POST /api/bot/config ───────────────────────────────────────────────────
-  fastify.post("/api/bot/config", async (request, reply) => {
-    const body = request.body as { userId?: string; config: any } | null;
-    const userId = body?.userId || "default_user";
-    if (!body?.config) {
-      return reply.status(400).send({ error: "Missing config payload" });
-    }
-    const userState = tenantManager.updateConfig(userId, body.config);
-    return reply.send({
-      success: true,
-      userState: sanitizeUserState(userState),
-    });
-  });
+  fastify.post(
+    "/api/bot/config",
+    { schema: { body: CONFIG_SCHEMA } },
+    async (request, reply) => {
+      const body = request.body as { userId?: string; config: any } | null;
+      const userId = body?.userId || "default_user";
+      if (!body?.config) {
+        return reply.status(400).send({ error: "Missing config payload" });
+      }
+      const userState = tenantManager.updateConfig(userId, body.config);
+      return reply.send({
+        success: true,
+        userState: sanitizeUserState(userState),
+      });
+    },
+  );
 
   // ── POST /api/bot/token ────────────────────────────────────────────────────
-  fastify.post("/api/bot/token", async (request, reply) => {
-    const body = request.body as { userId?: string; token: string } | null;
-    const userId = body?.userId || "default_user";
-    if (!body?.token) {
-      return reply.status(400).send({ error: "Missing token" });
-    }
-    // Update BOTH token surfaces:
-    //  - masterIngestor: the primary token driving ALL market data
-    //    (quotes, candles, chains, VIX, sentiment) — the daily expiry
-    //    would otherwise silently kill data feeds tomorrow morning.
-    //  - tenant user: the per-user token for live order placement.
-    masterIngestor.setToken(body.token);
-    const userState = tenantManager.setToken(userId, body.token);
-    return reply.send({
-      success: true,
-      userState: sanitizeUserState(userState),
-    });
-  });
+  fastify.post(
+    "/api/bot/token",
+    { schema: { body: TOKEN_SCHEMA } },
+    async (request, reply) => {
+      const body = request.body as { userId?: string; token: string } | null;
+      const userId = body?.userId || "default_user";
+      if (!body?.token) {
+        return reply.status(400).send({ error: "Missing token" });
+      }
+      // Update BOTH token surfaces:
+      //  - masterIngestor: the primary token driving ALL market data
+      //    (quotes, candles, chains, VIX, sentiment) — the daily expiry
+      //    would otherwise silently kill data feeds tomorrow morning.
+      //  - tenant user: the per-user token for live order placement.
+      masterIngestor.setToken(body.token);
+      const userState = tenantManager.setToken(userId, body.token);
+      return reply.send({
+        success: true,
+        userState: sanitizeUserState(userState),
+      });
+    },
+  );
 
   // ── POST /api/bot/paper-reset ──────────────────────────────────────────────
   fastify.post("/api/bot/paper-reset", async (request, reply) => {
@@ -229,9 +370,11 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
       (s, t) => s + (t.realizedPnl ?? 0),
       0,
     );
-    // Known initial capital — robust under the cash model (balance dips
-    // while positions are open because entry premiums are deducted).
-    const startBalance = DEFAULT_INITIAL_PAPER_BALANCE;
+    // CR-20: the account's own startingBalance is authoritative (it
+    // survives resets and adjustments); the default is only a fallback
+    // for accounts created before the field existed.
+    const startBalance =
+      account.startingBalance ?? DEFAULT_INITIAL_PAPER_BALANCE;
 
     let running = startBalance;
     let peak = startBalance;
@@ -319,26 +462,30 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
   });
 
   // ── POST /api/bot/trade/exit ───────────────────────────────────────────────
-  fastify.post("/api/bot/trade/exit", async (request, reply) => {
-    const body = request.body as {
-      userId?: string;
-      symbol: UnderlyingSymbol;
-      reason?: string;
-    } | null;
-    const userId = body?.userId || "default_user";
-    if (!body?.symbol) {
-      return reply.status(400).send({ error: "Missing symbol" });
-    }
-    const userState = await tenantManager.manualExit(
-      userId,
-      body.symbol,
-      body.reason || "Manual Web Exit",
-    );
-    return reply.send({
-      success: true,
-      userState: sanitizeUserState(userState),
-    });
-  });
+  fastify.post(
+    "/api/bot/trade/exit",
+    { schema: { body: TRADE_EXIT_SCHEMA } },
+    async (request, reply) => {
+      const body = request.body as {
+        userId?: string;
+        symbol: UnderlyingSymbol;
+        reason?: string;
+      } | null;
+      const userId = body?.userId || "default_user";
+      if (!body?.symbol) {
+        return reply.status(400).send({ error: "Missing symbol" });
+      }
+      const userState = await tenantManager.manualExit(
+        userId,
+        body.symbol,
+        body.reason || "Manual Web Exit",
+      );
+      return reply.send({
+        success: true,
+        userState: sanitizeUserState(userState),
+      });
+    },
+  );
 
   // ── POST /api/bot/backtest ────────────────────────────────────────────────
   // Runs the strategy against real historical 1-minute candles. Read-only:
@@ -431,6 +578,14 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     }
   });
 
+  // ── POST /api/bot/ws-ticket ──────────────────────────────────────────────
+  // Header-authenticated exchange: returns a single-use, 30-second ticket
+  // for the WebSocket handshake so the API key never appears in a URL.
+  fastify.post("/api/bot/ws-ticket", async (_request, reply) => {
+    const ticket = issueWsTicket();
+    return reply.send({ ticket, expiresAt: Date.now() + WS_TICKET_TTL_MS });
+  });
+
   // ── GET /api/bot/statements ────────────────────────────────────────────────
   // Broker-style paper account ledger (entries, exits, balance walk).
   fastify.get("/api/bot/statements", async (request, reply) => {
@@ -450,10 +605,16 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     return reply.send({ logs: botLogs.get(limit) });
   });
 
-  // Broadcast every bot log line to ALL connected dashboards
+  // CR-18: user-SCOPED log delivery — a line tagged with a userId goes
+  // ONLY to that user's sockets (one user must never receive another
+  // user's trade activity). System-wide lines (no userId) go to everyone.
   botLogs.on("log", (line: BotLog) => {
     const payload = JSON.stringify({ type: "BOT_LOG", data: line });
-    for (const sockets of activeSockets.values()) {
+    const targets = line.userId
+      ? [activeSockets.get(line.userId)]
+      : Array.from(activeSockets.values());
+    for (const sockets of targets) {
+      if (!sockets) continue;
       for (const ws of sockets) {
         if (ws.readyState === 1 /* OPEN */) {
           try {
@@ -468,16 +629,18 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
 
   // ── WebSocket /ws ──────────────────────────────────────────────────────────
   fastify.get("/ws", { websocket: true }, (connection, req) => {
-    const query = req.query as { userId?: string; apiKey?: string };
+    const query = req.query as { userId?: string; ticket?: string };
     const userId = query.userId || "default_user";
     const ws = (connection as any).socket || connection;
 
-    // Handshake auth: browsers cannot set WebSocket headers, so the key
-    // arrives as ?apiKey=. Without a match the socket is closed before any
-    // state is sent or commands are accepted. (WebSocket connections are
-    // NOT covered by CORS — this is the cross-site-control guard.)
+    // Handshake auth (CR-05): browsers cannot set WebSocket headers, so the
+    // client first POSTs /api/bot/ws-ticket (header-authenticated) and
+    // connects with the single-use, short-lived ?ticket=. The long-lived API
+    // key never appears in a URL. WebSocket connections are NOT covered by
+    // CORS — this is the cross-site-control guard.
     const expectedKey = process.env.DAEMON_API_KEY?.trim();
-    if (expectedKey && query.apiKey !== expectedKey) {
+    const authorized = expectedKey ? consumeWsTicket(query.ticket) : true; // loopback dev without a configured key
+    if (!authorized) {
       try {
         ws.close(4001, "unauthorized");
       } catch {

@@ -32,12 +32,26 @@ export function daemonApiKey(): string | undefined {
   return typeof key === 'string' && key.length > 0 ? key : undefined
 }
 
-export function daemonWsUrl(userId = DAEMON_USER_ID): string {
+export function daemonWsUrl(userId = DAEMON_USER_ID, ticket?: string): string {
   const http = daemonBaseUrl()
   const wsBase = http.replace(/^http/, 'ws')
-  const key = daemonApiKey()
-  const auth = key ? `&apiKey=${encodeURIComponent(key)}` : ''
+  const auth = ticket ? `&ticket=${encodeURIComponent(ticket)}` : ''
   return `${wsBase}/ws?userId=${encodeURIComponent(userId)}${auth}`
+}
+
+/**
+ * CR-05: fetches a single-use, short-lived WebSocket ticket via the
+ * header-authenticated REST endpoint so the long-lived API key never
+ * appears in a URL. Returns undefined when auth is not configured
+ * (loopback dev) — the connection then proceeds without a ticket.
+ */
+export async function fetchWsTicket(): Promise<string | undefined> {
+  const key = daemonApiKey()
+  if (!key) return undefined
+  const res = await daemonFetch<{ ticket: string }>('/api/bot/ws-ticket', {
+    method: 'POST',
+  })
+  return res.ticket
 }
 
 /** Headers every authenticated daemon REST call must carry. */
@@ -258,11 +272,20 @@ export function openDaemonStream(opts: DaemonStreamOptions): () => void {
   let disposed = false
   let retryTimer: ReturnType<typeof setTimeout> | null = null
 
-  const connect = () => {
+  const connect = async () => {
     if (disposed) return
     opts.onStatusChange?.('connecting')
+    let ticket: string | undefined
     try {
-      ws = new WebSocket(daemonWsUrl(opts.userId))
+      ticket = await fetchWsTicket()
+    } catch {
+      // ticket fetch failed — retry via the normal reconnect loop
+      scheduleRetry()
+      return
+    }
+    if (disposed) return
+    try {
+      ws = new WebSocket(daemonWsUrl(opts.userId, ticket))
     } catch {
       scheduleRetry()
       return
@@ -296,11 +319,11 @@ export function openDaemonStream(opts: DaemonStreamOptions): () => void {
     if (disposed || retryTimer) return
     retryTimer = setTimeout(() => {
       retryTimer = null
-      connect()
+      void connect()
     }, 1000)
   }
 
-  connect()
+  void connect()
 
   return () => {
     disposed = true

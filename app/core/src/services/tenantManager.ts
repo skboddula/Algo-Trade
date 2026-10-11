@@ -48,6 +48,20 @@ export class TenantManager extends EventEmitter {
   private botLogs: BotLogService | null;
   private lastSignalBySymbol: Map<UnderlyingSymbol, string> = new Map();
 
+  // ── Recovery lifecycle (CR-04) ─────────────────────────────────────────
+  // Entries in LIVE mode stay blocked until startup reconciliation of
+  // persisted state (and, for live users, broker positions) completes.
+  private recoveryStatus: "pending" | "complete" | "failed" = "pending";
+  private recoveryNotes: string[] = [];
+
+  // ── Persistence health (CR-15) ────────────────────────────────────────
+  // A failed critical write is an operational fault: live entries are
+  // blocked until persistence is healthy again.
+  private persistenceFault: string | null = null;
+
+  // ── Live trading arming (CR-08) ────────────────────────────────────────
+  private static readonly LIVE_ARM_ENV = "DAEMON_LIVE_ARMED";
+
   constructor(
     masterIngestor: MasterIngestionEngine,
     orderGateway: OrderGateway,
@@ -84,8 +98,31 @@ export class TenantManager extends EventEmitter {
     });
     this.marketStream.start();
 
-    // Restore user states from disk
-    this.restoreUserStates();
+    // CR-09: when a token first arrives (morning OAuth handoff) or changes,
+    // replace the stream's authenticated connection with the fresh one.
+    this.masterIngestor.on("tokenChanged", () => {
+      const token = this.masterIngestor.getPrimaryToken();
+      if (!token) return;
+      // A CHANGE of token requires replacing the (possibly authenticated-with
+      // the OLD token) socket; notifyTokenAvailable handles the no-socket
+      // startup case. reconnect() is safe for both: it no-ops duplicates
+      // via the single-socket guard when nothing is connected, but for a
+      // live socket we must tear down and reconnect with the new token.
+      this.marketStream.reconnect();
+      this.log(
+        "info",
+        "stream",
+        "Upstox token refreshed — stream reconnecting with new credentials",
+      );
+    });
+
+    // CR-04: startup recovery — validate persisted state, reconcile live
+    // users against the broker where possible, then arm entries.
+    this.runStartupRecovery();
+
+    // CR-10: restore stream subscriptions for any persisted open positions
+    // so trailing stops and PnL ticks work immediately after a restart.
+    this.syncStreamSubscriptions();
 
     // Bind to master market ticks (REST polling — fallback/supplement to the stream)
     this.masterIngestor.on("marketTick", (tick) => {
@@ -93,6 +130,126 @@ export class TenantManager extends EventEmitter {
         this.emit("error", err);
       });
     });
+  }
+
+  /** CR-04: validates persisted state and reconciles live users. */
+  private async runStartupRecovery(): Promise<void> {
+    this.recoveryStatus = "pending";
+    this.recoveryNotes = [];
+    try {
+      // Step 0: load persisted user states from disk.
+      this.restoreUserStates();
+
+      // Step 1: validate each restored user's shape.
+      for (const [userId, user] of this.users.entries()) {
+        const issues = this.validateUserState(user);
+        if (issues.length > 0) {
+          this.recoveryNotes.push(`user ${userId}: ${issues.join("; ")}`);
+          this.log(
+            "warn",
+            "recovery",
+            `Restored state for ${userId} has issues: ${issues.join("; ")}`,
+          );
+        }
+        // Step 2: for LIVE users with open positions, reconcile against the
+        // broker where a token is available; blocked live entries on failure.
+        const hasPosition = Object.values(user.positions).some(
+          (p) => p !== null,
+        );
+        if (user.executionMode === "live" && hasPosition) {
+          const token =
+            user.upstoxToken ?? this.masterIngestor.getPrimaryToken();
+          if (!token) {
+            this.recoveryNotes.push(
+              `LIVE user ${userId} holds an open position but no token is available — live entries BLOCKED until reconciled`,
+            );
+            continue;
+          }
+          const brokerPositions =
+            await this.orderGateway.getLivePositions(token);
+          if (brokerPositions === null) {
+            this.recoveryNotes.push(
+              `LIVE user ${userId}: broker position fetch failed — live entries BLOCKED until reconciled`,
+            );
+            this.log(
+              "warn",
+              "recovery",
+              `Broker reconciliation for ${userId} unavailable — live entries blocked`,
+            );
+          } else {
+            const held = Object.values(user.positions).filter(
+              (p) => p !== null,
+            ) as { instrumentKey: string }[];
+            for (const pos of held) {
+              const match = brokerPositions.find(
+                (b) => b.instrumentKey === pos.instrumentKey,
+              );
+              if (!match) {
+                this.recoveryNotes.push(
+                  `position ${pos.instrumentKey} not found at broker for ${userId} — verify before assuming it closed`,
+                );
+                this.log(
+                  "warn",
+                  "recovery",
+                  `Mismatch: local position ${pos.instrumentKey} for ${userId} absent at broker`,
+                );
+              }
+            }
+          }
+        }
+      }
+      this.recoveryStatus = "complete";
+      this.log(
+        "info",
+        "recovery",
+        `Startup recovery complete${this.recoveryNotes.length > 0 ? ` (${this.recoveryNotes.length} note(s))` : ""}`,
+      );
+    } catch (err) {
+      this.recoveryStatus = "failed";
+      this.recoveryNotes.push(`recovery error: ${(err as Error).message}`);
+      this.log(
+        "error",
+        "recovery",
+        `Startup recovery FAILED — live entries blocked: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /** CR-04: shape validation for persisted user state. */
+  private validateUserState(user: UserBotState): string[] {
+    const issues: string[] = [];
+    if (!user.userId) issues.push("missing userId");
+    if (!user.state) issues.push("missing state");
+    if (typeof user.positions !== "object" || user.positions === null) {
+      issues.push("positions object missing/corrupt");
+    } else {
+      for (const [sym, pos] of Object.entries(user.positions)) {
+        if (
+          pos !== null &&
+          typeof (pos as ActivePosition).instrumentKey !== "string"
+        ) {
+          issues.push(`position for ${sym} missing instrumentKey`);
+        }
+      }
+    }
+    if (typeof user.tradesCountToday !== "number") {
+      user.tradesCountToday = 0;
+      issues.push("tradesCountToday invalid — reset to 0");
+    }
+    return issues;
+  }
+
+  /** CR-04: recovery status for API exposure. */
+  public getRecoveryStatus(): {
+    status: "pending" | "complete" | "failed";
+    notes: string[];
+  } {
+    return { status: this.recoveryStatus, notes: [...this.recoveryNotes] };
+  }
+
+  /** CR-15: persistence health; a fault blocks live entries. */
+  public getPersistenceFault(): string | null {
+    return this.persistenceFault;
   }
 
   /** Applies streamed tick-level prices to open positions in real time. */
@@ -213,6 +370,47 @@ export class TenantManager extends EventEmitter {
     executionMode?: "paper" | "live",
   ): UserBotState {
     const user = this.getOrCreateUser(userId);
+
+    // CR-08: live trading requires explicit SERVER-SIDE arming. A client
+    // flipping executionMode:"live" in a request body can never arm real
+    // orders without the operator setting DAEMON_LIVE_ARMED=true in the
+    // daemon's environment.
+    const requestedMode = executionMode ?? user.executionMode;
+    if (requestedMode === "live") {
+      if (process.env[TenantManager.LIVE_ARM_ENV] !== "true") {
+        this.log(
+          "error",
+          "bot",
+          `LIVE start for ${userId} REJECTED: ${TenantManager.LIVE_ARM_ENV} is not set on the daemon`,
+        );
+        throw new Error(
+          `Live trading is not armed: set ${TenantManager.LIVE_ARM_ENV}=true in the daemon environment to enable live orders`,
+        );
+      }
+      // CR-04/CR-15: live entries stay blocked until recovery completes and
+      // persistence is healthy.
+      if (this.recoveryStatus !== "complete") {
+        this.log(
+          "error",
+          "bot",
+          `LIVE start for ${userId} REJECTED: startup recovery is ${this.recoveryStatus}`,
+        );
+        throw new Error(
+          `Live trading blocked: startup recovery is ${this.recoveryStatus}`,
+        );
+      }
+      if (this.persistenceFault !== null) {
+        this.log(
+          "error",
+          "bot",
+          `LIVE start for ${userId} REJECTED: persistence fault (${this.persistenceFault})`,
+        );
+        throw new Error(
+          `Live trading blocked: persistence fault (${this.persistenceFault})`,
+        );
+      }
+    }
+
     if (executionMode) {
       user.executionMode = executionMode;
       user.config.executionMode = executionMode;
@@ -225,6 +423,7 @@ export class TenantManager extends EventEmitter {
       "info",
       "bot",
       `Bot started for ${userId} (${user.executionMode})${hasOpenPosition ? " — resuming open position supervision" : ""}`,
+      userId,
     );
     user.error = undefined;
     user.updatedAt = new Date().toISOString();
@@ -239,10 +438,15 @@ export class TenantManager extends EventEmitter {
     const openCount = Object.values(user.positions).filter(
       (p) => p !== null,
     ).length;
+    // CR-03: stopping only disables NEW ENTRIES. Open positions remain
+    // under full supervision (stop-loss, trailing, EOD square-off) until
+    // they close or an explicit exit is requested. Abandoning positions
+    // silently would be unsafe.
     this.log(
       "warn",
       "bot",
-      `Bot stopped for ${userId}${openCount > 0 ? ` — ${openCount} open position(s) left UNSUPERVISED` : ""}`,
+      `Bot stopped for ${userId} — new entries blocked${openCount > 0 ? `; ${openCount} open position(s) remain under protective supervision` : ""}`,
+      userId,
     );
     user.updatedAt = new Date().toISOString();
     this.emitUserUpdate(user);
@@ -284,13 +488,32 @@ export class TenantManager extends EventEmitter {
     }
   }
 
-  /** Persists all user bot states to disk (call after significant changes). */
+  /**
+   * Persists all user bot states to disk (call after significant changes).
+   * CR-15: write failures become an explicit operational fault — live
+   * entries stay blocked until persistence is healthy again. The in-memory
+   * state is NOT rolled back (trading continues under paper); the fault is
+   * logged and exposed.
+   */
   private persistUserStates(): void {
     const states: Record<string, UserBotState> = {};
     for (const [userId, state] of this.users.entries()) {
       states[userId] = state;
     }
-    saveState("user_states", states);
+    try {
+      saveState("user_states", states);
+      if (this.persistenceFault !== null) {
+        this.persistenceFault = null;
+        this.log("info", "persistence", "User-state writes healthy again");
+      }
+    } catch (err) {
+      this.persistenceFault = `user_states save failed: ${(err as Error).message}`;
+      this.log(
+        "error",
+        "persistence",
+        `CRITICAL: state save FAILED — live entries blocked until resolved: ${(err as Error).message}`,
+      );
+    }
   }
 
   public async manualExit(
@@ -301,41 +524,87 @@ export class TenantManager extends EventEmitter {
     const user = this.getOrCreateUser(userId);
     const position = user.positions[symbol];
     if (position) {
-      const exitPrice = position.currentPrice || position.entryPrice;
-      await this.orderGateway.exitOrder({
-        userId,
-        executionMode: user.executionMode,
-        token: user.upstoxToken,
-        position,
-        exitPrice,
-        reason,
-      });
+      // CR-01: duplicate-exit guard — never fire two concurrent exits for
+      // the same position (tick overlap or repeated commands).
+      if (position.pendingExit) {
+        this.log(
+          "warn",
+          "exit",
+          `[${symbol}] Exit already in flight — skipping duplicate request`,
+        );
+        return user;
+      }
+      position.pendingExit = true;
+      try {
+        const exitPrice = position.currentPrice || position.entryPrice;
+        const result = await this.orderGateway.exitOrder({
+          userId,
+          executionMode: user.executionMode,
+          token: user.upstoxToken,
+          position,
+          exitPrice,
+          reason,
+        });
 
-      // Send Telegram exit alert
-      this.sendExitAlert(user, position, symbol, exitPrice, reason);
-      const exitPnl = position.unrealizedPnl ?? 0;
-      this.log(
-        exitPnl >= 0 ? "info" : "warn",
-        "exit",
-        `[${symbol}] Exited ${position.direction} @ ${exitPrice.toFixed(2)} — ${reason} (PnL ₹${(exitPnl >= 0 ? "+" : "") + exitPnl.toFixed(2)})`,
-      );
+        // CR-01: only a CONFIRMED fill closes the position. Rejected,
+        // unknown, or still-pending outcomes RETAIN the position so it stays
+        // under supervision; the error is surfaced for the operator.
+        if (!result.success || result.status !== "filled") {
+          const outcome =
+            result.status === "pending"
+              ? `submitted but UNCONFIRMED (broker order ${result.brokerOrderId ?? "?"})`
+              : result.status === "unknown"
+                ? "outcome UNKNOWN (reconcile against the broker order book)"
+                : result.status === "rejected"
+                  ? "REJECTED by the broker"
+                  : "failed";
+          user.error = `Exit ${outcome}: ${result.error ?? "unknown error"}`;
+          this.log(
+            "error",
+            "exit",
+            `[${symbol}] Exit NOT completed — position retained. ${outcome}: ${result.error ?? "unknown error"}`,
+          );
+          this.emitUserUpdate(user);
+          return user;
+        }
 
-      user.positions[symbol] = null;
-      user.lastExitTimes[symbol] = Date.now();
-      const hasOtherPositions = Object.values(user.positions).some(
-        (p) => p !== null,
-      );
-      user.state = hasOtherPositions
-        ? "ORDERED"
-        : user.state === "ORDERED"
-          ? "RUNNING"
-          : user.state;
-      user.paperBalance =
-        this.orderGateway.getOrCreatePaperAccount(userId).balance;
-      user.updatedAt = new Date().toISOString();
-      this.emitUserUpdate(user);
-      this.syncStreamSubscriptions();
-      this.persistUserStates();
+        // Broker-confirmed fill — safe to close the position everywhere.
+        const confirmedExitPrice = result.filledPrice || exitPrice;
+        this.sendExitAlert(user, position, symbol, confirmedExitPrice, reason);
+        const exitPnl =
+          (position.tradeType === "selling"
+            ? position.entryPrice - confirmedExitPrice
+            : confirmedExitPrice - position.entryPrice) *
+          (result.quantity || position.quantity);
+        this.log(
+          exitPnl >= 0 ? "info" : "warn",
+          "exit",
+          `[${symbol}] Exited ${position.direction} @ ${confirmedExitPrice.toFixed(2)} — ${reason} (PnL ₹${(exitPnl >= 0 ? "+" : "") + exitPnl.toFixed(2)})`,
+          userId,
+        );
+
+        user.positions[symbol] = null;
+        user.lastExitTimes[symbol] = Date.now();
+        const hasOtherPositions = Object.values(user.positions).some(
+          (p) => p !== null,
+        );
+        user.state = hasOtherPositions
+          ? "ORDERED"
+          : user.state === "ORDERED"
+            ? "RUNNING"
+            : user.state;
+        user.paperBalance =
+          this.orderGateway.getOrCreatePaperAccount(userId).balance;
+        user.updatedAt = new Date().toISOString();
+        user.error = undefined;
+        this.emitUserUpdate(user);
+        this.syncStreamSubscriptions();
+        this.persistUserStates();
+      } finally {
+        if (user.positions[symbol]) {
+          user.positions[symbol]!.pendingExit = false;
+        }
+      }
     }
     return user;
   }
@@ -369,9 +638,21 @@ export class TenantManager extends EventEmitter {
       trailPct: user.config.trailPct,
     });
     sendTelegramMessage(this.telegramConfig, message)
-      .then(() => this.log("info", "telegram", `[${symbol}] Entry alert sent`))
+      .then(() =>
+        this.log(
+          "info",
+          "telegram",
+          `[${symbol}] Entry alert sent`,
+          user.userId,
+        ),
+      )
       .catch(() =>
-        this.log("warn", "telegram", `[${symbol}] Entry alert failed`),
+        this.log(
+          "warn",
+          "telegram",
+          `[${symbol}] Entry alert failed`,
+          user.userId,
+        ),
       );
   }
 
@@ -400,9 +681,21 @@ export class TenantManager extends EventEmitter {
       expiry: position.expiry,
     });
     sendTelegramMessage(this.telegramConfig, message)
-      .then(() => this.log("info", "telegram", `[${symbol}] Exit alert sent`))
+      .then(() =>
+        this.log(
+          "info",
+          "telegram",
+          `[${symbol}] Exit alert sent`,
+          user.userId,
+        ),
+      )
       .catch(() =>
-        this.log("warn", "telegram", `[${symbol}] Exit alert failed`),
+        this.log(
+          "warn",
+          "telegram",
+          `[${symbol}] Exit alert failed`,
+          user.userId,
+        ),
       );
   }
 
@@ -464,6 +757,7 @@ export class TenantManager extends EventEmitter {
       "info",
       "summary",
       `[${user.userId}] Daily summary sent — ${closedTrades.length} closed trade(s) today`,
+      user.userId,
     );
     const wins = closedTrades.filter((t) => (t.realizedPnl ?? 0) > 0);
     const losses = closedTrades.filter((t) => (t.realizedPnl ?? 0) <= 0);
@@ -529,7 +823,15 @@ export class TenantManager extends EventEmitter {
     }
 
     for (const [userId, user] of this.users.entries()) {
-      if (user.state === "IDLE" || user.state === "STOPPED") continue;
+      if (user.state === "IDLE") continue;
+
+      // CR-03: a STOPPED bot blocks new entries but KEEPS supervising any
+      // open positions (protective exits, EOD square-off). Only users with
+      // no positions are skipped entirely.
+      const userHasPosition = Object.values(user.positions).some(
+        (p) => p !== null,
+      );
+      if (user.state === "STOPPED" && !userHasPosition) continue;
 
       // Daily rollover check
       if (user.lastTradeDate !== istInfo.dateString) {
@@ -556,6 +858,7 @@ export class TenantManager extends EventEmitter {
               "warn",
               "eod",
               `[${symbol}] Market closed — squaring off position held outside market hours`,
+              userId,
             );
             await this.manualExit(
               userId,
@@ -623,6 +926,7 @@ export class TenantManager extends EventEmitter {
               "info",
               "eod",
               `[${symbol}] 15:15 cutoff reached — squaring off open position`,
+              userId,
             );
             await this.manualExit(
               userId,
@@ -663,7 +967,29 @@ export class TenantManager extends EventEmitter {
         }
 
         // ── 2. Evaluate New Entry (If no position and before cutoff) ──────────
-        if (!position && user.state === "RUNNING" && !afterCutoff) {
+        // CR-03: STOPPED bots never enter. CR-14: ORDERED bots CAN enter on
+        // their remaining symbols (ALL_PARALLEL semantics — one position per
+        // symbol; the position check above is the per-symbol duplicate guard).
+        const entriesEnabled =
+          user.state === "RUNNING" || user.state === "ORDERED";
+        if (!position && entriesEnabled && !afterCutoff) {
+          // CR-14: optional GLOBAL cap across all symbols for the day
+          if (
+            user.config.maxTotalTradesPerDay !== undefined &&
+            (user.tradesCountToday || 0) >= user.config.maxTotalTradesPerDay
+          ) {
+            continue;
+          }
+          // CR-11: block entries when required market data is stale
+          const blockers = snapshot.sources?.entryBlockedReasons;
+          if (blockers && blockers.length > 0) {
+            this.log(
+              "warn",
+              "data-stale",
+              `[${symbol}] Entry blocked — ${blockers.join("; ")}`,
+            );
+            continue;
+          }
           const tradesCount = user.tradesCountPerSymbol[symbol] || 0;
           if (tradesCount >= user.config.maxTradesPerDay) continue;
 
@@ -729,6 +1055,7 @@ export class TenantManager extends EventEmitter {
                   "info",
                   "entry",
                   `[${symbol}] Entered ${direction} ${selectedContract.strike} @ ₹${orderRes.filledPrice.toFixed(2)} qty=${orderRes.quantity} (expiry ${optionChain[0]?.expiry ?? "?"})`,
+                  userId,
                 );
                 const newPos: ActivePosition = {
                   instrumentKey: selectedContract.instrumentKey,
@@ -772,6 +1099,7 @@ export class TenantManager extends EventEmitter {
                   "error",
                   "entry",
                   `[${symbol}] Order failed: ${orderRes.error}`,
+                  userId,
                 );
                 this.emitUserUpdate(user);
               }
@@ -787,13 +1115,19 @@ export class TenantManager extends EventEmitter {
     }
   }
 
-  /** Appends a line to the bot activity log (no-op in tests without the service). */
+  /**
+   * Appends a line to the bot activity log. CR-18: pass userId for
+   * user-scoped events (entries, exits, config) so the WS broadcast can
+   * deliver them ONLY to that user's sockets; omit it for system-wide
+   * events (stream, recovery, persistence) that every client may see.
+   */
   private log(
     level: "info" | "warn" | "error" | "debug",
     source: string,
     msg: string,
+    userId?: string,
   ): void {
-    this.botLogs?.add(level, source, msg);
+    this.botLogs?.add(level, source, msg, userId);
   }
 
   /** Logs a line only when the evaluated entry signal for a symbol changes. */

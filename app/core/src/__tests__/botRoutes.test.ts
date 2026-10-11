@@ -207,7 +207,14 @@ describe("WS INITIAL_STATE must not leak the Upstox token", () => {
 
     await guarded.app.listen({ port: 0, host: "127.0.0.1" });
     const address = guarded.app.server.address() as { port: number };
-    const url = `ws://127.0.0.1:${address.port}/ws?userId=leak_user&apiKey=ws-leak-test-key`;
+    // CR-05: WS auth via a single-use ticket (keys never appear in URLs)
+    const ticketRes = await guarded.app.inject({
+      method: "POST",
+      url: "/api/bot/ws-ticket",
+      headers: { "x-api-key": "ws-leak-test-key" },
+    });
+    const { ticket } = JSON.parse(ticketRes.body) as { ticket: string };
+    const url = `ws://127.0.0.1:${address.port}/ws?userId=leak_user&ticket=${ticket}`;
 
     await new Promise<void>((resolve, reject) => {
       const WebSocket = require("ws") as typeof import("ws");

@@ -54,12 +54,29 @@ export interface OrderExitRequest {
   reason: string;
 }
 
+/**
+ * Order lifecycle result. `success` alone must NEVER be read as "filled":
+ * for live orders, SUBMISSION success means the broker accepted the order
+ * (status "pending" with a brokerOrderId); only status "filled" means the
+ * broker confirmed execution, and then filledPrice/quantity come from the
+ * broker's own confirmation, not from the request. Paper orders are an
+ * instant-fill simulation by design and always resolve to "filled".
+ */
 export interface OrderResult {
   success: boolean;
   tradeId: string;
   filledPrice: number;
   quantity: number;
   error?: string;
+  /** Lifecycle: filled (confirmed) | pending (submitted, unconfirmed) |
+   *  rejected | unknown (submission outcome could not be determined). */
+  status?: "filled" | "pending" | "rejected" | "unknown";
+  /** Broker order id as soon as it is available (live orders). */
+  brokerOrderId?: string;
+  /** Broker-confirmed filled quantity (differs from requested on partial fills). */
+  filledQuantity?: number;
+  /** True when the exit/entry was reconciled rather than directly confirmed. */
+  reconciled?: boolean;
 }
 
 /** Broker-style statement entry (cash-account ledger, Worker parity). */
@@ -170,10 +187,12 @@ export class OrderGateway {
         id: `paper_acc_${userId}`,
         userId,
         balance: DEFAULT_INITIAL_PAPER_BALANCE,
+        startingBalance: DEFAULT_INITIAL_PAPER_BALANCE,
         currency: "INR",
         updatedAt: new Date().toISOString(),
       };
       this.paperAccounts.set(userId, account);
+      this.persistAccounts();
     }
     return account;
   }
@@ -183,18 +202,33 @@ export class OrderGateway {
       id: `paper_acc_${userId}`,
       userId,
       balance: DEFAULT_INITIAL_PAPER_BALANCE,
+      startingBalance: DEFAULT_INITIAL_PAPER_BALANCE,
       currency: "INR",
       updatedAt: new Date().toISOString(),
     };
     this.paperAccounts.set(userId, account);
 
-    // Clear user's open paper trades
+    // Cancel open paper trades and persist each cancellation so a restart
+    // cannot resurrect them (the trade log is append-only).
     for (const [_id, trade] of this.paperTrades.entries()) {
       if (trade.accountId === account.id && trade.status === "OPEN") {
         trade.status = "CANCELLED";
         trade.closedAt = new Date().toISOString();
+        this.persistTrade(trade);
       }
     }
+
+    // Audit trail: a ledger row proving the reset happened and why
+    this.recordStatement(
+      account,
+      "paper_enter",
+      account.balance,
+      0,
+      "Paper account RESET — balance restored to initial capital",
+    );
+
+    // Persist account state so a restart cannot revert the reset
+    this.persistAccounts();
     return account;
   }
 
@@ -318,6 +352,7 @@ export class OrderGateway {
 
     return {
       success: true,
+      status: "filled",
       tradeId,
       filledPrice,
       quantity: req.quantity,
@@ -343,8 +378,7 @@ export class OrderGateway {
     const entryChargesPaise = Math.round(
       (
         storedRecord?.metadata?.entryCharges as
-          | { totalCharges?: number }
-          | undefined
+          { totalCharges?: number } | undefined
       )?.totalCharges ?? 0,
     );
     const marginBlockedPaise = Math.round(
@@ -399,6 +433,7 @@ export class OrderGateway {
 
     return {
       success: true,
+      status: "filled",
       tradeId: position.paperTradeId || `exit_${Date.now()}`,
       filledPrice: filledExitPrice,
       quantity: position.quantity,
@@ -411,6 +446,7 @@ export class OrderGateway {
     if (!req.token) {
       return {
         success: false,
+        status: "rejected",
         tradeId: "",
         filledPrice: 0,
         quantity: 0,
@@ -432,8 +468,12 @@ export class OrderGateway {
       tag: `algo-v5-${req.userId.slice(0, 8)}`,
     };
 
+    // ── Stage 1: SUBMIT ──────────────────────────────────────────────────
+    // An accepted submission is NOT a fill. Capture the broker order id
+    // immediately; the caller gets status "pending" unless the broker has
+    // already confirmed execution in the response.
+    let brokerOrderId: string | null = null;
     try {
-      // Outbound request executes from the VM's static IP address
       const response = await fetch(`${this.upstoxApiBaseUrl}/order/place`, {
         method: "POST",
         headers: {
@@ -444,12 +484,25 @@ export class OrderGateway {
         body: JSON.stringify(payload),
       });
 
-      const data = (await response.json()) as any;
+      let data: Record<string, unknown> | null = null;
+      try {
+        data = (await response.json()) as Record<string, unknown>;
+      } catch {
+        data = null;
+      }
+
       if (!response.ok || data?.status === "error") {
+        const dataRecord = data as {
+          message?: string;
+          errors?: { message?: string }[];
+        } | null;
         const errorMsg =
-          data?.message || data?.errors?.[0]?.message || "Upstox order failed";
+          dataRecord?.message ||
+          dataRecord?.errors?.[0]?.message ||
+          `Upstox order rejected (HTTP ${response.status})`;
         return {
           success: false,
+          status: "rejected",
           tradeId: "",
           filledPrice: 0,
           quantity: 0,
@@ -457,21 +510,151 @@ export class OrderGateway {
         };
       }
 
-      return {
-        success: true,
-        tradeId: data?.data?.order_id || `upstox_${Date.now()}`,
-        filledPrice: req.price,
-        quantity: req.quantity,
-      };
-    } catch (err: any) {
+      const orderId =
+        (data as { data?: { order_id?: string } } | null)?.data?.order_id ??
+        null;
+      if (!orderId) {
+        // Accepted HTTP response with no order id: outcome UNKNOWN — do
+        // NOT invent success or failure. The caller must reconcile.
+        return {
+          success: false,
+          status: "unknown",
+          tradeId: "",
+          filledPrice: 0,
+          quantity: 0,
+          error:
+            "Upstox acknowledged the request without an order id — order outcome unknown; reconcile against the broker order book before assuming anything",
+        };
+      }
+      brokerOrderId = orderId;
+    } catch (err) {
+      // Network failure mid-submit: the order MAY have reached the broker.
       return {
         success: false,
+        status: "unknown",
         tradeId: "",
         filledPrice: 0,
         quantity: 0,
-        error: err.message || "Network error reaching Upstox",
+        error: `Order submission outcome unknown (network error: ${(err as Error).message}); reconcile against the broker order book before retrying`,
       };
     }
+
+    // ── Stage 2: CONFIRM via the broker order book (bounded polling) ─────
+    // Only broker-confirmed state may produce a filled position; filled
+    // quantity and average price come from the broker, not the request.
+    const confirmation = await this.confirmLiveOrder(req.token, brokerOrderId);
+    if (confirmation.status === "filled") {
+      return {
+        success: true,
+        status: "filled",
+        tradeId: brokerOrderId,
+        brokerOrderId,
+        filledPrice: confirmation.averagePrice,
+        quantity: confirmation.filledQuantity,
+        filledQuantity: confirmation.filledQuantity,
+      };
+    }
+    if (confirmation.status === "rejected") {
+      return {
+        success: false,
+        status: "rejected",
+        tradeId: brokerOrderId,
+        brokerOrderId,
+        filledPrice: 0,
+        quantity: 0,
+        error: confirmation.message ?? "Broker rejected the order",
+      };
+    }
+    // Still pending (or poll failed): report pending with the order id so
+    // the caller can hold an explicit pending state and reconcile later.
+    return {
+      success: true,
+      status: "pending",
+      tradeId: brokerOrderId,
+      brokerOrderId,
+      filledPrice: 0,
+      quantity: 0,
+      error:
+        confirmation.message ?? "Order submitted; awaiting broker confirmation",
+    };
+  }
+
+  /**
+   * Polls the Upstox order details endpoint (bounded attempts) until the
+   * order reaches a terminal state or the poll budget is exhausted.
+   * Never fabricates a fill: "pending" is returned when unconfirmed.
+   */
+  private async confirmLiveOrder(
+    token: string,
+    orderId: string,
+    opts?: { attempts?: number; intervalMs?: number },
+  ): Promise<
+    | { status: "filled"; filledQuantity: number; averagePrice: number }
+    | { status: "rejected"; message?: string }
+    | { status: "pending"; message?: string }
+  > {
+    const attempts = opts?.attempts ?? 3;
+    const intervalMs = opts?.intervalMs ?? 500;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+      try {
+        const res = await fetch(
+          `${this.upstoxApiBaseUrl}/order/details?order_id=${encodeURIComponent(orderId)}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: "application/json",
+            },
+          },
+        );
+        if (!res.ok) {
+          // Transient failure — keep polling within the budget
+          continue;
+        }
+        const raw = (await res.json()) as {
+          data?: Array<{
+            status?: string;
+            filled_quantity?: number;
+            average_price?: number;
+            message?: string;
+            total_quantity?: number;
+          }>;
+        };
+        const order = raw.data?.[0];
+        if (!order)
+          return { status: "pending", message: "No order details yet" };
+        const status = (order.status ?? "").toLowerCase();
+        if (status === "complete" || status === "filled") {
+          const filledQuantity = Number(order.filled_quantity ?? 0);
+          const averagePrice = Number(order.average_price ?? 0);
+          if (filledQuantity > 0 && averagePrice > 0) {
+            return { status: "filled", filledQuantity, averagePrice };
+          }
+          // Complete without fill data — treat as pending, never invent prices
+          return {
+            status: "pending",
+            message:
+              "Order complete but fill data missing — reconcile required",
+          };
+        }
+        if (
+          status === "rejected" ||
+          status === "cancelled" ||
+          status === "rejected_by_ams"
+        ) {
+          return { status: "rejected", message: order.message ?? status };
+        }
+        // open/pending states — keep polling
+      } catch {
+        // network glitch — keep polling within the budget
+      }
+    }
+    return {
+      status: "pending",
+      message: `Order ${orderId} not confirmed within ${attempts} attempts — hold as pending and reconcile`,
+    };
   }
 
   private async exitLiveUpstoxOrder(
@@ -480,6 +663,7 @@ export class OrderGateway {
     if (!req.token) {
       return {
         success: false,
+        status: "rejected",
         tradeId: "",
         filledPrice: 0,
         quantity: 0,
@@ -505,6 +689,8 @@ export class OrderGateway {
       tag: `exit-${req.reason.slice(0, 10)}`,
     };
 
+    // ── Stage 1: SUBMIT — capture the broker order id, never assume fill ──
+    let brokerOrderId: string | null = null;
     try {
       const response = await fetch(`${this.upstoxApiBaseUrl}/order/place`, {
         method: "POST",
@@ -516,32 +702,129 @@ export class OrderGateway {
         body: JSON.stringify(payload),
       });
 
-      const data = (await response.json()) as any;
+      let data: Record<string, unknown> | null = null;
+      try {
+        data = (await response.json()) as Record<string, unknown>;
+      } catch {
+        data = null;
+      }
+
       if (!response.ok || data?.status === "error") {
-        const errorMsg = data?.message || "Failed to square off live position";
+        const dataRecord = data as {
+          message?: string;
+          errors?: { message?: string }[];
+        } | null;
         return {
           success: false,
+          status: "rejected",
           tradeId: "",
           filledPrice: 0,
           quantity: 0,
-          error: errorMsg,
+          error:
+            dataRecord?.message ||
+            dataRecord?.errors?.[0]?.message ||
+            `Live exit rejected (HTTP ${response.status})`,
         };
       }
 
-      return {
-        success: true,
-        tradeId: data?.data?.order_id || `exit_upstox_${Date.now()}`,
-        filledPrice: req.exitPrice,
-        quantity: position.quantity,
-      };
-    } catch (err: any) {
+      brokerOrderId =
+        (data as { data?: { order_id?: string } } | null)?.data?.order_id ??
+        null;
+      if (!brokerOrderId) {
+        return {
+          success: false,
+          status: "unknown",
+          tradeId: "",
+          filledPrice: 0,
+          quantity: 0,
+          error:
+            "Exit order acknowledged without an order id — outcome unknown; reconcile against the broker order book before retrying (the position may already be closed)",
+        };
+      }
+    } catch (err) {
       return {
         success: false,
+        status: "unknown",
         tradeId: "",
         filledPrice: 0,
         quantity: 0,
-        error: err.message,
+        error: `Exit submission outcome unknown (network error: ${(err as Error).message}); reconcile before retrying`,
       };
+    }
+
+    // ── Stage 2: CONFIRM — only broker-confirmed fills close a position ──
+    const confirmation = await this.confirmLiveOrder(req.token, brokerOrderId);
+    if (confirmation.status === "filled") {
+      return {
+        success: true,
+        status: "filled",
+        tradeId: brokerOrderId,
+        brokerOrderId,
+        filledPrice: confirmation.averagePrice,
+        quantity: confirmation.filledQuantity,
+        filledQuantity: confirmation.filledQuantity,
+      };
+    }
+    if (confirmation.status === "rejected") {
+      return {
+        success: false,
+        status: "rejected",
+        tradeId: brokerOrderId,
+        brokerOrderId,
+        filledPrice: 0,
+        quantity: 0,
+        error: confirmation.message ?? "Broker rejected the exit order",
+      };
+    }
+    return {
+      success: true,
+      status: "pending",
+      tradeId: brokerOrderId,
+      brokerOrderId,
+      filledPrice: 0,
+      quantity: 0,
+      error:
+        confirmation.message ?? "Exit submitted; awaiting broker confirmation",
+    };
+  }
+
+  /**
+   * Fetches the broker's CURRENT open positions (Upstox order & positions
+   * API) for startup reconciliation (CR-04). Returns null when the broker
+   * API is unreachable so callers can fail safe rather than guess.
+   */
+  public async getLivePositions(token: string): Promise<Array<{
+    instrumentKey: string;
+    quantity: number;
+    averagePrice: number;
+    product: string;
+  }> | null> {
+    try {
+      const res = await fetch(`${this.upstoxApiBaseUrl}/order&positions`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
+      });
+      if (!res.ok) return null;
+      const raw = (await res.json()) as {
+        data?: Array<{
+          instrument_token?: string;
+          quantity?: number;
+          average_price?: number;
+          product?: string;
+        }>;
+      };
+      return (raw.data ?? [])
+        .filter((row) => Number(row.quantity ?? 0) !== 0)
+        .map((row) => ({
+          instrumentKey: row.instrument_token ?? "",
+          quantity: Number(row.quantity ?? 0),
+          averagePrice: Number(row.average_price ?? 0),
+          product: row.product ?? "",
+        }));
+    } catch {
+      return null;
     }
   }
 }

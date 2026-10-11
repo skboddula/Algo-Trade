@@ -85,6 +85,9 @@ export class UpstoxMarketStream extends EventEmitter {
   private latest = new Map<string, StreamTick>();
   private latestVixTick: { ltp: number; receivedAt: number } | null = null;
   private status: StreamStatus = "idle";
+  private lastTickAtMs: number | null = null;
+  private lastError: string | null = null;
+  private reconnectCount = 0;
   private readonly opts: Required<
     Pick<MarketStreamOptions, "mode" | "reconnectBaseMs" | "reconnectMaxMs">
   >;
@@ -105,6 +108,33 @@ export class UpstoxMarketStream extends EventEmitter {
     return this.status;
   }
 
+  /** Actual stream telemetry — observed values only, nothing synthesized. */
+  public getTelemetry(): {
+    status: StreamStatus;
+    subscribedKeys: number;
+    lastTickAtMs: number | null;
+    tickAgeMs: number | null;
+    reconnectCount: number;
+    lastError: string | null;
+  } {
+    return {
+      status: this.status,
+      subscribedKeys: this.desiredKeys.size,
+      lastTickAtMs: this.lastTickAtMs,
+      tickAgeMs:
+        this.lastTickAtMs === null ? null : Date.now() - this.lastTickAtMs,
+      reconnectCount: this.reconnectCount,
+      lastError: this.lastError,
+    };
+  }
+
+  /** Returns the raw last-received VIX tick (fresh or stale) for health
+   *  reporting; the FRESH value for trading decisions stays in
+   *  getStreamedVix(). Never manufactured from anything but real ticks. */
+  public getLastVixTick(): { ltp: number; receivedAt: number } | null {
+    return this.latestVixTick;
+  }
+
   public getLatestPrice(instrumentKey: string): number | null {
     return this.latest.get(instrumentKey)?.ltp ?? null;
   }
@@ -120,6 +150,53 @@ export class UpstoxMarketStream extends EventEmitter {
   public start(): void {
     if (!this.stopped) return;
     this.stopped = false;
+    this.attempt = 0;
+    void this.connect();
+  }
+
+  /**
+   * A valid token became available after startup (daily OAuth handoff).
+   * Initiates a controlled connection without spinning a retry loop.
+   */
+  public notifyTokenAvailable(): void {
+    if (this.stopped) return;
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+    this.attempt = 0;
+    void this.connect();
+  }
+
+  /**
+   * Controlled replacement of the authenticated connection after a token
+   * CHANGE (old token expired/revoked): tear down the existing socket and
+   * reconnect with the fresh one. Subscriptions (desiredKeys) are resent
+   * automatically by the open handler.
+   */
+  public reconnect(): void {
+    if (this.stopped) return;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      this.removeAllWsListeners();
+      this.ws.on("error", () => {});
+      if (this.ws.readyState === WebSocket.OPEN) {
+        this.ws.close(1000, "token replaced");
+      } else if (this.ws.readyState === WebSocket.CONNECTING) {
+        try {
+          this.ws.terminate();
+        } catch {
+          // socket already gone
+        }
+      }
+      this.ws = null;
+    }
     this.attempt = 0;
     void this.connect();
   }
@@ -196,15 +273,20 @@ export class UpstoxMarketStream extends EventEmitter {
 
   private computeReconnectDelay(): number {
     const exp = Math.min(Math.max(this.attempt, 1), 20);
-    return Math.min(
+    const base = Math.min(
       this.opts.reconnectBaseMs * Math.pow(2, exp - 1),
       this.opts.reconnectMaxMs,
     );
+    // ±25% jitter to avoid synchronized retry storms
+    const jitter = base * (0.75 + Math.random() * 0.5);
+    return Math.round(Math.min(jitter, this.opts.reconnectMaxMs));
   }
 
   private scheduleReconnect(reason: string): void {
     if (this.stopped) return;
     this.attempt += 1;
+    this.reconnectCount += 1;
+    this.lastError = reason;
     const delay = this.computeReconnectDelay();
     this.setStatus(
       "reconnecting",
@@ -218,8 +300,20 @@ export class UpstoxMarketStream extends EventEmitter {
 
   private async connect(): Promise<void> {
     if (this.stopped) return;
+    // Single-socket guard: concurrent reconnect requests must never create
+    // duplicate active connections.
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
     const token = this.getToken();
     if (!token) {
+      // No token yet: do NOT spin a retry loop. The connection will be
+      // initiated by notifyTokenAvailable()/reconnect() once a token
+      // arrives (startup-before-OAuth case).
       this.setStatus("closed", "no Upstox token available");
       return;
     }
@@ -244,6 +338,7 @@ export class UpstoxMarketStream extends EventEmitter {
 
     this.ws.on("open", () => {
       this.attempt = 0;
+      this.lastError = null;
       this.setStatus("open");
       if (this.desiredKeys.size > 0) {
         this.sendRequest("sub", Array.from(this.desiredKeys), true);
@@ -254,6 +349,7 @@ export class UpstoxMarketStream extends EventEmitter {
       try {
         const decoded = this.decodeFeed(new Uint8Array(data));
         for (const tick of decoded) {
+          this.lastTickAtMs = tick.receivedAt;
           this.latest.set(tick.instrumentKey, tick);
           if (tick.instrumentKey === INDIA_VIX_KEY) {
             this.latestVixTick = { ltp: tick.ltp, receivedAt: tick.receivedAt };
