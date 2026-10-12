@@ -323,6 +323,64 @@ describe("CR-06: persistence faults block live entries mid-session", () => {
   });
 });
 
+// ─── Single-active-trader invariant ─────────────────────────────────────────
+
+describe("single-active-trader invariant", () => {
+  const prevDataDirSingle = process.env.DATA_DIR;
+  afterEach(() => {
+    if (prevDataDirSingle === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prevDataDirSingle;
+  });
+
+  it("startBot refuses a second user while one is RUNNING (shared token)", () => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "single-active-"));
+    const { manager } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "",
+      filledPrice: 0,
+      quantity: 0,
+    });
+    manager.startBot("user_a", "paper");
+    expect(() => manager.startBot("user_b", "paper")).toThrowError(
+      /single active trader/i,
+    );
+    // Same user restarting themselves is fine
+    expect(() => manager.startBot("user_a", "paper")).not.toThrowError();
+  });
+
+  it("startBot refuses a second user while one holds an ORDERED position", () => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "single-active-2-"));
+    const { manager } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "",
+      filledPrice: 0,
+      quantity: 0,
+    });
+    manager.startBot("user_a", "paper");
+    const ua = manager.getOrCreateUser("user_a");
+    ua.state = "ORDERED"; // position open
+    expect(() => manager.startBot("user_b", "paper")).toThrowError(
+      /already active/i,
+    );
+  });
+
+  it("starting a STOPPED user is allowed once the active one stopped", () => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "single-active-3-"));
+    const { manager } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "",
+      filledPrice: 0,
+      quantity: 0,
+    });
+    manager.startBot("user_a", "paper");
+    manager.stopBot("user_a");
+    expect(() => manager.startBot("user_b", "paper")).not.toThrowError();
+  });
+})
+
 // ─── CR-04: stop preserves supervision; restart restores positions+subs ────
 
 describe("CR-04: stop and restart behavior", () => {

@@ -12,8 +12,18 @@
  *        USER_STATE_UPDATE, BOT_LOG message types — see app/core/API.md)
  */
 
-const DAEMON_USER_ID =
-  (import.meta.env.VITE_DAEMON_USER_ID as string | undefined) ?? 'default_user'
+/** The daemon user this dashboard controls. Deployment config — required,
+ *  NOT a silent default: the old 'default_user' fallback once pointed at an
+ *  archived user, making a UI "start" click able to resume a second bot. */
+function daemonUserId(): string {
+  const id = import.meta.env.VITE_DAEMON_USER_ID
+  if (typeof id !== 'string' || id.length === 0) {
+    throw new Error(
+      'VITE_DAEMON_USER_ID is not set — the daemon user must be explicit',
+    )
+  }
+  return id
+}
 
 export function daemonBaseUrl(): string {
   const env = import.meta.env as Record<string, string | undefined>
@@ -33,7 +43,7 @@ export function daemonApiKey(): string | undefined {
   return typeof key === 'string' && key.length > 0 ? key : undefined
 }
 
-export function daemonWsUrl(userId = DAEMON_USER_ID, ticket?: string): string {
+export function daemonWsUrl(userId = daemonUserId(), ticket?: string): string {
   const http = daemonBaseUrl()
   const wsBase = http.replace(/^http/, 'ws')
   const auth = ticket ? `&ticket=${encodeURIComponent(ticket)}` : ''
@@ -102,7 +112,7 @@ export async function checkDaemonHealth(timeoutMs = 1500): Promise<boolean> {
 }
 
 /** GET /api/bot/status — snapshots + user state + paper trades */
-export function fetchDaemonStatus(userId = DAEMON_USER_ID) {
+export function fetchDaemonStatus(userId = daemonUserId()) {
   return daemonFetch<{
     serverTime: string
     snapshots: Record<
@@ -132,7 +142,7 @@ export function fetchDaemonStatus(userId = DAEMON_USER_ID) {
 
 export function daemonStart(
   executionMode: 'paper' | 'live' = 'paper',
-  userId = DAEMON_USER_ID,
+  userId = daemonUserId(),
 ) {
   return daemonFetch<{ success: boolean }>(`/api/bot/start`, {
     method: 'POST',
@@ -140,7 +150,7 @@ export function daemonStart(
   })
 }
 
-export function daemonStop(userId = DAEMON_USER_ID) {
+export function daemonStop(userId = daemonUserId()) {
   return daemonFetch<{ success: boolean }>(`/api/bot/stop`, {
     method: 'POST',
     body: JSON.stringify({ userId }),
@@ -149,7 +159,7 @@ export function daemonStop(userId = DAEMON_USER_ID) {
 
 export function daemonUpdateConfig(
   config: Record<string, unknown>,
-  userId = DAEMON_USER_ID,
+  userId = daemonUserId(),
 ) {
   return daemonFetch<{ success: boolean }>(`/api/bot/config`, {
     method: 'POST',
@@ -160,7 +170,7 @@ export function daemonUpdateConfig(
 export function daemonExitTrade(
   symbol: string,
   reason = 'Manual Web Exit',
-  userId = DAEMON_USER_ID,
+  userId = daemonUserId(),
 ) {
   return daemonFetch<{ success: boolean }>(`/api/bot/trade/exit`, {
     method: 'POST',
@@ -180,7 +190,7 @@ export interface DaemonStatementEntry {
   createdAt: string
 }
 
-export function fetchDaemonStatements(userId = DAEMON_USER_ID, limit = 50) {
+export function fetchDaemonStatements(userId = daemonUserId(), limit = 50) {
   return daemonFetch<{ statements: DaemonStatementEntry[] }>(
     `/api/bot/statements?userId=${encodeURIComponent(userId)}&limit=${limit}`,
   )
@@ -198,7 +208,7 @@ export function fetchDaemonStreamHealth() {
   }>(`/api/bot/stream-health`)
 }
 
-export function fetchDaemonEquityCurve(userId = DAEMON_USER_ID) {
+export function fetchDaemonEquityCurve(userId = daemonUserId()) {
   return daemonFetch<{
     points: { time: string; balance: number; pnl: number }[]
     stats: {
@@ -222,7 +232,7 @@ export function daemonBacktest(body: Record<string, unknown>) {
 }
 
 /** Hands a fresh OAuth access token to the daemon (daily morning ritual). */
-export function pushTokenToDaemon(token: string, userId = DAEMON_USER_ID) {
+export function pushTokenToDaemon(token: string, userId = daemonUserId()) {
   return daemonFetch<{ success: boolean }>(`/api/bot/token`, {
     method: 'POST',
     body: JSON.stringify({ userId, token }),
