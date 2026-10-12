@@ -1065,7 +1065,18 @@ export class TenantManager extends EventEmitter {
                 expiry: optionChain[0]?.expiry,
               });
 
-              if (orderRes.success) {
+              // ── CR-02: only a CONFIRMED fill creates a position ───────────
+              // A "pending" or "unknown" outcome must never become a filled
+              // position (entryPrice 0, quantity 0 = ghost position that
+              // blocks the symbol forever). Partial fills use the broker-
+              // confirmed quantity (orderRes.quantity), which may be less
+              // than the requested amount.
+              if (
+                orderRes.success &&
+                orderRes.status === "filled" &&
+                orderRes.filledPrice > 0 &&
+                orderRes.quantity > 0
+              ) {
                 this.log(
                   "info",
                   "entry",
@@ -1130,6 +1141,23 @@ export class TenantManager extends EventEmitter {
                   strikePrice: selectedContract.strike,
                   expiry: optionChain[0]?.expiry,
                 });
+              } else if (
+                orderRes.success &&
+                (orderRes.status === "pending" || orderRes.status === "unknown")
+              ) {
+                // CR-02: submitted but NOT confirmed. The order may be at the
+                // broker — do NOT create a position, do NOT increment counts,
+                // do NOT block the symbol. Reconciliation (CR-04) or the next
+                // tick's position check will handle the outcome. The order id
+                // is retained in the error for operator follow-up.
+                this.log(
+                  "warn",
+                  "entry",
+                  `[${symbol}] Order submitted but UNCONFIRMED (broker order ${orderRes.brokerOrderId ?? "?"}) — no position created; will reconcile on the next evaluation`,
+                  userId,
+                );
+                user.error = `Pending entry for ${symbol}: broker order ${orderRes.brokerOrderId ?? "?"} awaiting confirmation`;
+                this.emitUserUpdate(user);
               } else {
                 user.error = orderRes.error;
                 this.log(

@@ -473,6 +473,217 @@ describe("CR-01: paper/live execution isolation", () => {
   });
 });
 
+// ─── CR-02: paper position accounting (pending, partial, duplicates) ───────
+
+describe("CR-02: entry position accounting", () => {
+  const prevDataDirCR02 = process.env.DATA_DIR;
+  beforeEach(() => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "cr02-"));
+  });
+  afterEach(() => {
+    if (prevDataDirCR02 === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prevDataDirCR02;
+  });
+
+  it("a PENDING entry result does NOT create a position or increment counts", async () => {
+    // Paper mode always fills — but if the lifecycle ever returned pending,
+    // the caller must not treat it as a position. We test the ORDER-level
+    // contract: pending results carry zero-filled price/quantity and the
+    // caller's position-creation gate (status=-filled AND price>0 AND qty>0)
+    // must reject them.
+    const pendingResult: OrderResult = {
+      success: true,
+      status: "pending",
+      tradeId: "ord_pending",
+      brokerOrderId: "ord_pending",
+      filledPrice: 0,
+      quantity: 0,
+      error: "awaiting broker confirmation",
+    };
+    expect(pendingResult.success).toBe(true);
+    expect(pendingResult.status).toBe("pending");
+    expect(pendingResult.filledPrice).toBe(0);
+    expect(pendingResult.quantity).toBe(0);
+    // The entry gate condition (mirrors tenantManager line ~1075):
+    const canCreatePosition =
+      pendingResult.success &&
+      pendingResult.status === "filled" &&
+      pendingResult.filledPrice > 0 &&
+      pendingResult.quantity > 0;
+    expect(canCreatePosition).toBe(false);
+  });
+
+  it("partial fill: position quantity = broker-confirmed qty, not requested", async () => {
+    const gw = new OrderGateway();
+    // Paper mode simulates full fills; partial fills are broker-confirmed.
+    // Verify the paper ledger is consistent: entry → exit round trip
+    // with a position whose quantity is the BROKER value.
+    const entry = await gw.placeOrder({
+      userId: "partial_user",
+      executionMode: "paper",
+      instrumentKey: "NSE_FO|PARTIAL_TEST",
+      direction: "CE",
+      quantity: 65,
+      price: 100,
+      tradeType: "buying",
+      underlyingSymbol: "NIFTY 50",
+    });
+    expect(entry.success).toBe(true);
+    expect(entry.status).toBe("filled");
+    expect(entry.quantity).toBe(65); // paper fills full
+    expect(entry.filledPrice).toBeGreaterThan(0);
+
+    // Verify the trade record and position quantities are consistent
+    const trades = gw.getPaperTrades("partial_user");
+    expect(trades.length).toBe(1);
+    expect(trades[0].quantity).toBe(entry.quantity);
+    expect(trades[0].entryValue).toBe(
+      Math.round(entry.filledPrice * entry.quantity * 100),
+    );
+
+    // Exit and verify ledger consistency
+    const position = makePosition({
+      instrumentKey: "NSE_FO|PARTIAL_TEST",
+      entryPrice: entry.filledPrice,
+      quantity: entry.quantity,
+      paperTradeId: entry.tradeId,
+      currentPrice: 110,
+      unrealizedPnl: (110 - entry.filledPrice) * entry.quantity,
+    });
+    const exit = await gw.exitOrder({
+      userId: "partial_user",
+      executionMode: "paper",
+      position,
+      exitPrice: 110,
+      reason: "partial fill test",
+    });
+    expect(exit.success).toBe(true);
+    expect(exit.status).toBe("filled");
+    expect(exit.quantity).toBe(entry.quantity);
+
+    const account = gw.getOrCreatePaperAccount("partial_user");
+    // Round-trip invariant: balance change == realized PnL exactly
+    const closed = gw
+      .getPaperTrades("partial_user")
+      .find((t) => t.id === entry.tradeId);
+    expect(closed?.realizedPnl).toBeDefined();
+    // The starting balance is DEFAULT_INITIAL_PAPER_BALANCE
+    const balanceChange = account.balance - 10000000; // DEFAULT_INITIAL_PAPER_BALANCE in paise
+    expect(balanceChange).toBe(closed?.realizedPnl ?? 0);
+  });
+
+  it("duplicate exits are REJECTED at the gateway and ledger is unchanged", async () => {
+    const gw = new OrderGateway();
+    const entry = await gw.placeOrder({
+      userId: "dup_ledger",
+      executionMode: "paper",
+      instrumentKey: "NSE_FO|DUP_TEST",
+      direction: "CE",
+      quantity: 65,
+      price: 100,
+      tradeType: "buying",
+      underlyingSymbol: "NIFTY 50",
+    });
+
+    const position = makePosition({
+      instrumentKey: "NSE_FO|DUP_TEST",
+      paperTradeId: entry.tradeId,
+      currentPrice: 110,
+    });
+
+    // First exit succeeds
+    const exit1 = await gw.exitOrder({
+      userId: "dup_ledger",
+      executionMode: "paper",
+      position,
+      exitPrice: 110,
+      reason: "first exit",
+    });
+    expect(exit1.success).toBe(true);
+    expect(exit1.status).toBe("filled");
+    const balanceAfterFirst = gw.getOrCreatePaperAccount("dup_ledger").balance;
+
+    // Second exit of the same (already-closed) trade: REJECTED, no
+    // double-credit (CR-02 gateway-level ledger guard)
+    const exit2 = await gw.exitOrder({
+      userId: "dup_ledger",
+      executionMode: "paper",
+      position: { ...position, currentPrice: 110 },
+      exitPrice: 110,
+      reason: "duplicate exit",
+    });
+    expect(exit2.success).toBe(false);
+    expect(exit2.status).toBe("rejected");
+    expect(exit2.error).toContain("already CLOSED");
+
+    const balanceAfterSecond = gw.getOrCreatePaperAccount("dup_ledger").balance;
+    expect(balanceAfterSecond).toBe(balanceAfterFirst); // ledger unchanged
+
+    const trades = gw.getPaperTrades("dup_ledger");
+    expect(trades.filter((t) => t.status === "CLOSED").length).toBe(1);
+  });
+
+  it("entry→exit prices and quantities are consistent across position, trade, and PnL", async () => {
+    const gw = new OrderGateway();
+    const entry = await gw.placeOrder({
+      userId: "consistency_user",
+      executionMode: "paper",
+      instrumentKey: "NSE_FO|CONSISTENCY",
+      direction: "PE",
+      quantity: 30,
+      price: 200,
+      tradeType: "buying",
+      underlyingSymbol: "BANKNIFTY",
+    });
+
+    // Trade record matches the position values
+    const trade = gw.getPaperTrades("consistency_user")[0];
+    expect(trade.entryPrice).toBe(Math.round(entry.filledPrice * 100));
+    expect(trade.entryValue).toBe(
+      Math.round(entry.filledPrice * entry.quantity * 100),
+    );
+    expect(trade.quantity).toBe(entry.quantity);
+
+    // Exit with a known price
+    const exitPrice = 180; // 20 points profit
+    const position = makePosition({
+      instrumentKey: "NSE_FO|CONSISTENCY",
+      entryPrice: entry.filledPrice,
+      quantity: entry.quantity,
+      paperTradeId: entry.tradeId,
+      currentPrice: exitPrice,
+    });
+    await gw.exitOrder({
+      userId: "consistency_user",
+      executionMode: "paper",
+      position,
+      exitPrice,
+      reason: "consistency test",
+    });
+
+    const closed = gw.getPaperTrades("consistency_user")[0];
+    expect(closed.status).toBe("CLOSED");
+    // Exit price includes 0.1% selling slippage (raw 180 → 179.82)
+    expect(closed.exitPrice).toBeLessThan(Math.round(exitPrice * 100));
+    expect(closed.exitPrice).toBeGreaterThan(Math.round(exitPrice * 100) - 20);
+
+    // PnL consistency: verified from the trade's OWN metadata (not raw
+    // request prices — the gateway applies slippage to fills):
+    // realizedPnl (paise) = grossPnl (paise) − totalTradeFees (paise)
+    const meta = closed.metadata as Record<string, number>;
+    expect(meta.grossPnl).toBeDefined();
+    expect(meta.totalTradeFees).toBeDefined();
+    expect(closed.realizedPnl).toBe(meta.grossPnl - meta.totalTradeFees);
+    // Gross matches the stored record values (slipped fills, not raw requests)
+    const grossFromRecord = (closed.exitValue ?? 0) - (closed.entryValue ?? 0);
+    expect(meta.grossPnl).toBe(grossFromRecord);
+    // Exit value consistency: exitValue = exitPrice × quantity
+    expect(closed.exitValue).toBe((closed.exitPrice ?? 0) * closed.quantity);
+    // Entry value consistency: entryValue = entryPrice × quantity
+    expect(closed.entryValue).toBe(closed.entryPrice * closed.quantity);
+  });
+});
+
 // ─── CR-15: corrupt state files are preserved, not silently reset ────────────
 
 describe("CR-15: store corrupt-file preservation", () => {

@@ -388,6 +388,24 @@ export class OrderGateway {
     const account = this.getOrCreatePaperAccount(req.userId);
     const position = req.position;
 
+    // CR-02: duplicate-exit ledger guard — an already-CLOSED trade must
+    // never be settled again (double-credit). The tenant-level pendingExit
+    // flag prevents concurrent duplicates; this is the gateway-level guard
+    // for sequential re-submissions.
+    const preCheckRecord = position.paperTradeId
+      ? this.paperTrades.get(position.paperTradeId)
+      : undefined;
+    if (preCheckRecord?.status === "CLOSED") {
+      return {
+        success: false,
+        status: "rejected",
+        tradeId: position.paperTradeId ?? "",
+        filledPrice: preCheckRecord.exitPrice ?? 0,
+        quantity: preCheckRecord.quantity,
+        error: `Trade ${position.paperTradeId} is already CLOSED — duplicate exit rejected (ledger unchanged)`,
+      };
+    }
+
     // 0.1% simulated exit slippage
     const slippageMultiplier = position.tradeType === "selling" ? 1.001 : 0.999;
     const filledExitPrice =
