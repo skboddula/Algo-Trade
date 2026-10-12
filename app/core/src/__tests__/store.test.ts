@@ -1,21 +1,22 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { readFileSync, mkdirSync, rmSync, existsSync } from 'fs'
-// readFileSync is imported for potential future use in store tests
-void readFileSync
+import { mkdtempSync, rmSync, existsSync } from 'fs'
+import { tmpdir } from 'os'
 import { join } from 'path'
 import { loadState, saveState, appendRecord, loadRecords } from '../utils/store'
 
-const TEST_DIR = join(process.cwd(), 'data-test')
+let TEST_DIR: string
 
 describe('file store persistence', () => {
   beforeEach(() => {
-    process.env.DATA_DIR = TEST_DIR
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true })
-    mkdirSync(TEST_DIR, { recursive: true })
+    // Unique temp dir per test — a fixed in-repo path raced with parallel
+    // vitest workers sharing process.env.DATA_DIR (rmSync hit ENOTEMPTY
+    // when another worker's write landed mid-cleanup).
+    process.env.DATA_DIR = TEST_DIR = mkdtempSync(join(tmpdir(), 'store-test-'))
   })
 
   afterEach(() => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true })
+    if (TEST_DIR && existsSync(TEST_DIR))
+      rmSync(TEST_DIR, { recursive: true, force: true })
     delete process.env.DATA_DIR
   })
 
