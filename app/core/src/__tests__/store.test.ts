@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, existsSync } from 'fs'
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { loadState, saveState, appendRecord, loadRecords } from '../utils/store'
@@ -44,6 +44,57 @@ describe('file store persistence', () => {
 
   it('returns empty array for missing records', () => {
     expect(loadRecords('nonexistent')).toEqual([])
+  })
+
+  it('migrates legacy JSON files to SQLite on first open', () => {
+    // Seed legacy-era files exactly as the JSON store left them
+    writeFileSync(
+      join(TEST_DIR, 'user_states.json'),
+      JSON.stringify({
+        legacy_user: { userId: 'legacy_user', state: 'STOPPED', positions: {} },
+      }),
+    )
+    const legacyTrade = {
+      id: 't_legacy',
+      accountId: 'paper_acc_legacy_user',
+      status: 'CLOSED',
+      instrumentKey: 'NSE_FO|1',
+      direction: 'CE',
+      quantity: 50,
+      entryPrice: 10000,
+      entryValue: 500000,
+      exitPrice: 10500,
+      exitValue: 525000,
+      realizedPnl: 25000,
+      openedAt: '2026-10-01T04:00:00.000Z',
+      closedAt: '2026-10-01T05:00:00.000Z',
+    }
+    writeFileSync(
+      join(TEST_DIR, 'paper_trades.json'),
+      JSON.stringify(legacyTrade) + '\n',
+    )
+
+    const loaded = loadState<{ legacy_user: { userId: string } }>(
+      'user_states',
+    )
+    expect(loaded?.legacy_user?.userId).toBe('legacy_user')
+
+    const trades = loadRecords<{
+      id: string
+      entryPrice: number
+    }>('paper_trades')
+    expect(trades).toHaveLength(1)
+    expect(trades[0].id).toBe('t_legacy')
+    expect(trades[0].entryPrice).toBe(10000)
+
+    // Legacy files are renamed (kept as rollback copies), not deleted
+    const entries = readdirSync(TEST_DIR)
+    expect(
+      entries.some((f) => f.startsWith('user_states.json.migrated-')),
+    ).toBe(true)
+    expect(
+      entries.some((f) => f.startsWith('paper_trades.json.migrated-')),
+    ).toBe(true)
   })
 
   it('overwrites state on re-save', () => {

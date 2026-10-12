@@ -30,3 +30,4 @@ yarn-error.log*
 .wrangler/
 .mf/
 coverage/
+data-backup-*.tar.gz
