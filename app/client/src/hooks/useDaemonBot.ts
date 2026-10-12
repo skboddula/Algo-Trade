@@ -146,8 +146,10 @@ export function useDaemonBot(_token: string | null) {
         const health = await fetchDaemonStreamHealth()
         if (cancelled) return
         const s = health.status
+        // Daemon status enum: idle | connecting | open | reconnecting | closed
+        // ("open" is the daemon's healthy state — never report it as down).
         setStreamHealth(
-          s === 'connected'
+          s === 'connected' || s === 'open'
             ? 'connected'
             : s === 'connecting' || s === 'reconnecting'
               ? 'connecting'
