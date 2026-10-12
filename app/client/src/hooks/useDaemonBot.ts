@@ -18,6 +18,7 @@ import type {
   Candle,
   FinalSignal,
   IndicatorsResult,
+  StrategyConfig,
   UnderlyingSymbol,
   VrdData,
 } from '@/lib/types'
@@ -100,6 +101,9 @@ export function useDaemonBot(_token: string | null) {
     DaemonPaperTrade[]
   >([])
   const [paperBalance, setPaperBalance] = useState<number | null>(null)
+  // The daemon's own merged config — the values it actually trades with.
+  const [daemonConfig, setDaemonConfig] =
+    useState<Partial<StrategyConfig> | null>(null)
 
   // ── REST polling (authority when WS is unavailable) ──────────────────────
   const refresh = useCallback(async () => {
@@ -111,6 +115,9 @@ export function useDaemonBot(_token: string | null) {
       setError(user.error ?? null)
       setTradesCount(user.tradesCountToday ?? 0)
       setTradesCountPerSymbol(user.tradesCountPerSymbol ?? {})
+      setDaemonConfig(
+        (user.config as Partial<StrategyConfig> | undefined) ?? null,
+      )
       setDaemonPaperTrades(res.paperTrades ?? [])
       const snap = res.snapshots ?? {}
       const mapped: Partial<Record<UnderlyingSymbol, DaemonSnapshot>> = {}
@@ -130,7 +137,6 @@ export function useDaemonBot(_token: string | null) {
   }, [])
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void checkDaemonHealth().then(setConnected)
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh()
@@ -332,6 +338,7 @@ export function useDaemonBot(_token: string | null) {
     state,
     position,
     positions: fullPositions,
+    config: daemonConfig,
     indicators,
     symbolIndicators,
     vrdData,

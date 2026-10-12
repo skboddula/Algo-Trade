@@ -47,6 +47,8 @@ export function StrategiesPage({
     void daemonUpdateConfig(config as unknown as Record<string, unknown>)
       .then(() => undefined)
       .catch(() => undefined)
+    // daemonMode in deps: when the daemon (re)appears, the current config
+    // is pushed immediately — closes the changed-while-fallback drift.
   }, [config, daemonMode])
 
   // Daemon mode: the daemon controller carries its own paper balance —
@@ -70,7 +72,9 @@ export function StrategiesPage({
     return () => {
       cancelled = true
     }
-  }, [config.executionMode, bot.lastUpdated])
+    // daemonMode: switching between the daemon and the browser bot must
+    // re-evaluate which account balance this page should display.
+  }, [config.executionMode, bot.lastUpdated, daemonMode])
 
   const errorLogsCount = bot.logs.filter((l) => l.level === 'error').length
 
@@ -189,7 +193,7 @@ export function StrategiesPage({
               <ScorePanel
                 allSignalData={bot.allSignalData}
                 finalSignal={bot.finalSignal}
-                config={config}
+                config={bot.config ?? config}
               />
             </div>
             <div className="lg:col-span-5 space-y-4 flex flex-col justify-between">
@@ -253,7 +257,10 @@ export function StrategiesPage({
           value="backtest"
           className="space-y-4 focus-visible:outline-none"
         >
-          <BacktestPanel token={token} />
+          <BacktestPanel
+            token={token}
+            daemonConfigOverride={bot.config ?? undefined}
+          />
         </TabsContent>
       </Tabs>
     </div>

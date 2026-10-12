@@ -11,7 +11,7 @@ import {
   type BacktestResult,
 } from '@/lib/backtestEngine'
 import { getStrategyConfig } from '@/lib/strategyConfig'
-import type { UnderlyingSymbol } from '@/lib/types'
+import type { StrategyConfig, UnderlyingSymbol } from '@/lib/types'
 
 const SYMBOLS: { value: UnderlyingSymbol; label: string; key: string }[] = [
   { value: 'NIFTY 50', label: 'NIFTY 50', key: 'NSE_INDEX|Nifty 50' },
@@ -29,7 +29,16 @@ function todayISO(): string {
   return new Date().toISOString().split('T')[0]
 }
 
-export function BacktestPanel({ token }: { token: string | null }) {
+export function BacktestPanel({
+  token,
+  daemonConfigOverride,
+}: {
+  token: string | null
+  /** In daemon mode, the daemon's own merged config — backtests must model
+   *  the values that will actually trade, not the browser's localStorage
+   *  copy (they can drift if config was ever changed outside the UI). */
+  daemonConfigOverride?: Partial<StrategyConfig>
+}) {
   const [symbol, setSymbol] = useState<UnderlyingSymbol>('NIFTY 50')
   const [fromDate, setFromDate] = useState(daysAgoISO(30))
   const [toDate, setToDate] = useState(todayISO())
@@ -49,7 +58,11 @@ export function BacktestPanel({ token }: { token: string | null }) {
       const sym = SYMBOLS.find((s) => s.value === symbol)
       if (!sym) throw new Error('Invalid symbol')
       const defaults = getBacktestDefaults(symbol)
-      const strategyConfig = getStrategyConfig()
+      // Daemon's values win where present; the browser copy fills the rest.
+      const strategyConfig: StrategyConfig = {
+        ...getStrategyConfig(),
+        ...daemonConfigOverride,
+      }
       const candles = await fetchHistoricalCandles(
         token,
         sym.key,
@@ -93,7 +106,7 @@ export function BacktestPanel({ token }: { token: string | null }) {
     } finally {
       setRunning(false)
     }
-  }, [token, symbol, fromDate, toDate])
+  }, [token, symbol, fromDate, toDate, daemonConfigOverride])
 
   return (
     <Card>

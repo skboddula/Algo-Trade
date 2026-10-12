@@ -461,7 +461,7 @@ export function useStrategyBot(token: string | null) {
     })().catch(() => {
       dailySummaryDateRef.current = null
     })
-  }, [addLog, statusRef])
+  }, [addLog])
 
   /** Requests a screen wake lock and visibility warnings for always-on operation. */
   const startAlwaysOn = useCallback(() => {
@@ -1223,7 +1223,15 @@ export function useStrategyBot(token: string | null) {
     startAlwaysOn,
   ])
 
-  return { ...status, liveArmed, start, stop, clearLogs }
+  return {
+    ...status,
+    // BotStatus contract: the browser bot trades with the localStorage copy.
+    config: getStrategyConfig(),
+    liveArmed,
+    start,
+    stop,
+    clearLogs,
+  }
 }
 
 export type StrategyBotController = ReturnType<typeof useStrategyBot>

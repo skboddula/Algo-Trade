@@ -7,6 +7,7 @@ import type {
   IndicatorsResult,
   FinalSignal,
   UnderlyingSymbol,
+  StrategyConfig,
 } from '@/lib/types'
 import {
   STORAGE_KEY_BOT_STATE,
@@ -53,6 +54,11 @@ export interface BotStatus {
   error: string | null
   tradesCount: number
   tradesCountPerSymbol: Partial<Record<UnderlyingSymbol, number>>
+  /** The config THIS controller actually runs with — the daemon's merged
+   *  copy in daemon mode, the browser's localStorage copy in fallback mode.
+   *  Display surfaces (backtests, threshold markers) must prefer this over
+   *  getStrategyConfig() so they can never drift from what trades. */
+  config?: Partial<StrategyConfig> | null
   logs: BotLog[]
   sourceStatus: Record<string, SourceStatus>
   globalIndices: GlobalIndexItem[] | null
