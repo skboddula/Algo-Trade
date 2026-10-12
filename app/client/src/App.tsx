@@ -447,7 +447,13 @@ function DashboardShell({
           />
         )
       case 'history':
-        return <HistoryPage />
+        return (
+          <HistoryPage
+            daemonMode={daemonAvailable ?? undefined}
+            daemonTrades={daemonBot.daemonPaperTrades}
+            daemonBalance={daemonBot.paperBalance}
+          />
+        )
       case 'settings':
         return <Placeholder title="Settings" />
       default:

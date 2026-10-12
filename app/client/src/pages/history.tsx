@@ -1,5 +1,9 @@
-import type { PaperAccountSummary } from '@/lib/types'
-import { useEffect, useState } from 'react'
+import type {
+  PaperAccountSummary,
+  PaperStatementEntry,
+  PaperTrade,
+} from '@/lib/types'
+import { useEffect, useMemo, useState } from 'react'
 import { Clock3, Wallet, BarChart3 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -12,6 +16,11 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { fetchPaperHistory } from '@/lib/paperTrading'
+import {
+  fetchDaemonStatements,
+  type DaemonPaperTrade,
+  type DaemonStatementEntry,
+} from '@/lib/daemon'
 import { getLotSizeForSymbol } from '@/utils/tradeUtils'
 import { STORAGE_KEY_BOT_POSITION } from '@/lib/constants'
 import { getSensibullUrl, extractCleanTradingSymbol } from '@/lib/utils'
@@ -28,16 +37,84 @@ function fmtCurrency(value: number, signed = false) {
   return value > 0 ? `+${formatted}` : value < 0 ? `-${formatted}` : formatted
 }
 
-export function HistoryPage() {
-  const [data, setData] = useState<PaperAccountSummary | null>(null)
+/** Daemon file-store trade → the D1-model shape this page renders.
+ *  Daemon prices are in PAISE; the D1 API path serves RUPEES. */
+function daemonTradeToPaperTrade(t: DaemonPaperTrade): PaperTrade {
+  return {
+    id: t.id,
+    account_id: t.accountId,
+    status: t.status,
+    instrument_key: t.instrumentKey,
+    direction: t.direction,
+    quantity: t.quantity,
+    entry_price: t.entryPrice / 100,
+    entry_value: t.entryValue / 100,
+    exit_price: t.exitPrice != null ? t.exitPrice / 100 : null,
+    exit_value: t.exitValue != null ? t.exitValue / 100 : null,
+    realized_pnl: t.realizedPnl != null ? t.realizedPnl / 100 : null,
+    opened_at: t.openedAt,
+    closed_at: t.closedAt ?? null,
+    metadata_json: t.metadata ? JSON.stringify(t.metadata) : null,
+  }
+}
+
+function buildDaemonSummary(
+  statements: DaemonStatementEntry[],
+  trades: DaemonPaperTrade[],
+  balanceRupees: number | null,
+): PaperAccountSummary {
+  const mapped = trades.map(daemonTradeToPaperTrade)
+  const open = mapped.filter((t) => t.status === 'OPEN')
+  const last = statements[0]
+  const entries: PaperStatementEntry[] = statements.slice(0, 25).map((s) => ({
+    id: s.id,
+    entry_type: s.entryType,
+    amount: s.amountPaise / 100,
+    balance_before: s.balanceBeforePaise / 100,
+    balance_after: s.balanceAfterPaise / 100,
+    note: s.note ?? null,
+    metadata_json: null,
+    created_at: s.createdAt,
+  }))
+  return {
+    account: {
+      id: last?.accountId ?? 'paper_acc_default_user',
+      mode: 'paper',
+      balance: balanceRupees ?? (last ? last.balanceAfterPaise / 100 : 0),
+      currency: 'INR',
+      updatedAt: last?.createdAt,
+    },
+    recentEntries: entries,
+    openTradeCount: open.length,
+    trades: mapped,
+    openTrades: open,
+  }
+}
+
+export function HistoryPage({
+  daemonMode,
+  daemonTrades,
+  daemonBalance,
+}: {
+  /** In daemon mode the authoritative ledger is the daemon's file store —
+   *  the D1 copy belongs to the legacy browser bot and goes stale. */
+  daemonMode?: boolean
+  daemonTrades?: DaemonPaperTrade[]
+  daemonBalance?: number | null
+}) {
+  const [d1Data, setD1Data] = useState<PaperAccountSummary | null>(null)
   const [error, setError] = useState('')
+  const [daemonStatements, setDaemonStatements] = useState<
+    DaemonStatementEntry[] | null
+  >(null)
 
   useEffect(() => {
+    if (daemonMode) return
     let cancelled = false
     void fetchPaperHistory()
       .then((summary) => {
         if (!cancelled) {
-          setData(summary)
+          setD1Data(summary)
           setError('')
         }
       })
@@ -47,7 +124,39 @@ export function HistoryPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [daemonMode])
+
+  // Daemon ledger: one statement fetch per mount; trades + balance arrive
+  // live via the shell's 3s daemon poll (passed as props).
+  useEffect(() => {
+    if (!daemonMode) return
+    let cancelled = false
+    void fetchDaemonStatements()
+      .then((res) => {
+        if (!cancelled) {
+          setDaemonStatements(res.statements)
+          setError('')
+        }
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [daemonMode])
+
+  // In daemon mode the daemon's ledger IS the history; otherwise D1 (the
+  // legacy browser-bot store).
+  const data = useMemo<PaperAccountSummary | null>(() => {
+    if (!daemonMode) return d1Data
+    if (daemonStatements === null) return null
+    return buildDaemonSummary(
+      daemonStatements,
+      daemonTrades ?? [],
+      daemonBalance ?? null,
+    )
+  }, [daemonMode, d1Data, daemonStatements, daemonTrades, daemonBalance])
 
   const recentTrades = data?.trades ?? []
   const openTrades = data?.openTrades ?? []
@@ -60,9 +169,14 @@ export function HistoryPage() {
   return (
     <div className="flex flex-col gap-5 p-6 min-w-0">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight text-foreground">
-          Trade History
-        </h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold tracking-tight text-foreground">
+            Trade History
+          </h1>
+          <Badge variant="default" className="text-xs">
+            {daemonMode ? 'daemon ledger' : 'browser ledger'}
+          </Badge>
+        </div>
         <p className="text-sm text-muted-foreground mt-0.5">
           Paper trading ledger and simulated trade statement
         </p>

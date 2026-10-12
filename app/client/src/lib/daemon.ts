@@ -167,6 +167,24 @@ export function daemonExitTrade(
   })
 }
 
+/** The daemon's file-store statement entry (amounts in PAISE). */
+export interface DaemonStatementEntry {
+  id: string
+  accountId: string
+  entryType: string
+  amountPaise: number
+  balanceBeforePaise: number
+  balanceAfterPaise: number
+  note?: string | null
+  createdAt: string
+}
+
+export function fetchDaemonStatements(userId = DAEMON_USER_ID, limit = 50) {
+  return daemonFetch<{ statements: DaemonStatementEntry[] }>(
+    `/api/bot/statements?userId=${encodeURIComponent(userId)}&limit=${limit}`,
+  )
+}
+
 export function fetchDaemonLogs(limit = 200) {
   return daemonFetch<{ logs: DaemonBotLog[] }>(`/api/bot/logs?limit=${limit}`)
 }
