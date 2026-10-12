@@ -35,11 +35,13 @@ function getDataDir(): string {
   const dir = process.env.DATA_DIR || DEFAULT_DATA_DIR;
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    try {
-      chmodSync(dir, 0o700);
-    } catch {
-      // umask may have applied; best-effort restrictive defaults
-    }
+  }
+  try {
+    // Tighten on EVERY call — a dir created before this policy (default
+    // umask → 0755) must not stay world-listable.
+    chmodSync(dir, 0o700);
+  } catch {
+    // best-effort restrictive defaults
   }
   return dir;
 }
@@ -113,6 +115,11 @@ export function saveState<T>(name: string, data: T): void {
  */
 export function appendRecord<T>(name: string, record: T): void {
   const path = getFilePath(name);
+  if (!existsSync(path)) {
+    // JSONL ledgers (paper_trades, paper_statements) hold money data —
+    // create owner-only, or the umask default (0644) leaks them.
+    writeRestricted(path, "");
+  }
   const line = JSON.stringify(record) + "\n";
   appendFileSync(path, line, "utf-8");
 }

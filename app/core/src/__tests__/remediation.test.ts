@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, mkdirSync, chmodSync } from "fs";
+import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -285,10 +285,12 @@ describe("CR-06: persistence faults block live entries mid-session", () => {
     const manager = new TenantManager(stubIngestor(), new OrderGateway());
     manager.getOrCreateUser("cr06_user");
 
-    // Simulate a persistence fault
+    // Simulate a persistence fault: DATA_DIR is a FILE, so every write
+    // fails with ENOTDIR (survives the store's dir-perms self-healing).
     const ro = mkdtempSync(join(tmpdir(), "ro-"));
-    chmodSync(ro, 0o500);
-    process.env.DATA_DIR = ro;
+    const roFile = join(ro, "not-a-dir");
+    writeFileSync(roFile, "");
+    process.env.DATA_DIR = roFile;
     manager.startBot("cr06_user", "paper"); // triggers persistUserStates → fault
     expect(manager.getPersistenceFault()).toBeTruthy();
 
@@ -298,7 +300,6 @@ describe("CR-06: persistence faults block live entries mid-session", () => {
     );
 
     // Clean up
-    chmodSync(ro, 0o700);
     delete process.env.DAEMON_LIVE_ARMED;
     process.env.DATA_DIR = dir;
   });
@@ -311,16 +312,14 @@ describe("CR-06: persistence faults block live entries mid-session", () => {
 
     // Verify the code path exists: persistenceFault transitions from null to set
     // after a failed write, and the user is still in-memory with the state
-    const ro = mkdtempSync(join(tmpdir(), "ro2-"));
-    chmodSync(ro, 0o500);
-    process.env.DATA_DIR = ro;
+    const ro2File = join(mkdtempSync(join(tmpdir(), "ro2-")), "not-a-dir");
+    writeFileSync(ro2File, "");
+    process.env.DATA_DIR = ro2File;
     manager.startBot("cr06b_user", "paper");
     expect(manager.getPersistenceFault()).toBeTruthy();
     // The user's in-memory state is still intact (supervised)
     const user = manager.getOrCreateUser("cr06b_user");
     expect(user.state).toBe("RUNNING");
-
-    chmodSync(ro, 0o700);
   });
 });
 
@@ -878,32 +877,33 @@ describe("CR-15: store corrupt-file preservation", () => {
   });
 
   it("saveState propagates write failures as exceptions", async () => {
-    const ro = join(dir, "readonly");
-    mkdirSync(ro);
-    process.env.DATA_DIR = ro;
-    // make the dir read-only (chmod 0500) — saveState must throw
-    const { chmodSync } = await import("fs");
-    chmodSync(ro, 0o500);
+    const roFile = join(dir, "not-a-dir");
+    writeFileSync(roFile, "");
+    process.env.DATA_DIR = roFile;
+    // DATA_DIR is a FILE — saveState must throw (ENOTDIR), regardless of
+    // the store's dir-perms self-healing.
     const { saveState } = await import("../utils/store");
     expect(() => saveState("test_state", { a: 1 })).toThrowError();
-    chmodSync(ro, 0o700);
   });
 
   it("persistUserStates surfaces write failures as an operational fault", async () => {
-    // Build everything WRITABLE first, then flip the dir read-only so the
-    // very next user-state save (from startBot) hits EACCES.
+    // Build everything WRITABLE first (user creation persists the account),
+    // then point DATA_DIR at a FILE so the very next user-state save (from
+    // startBot) hits ENOTDIR.
     const dir = mkdtempSync(join(tmpdir(), "ro-"));
     process.env.DATA_DIR = dir;
     const manager = new TenantManager(stubIngestor(), new OrderGateway());
     manager.getOrCreateUser("fault_user");
 
-    chmodSync(dir, 0o500);
+    const dirFile = join(dir, "not-a-dir");
+    writeFileSync(dirFile, "");
+    process.env.DATA_DIR = dirFile;
     try {
       manager.startBot("fault_user", "paper");
       expect(manager.getPersistenceFault()).toBeTruthy();
       expect(manager.getPersistenceFault()).toMatch(/save failed/i);
     } finally {
-      chmodSync(dir, 0o700);
+      process.env.DATA_DIR = dir;
     }
   });
 });
