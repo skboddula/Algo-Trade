@@ -39,6 +39,8 @@ export interface VrdAssemblyInput {
   officialPcr: number | null
   /** Official max-pain strike when fetched, else null. */
   maxPain: number | null
+  /** DII net cash in ₹ Cr, or null when the fetch failed (display-only). */
+  diiNetCashCr?: number | null
   newsAlerts: NewsAlert[]
 }
 
@@ -121,6 +123,7 @@ export function assembleVrdData(input: VrdAssemblyInput): VrdAssemblyResult {
     niftyPe: { pe: proxyPe.pe, label: proxyPe.label },
     vix: input.vix,
     giftNifty: input.giftNifty,
+    diiNetCashCr: input.diiNetCashCr ?? null,
     supportWall,
     resistanceWall,
     maxPain: input.maxPain,

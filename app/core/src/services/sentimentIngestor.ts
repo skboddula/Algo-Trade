@@ -102,6 +102,7 @@ interface MarketWideSentiment {
   fiiLongShort: VrdData["fiiLongShort"];
   fiiPositioning: VrdData["fiiPositioning"];
   giftNifty: VrdData["giftNifty"];
+  diiNetCashCr: number | null;
   globalIndices: McMarketItem[];
   newsAlerts: NewsAlert[];
   fetchedAt: string;
@@ -112,6 +113,7 @@ const EMPTY_MARKET_WIDE: MarketWideSentiment = {
   fiiLongShort: null,
   fiiPositioning: null,
   giftNifty: null,
+  diiNetCashCr: null,
   globalIndices: [],
   newsAlerts: [],
   fetchedAt: "",
@@ -194,6 +196,7 @@ export class SentimentIngestor {
       fiiLongShort,
       fiiPositioning,
       giftNifty: global?.giftNifty ?? null,
+      diiNetCashCr: await this.fetchDii().catch(() => null),
       globalIndices: global?.indices ?? [],
       newsAlerts,
       fetchedAt: new Date().toISOString(),
@@ -317,6 +320,7 @@ export class SentimentIngestor {
       giftNifty: marketWide.giftNifty,
       officialPcr,
       maxPain,
+      diiNetCashCr: marketWide.diiNetCashCr,
       newsAlerts: marketWide.newsAlerts,
     });
     return vrd;
@@ -345,6 +349,33 @@ export class SentimentIngestor {
           ? 3.0
           : 1.0;
     return { advances, declines, ratio };
+  }
+
+  /** DII net cash (₹ Cr) — display-only dashboard source (Worker parity:
+   *  worker/upstoxProxy.ts handleUpstoxDii → v2/market/dii, NSE_EQ|CASH). */
+  private async fetchDii(): Promise<number | null> {
+    const from = new Date();
+    from.setDate(from.getDate() - 15);
+    const qs = new URLSearchParams({
+      data_type: "NSE_EQ|CASH",
+      interval: "1D",
+      from: getIndiaTime(from).dateString,
+    });
+    const res = await fetchWithRetry(
+      `${this.config.upstoxApiBaseUrl}/market/dii?${qs.toString()}`,
+      { headers: this.headers },
+    );
+    if (!res.ok) return null;
+    const raw = (await res.json()) as {
+      data?: Record<
+        string,
+        { time_stamp: number; buy_amount: number; sell_amount: number }[]
+      >;
+    };
+    const cashList = raw?.data?.["NSE_EQ|CASH"] ?? [];
+    const latest = [...cashList].sort((a, b) => b.time_stamp - a.time_stamp)[0];
+    if (!latest) return null;
+    return (latest.buy_amount - latest.sell_amount) / 1e7;
   }
 
   /** FII index-futures activity → long/short split + net positioning. */

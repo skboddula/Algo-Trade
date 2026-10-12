@@ -303,7 +303,8 @@ export function useDaemonBot(_token: string | null) {
       'upstox/fii': vrdData?.fiiLongShort
         ? ('ok' as const)
         : ('stale' as const),
-      'upstox/dii': 'unknown',
+      'upstox/dii':
+        vrdData?.diiNetCashCr != null ? ('ok' as const) : ('error' as const),
       'upstox/pcr': vrdData?.pcr ? ('ok' as const) : ('error' as const),
       'upstox/max-pain':
         vrdData?.maxPain != null ? ('ok' as const) : ('error' as const),

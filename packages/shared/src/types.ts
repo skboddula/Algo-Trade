@@ -131,6 +131,8 @@ export interface VrdData {
     netPosition: number | null
     consecutiveShortDays: number | null
   } | null
+  /** DII net cash (₹ Cr) — display-only dashboard source, not strategy input. */
+  diiNetCashCr?: number | null
   pcr: { value: number | null; zone: string | null } | null
   straddleIv: {
     elevated: boolean | null
