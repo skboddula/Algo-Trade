@@ -470,6 +470,29 @@ export class SentimentIngestor {
       const openingSignal =
         changePct > 0.1 ? "Gap Up" : changePct < -0.1 ? "Gap Down" : "Flat";
       giftNifty = { price, changePts, changePct, openingSignal };
+    } else {
+      // Fallback (Worker parity, worker/globalIndices.ts): when the pulse
+      // feed carries no GIFT/SGX item, derive the opening signal from Dow
+      // Futures. Price stays null so the UI renders "—" instead of an
+      // invented level.
+      const dowFuture = (regions.US ?? []).find((item) =>
+        item.displayName.toLowerCase().includes("future"),
+      );
+      const changePct = dowFuture ? Number(dowFuture.change ?? 0) : null;
+      const openingSignal =
+        changePct !== null
+          ? changePct > 0.1
+            ? "Gap Up"
+            : changePct < -0.1
+              ? "Gap Down"
+              : "Flat"
+          : null;
+      giftNifty = {
+        price: null,
+        changePts: null,
+        changePct,
+        openingSignal,
+      };
     }
     return { giftNifty, indices };
   }
