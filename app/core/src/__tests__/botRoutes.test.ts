@@ -161,10 +161,18 @@ describe("Daemon API key enforcement", () => {
 
     const goodKey = await guarded.app.inject({
       method: "GET",
-      url: "/api/bot/status",
+      url: "/api/bot/status?userId=shiva",
       headers: { "x-api-key": "test-secret-key" },
     });
     expect(goodKey.statusCode).toBe(200);
+
+    // A valid key without userId is rejected — no implicit default user
+    const noUser = await guarded.app.inject({
+      method: "GET",
+      url: "/api/bot/status",
+      headers: { "x-api-key": "test-secret-key" },
+    });
+    expect(noUser.statusCode).toBe(400);
 
     // /health stays open (liveness probe)
     const health = await guarded.app.inject({ method: "GET", url: "/health" });
@@ -187,7 +195,7 @@ describe("Daemon API key enforcement", () => {
     await open.app.ready();
     const res = await open.app.inject({
       method: "GET",
-      url: "/api/bot/status",
+      url: "/api/bot/status?userId=shiva",
     });
     expect(res.statusCode).toBe(200);
     await open.app.close();

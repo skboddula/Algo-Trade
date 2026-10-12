@@ -167,7 +167,12 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
   // ── GET /api/bot/status ────────────────────────────────────────────────────
   fastify.get("/api/bot/status", async (request, reply) => {
     const query = request.query as { userId?: string };
-    const userId = query.userId || "default_user";
+    const userId = query.userId;
+    if (!userId) {
+      return reply.status(400).send({
+        error: "userId is required — the implicit default_user fallback was removed",
+      });
+    }
     const snapshots = masterIngestor.getAllSnapshots();
     const userState = tenantManager.getOrCreateUser(userId);
     const paperTrades = orderGateway.getPaperTrades(userId);
@@ -252,7 +257,12 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
         userId?: string;
         executionMode?: "paper" | "live";
       } | null;
-      const userId = body?.userId || "default_user";
+      const userId = body?.userId;
+    if (!userId) {
+      return reply.status(400).send({
+        error: "userId is required — the implicit default_user fallback was removed",
+      });
+    }
       try {
         const userState = tenantManager.startBot(userId, body?.executionMode);
         return reply.send({
@@ -272,7 +282,12 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     { schema: { body: USER_ID_SCHEMA } },
     async (request, reply) => {
       const body = request.body as { userId?: string } | null;
-      const userId = body?.userId || "default_user";
+      const userId = body?.userId;
+    if (!userId) {
+      return reply.status(400).send({
+        error: "userId is required — the implicit default_user fallback was removed",
+      });
+    }
       const userState = tenantManager.stopBot(userId);
       return reply.send({
         success: true,
@@ -287,7 +302,12 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     { schema: { body: CONFIG_SCHEMA } },
     async (request, reply) => {
       const body = request.body as { userId?: string; config: any } | null;
-      const userId = body?.userId || "default_user";
+      const userId = body?.userId;
+    if (!userId) {
+      return reply.status(400).send({
+        error: "userId is required — the implicit default_user fallback was removed",
+      });
+    }
       if (!body?.config) {
         return reply.status(400).send({ error: "Missing config payload" });
       }
@@ -305,7 +325,12 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     { schema: { body: TOKEN_SCHEMA } },
     async (request, reply) => {
       const body = request.body as { userId?: string; token: string } | null;
-      const userId = body?.userId || "default_user";
+      const userId = body?.userId;
+    if (!userId) {
+      return reply.status(400).send({
+        error: "userId is required — the implicit default_user fallback was removed",
+      });
+    }
       if (!body?.token) {
         return reply.status(400).send({ error: "Missing token" });
       }
@@ -326,7 +351,12 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
   // ── POST /api/bot/paper-reset ──────────────────────────────────────────────
   fastify.post("/api/bot/paper-reset", async (request, reply) => {
     const body = request.body as { userId?: string } | null;
-    const userId = body?.userId || "default_user";
+    const userId = body?.userId;
+    if (!userId) {
+      return reply.status(400).send({
+        error: "userId is required — the implicit default_user fallback was removed",
+      });
+    }
     const account = orderGateway.resetPaperAccount(userId);
     const userState = tenantManager.getOrCreateUser(userId);
     return reply.send({
@@ -340,7 +370,12 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
   // Returns trade history formatted for charting: running balance over time
   fastify.get("/api/bot/equity-curve", async (request, reply) => {
     const query = request.query as { userId?: string };
-    const userId = query.userId || "default_user";
+    const userId = query.userId;
+    if (!userId) {
+      return reply.status(400).send({
+        error: "userId is required — the implicit default_user fallback was removed",
+      });
+    }
     const account = orderGateway.getOrCreatePaperAccount(userId);
     const trades = orderGateway.getPaperTrades(userId);
 
@@ -471,7 +506,12 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
         symbol: UnderlyingSymbol;
         reason?: string;
       } | null;
-      const userId = body?.userId || "default_user";
+      const userId = body?.userId;
+    if (!userId) {
+      return reply.status(400).send({
+        error: "userId is required — the implicit default_user fallback was removed",
+      });
+    }
       if (!body?.symbol) {
         return reply.status(400).send({ error: "Missing symbol" });
       }
@@ -590,7 +630,12 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
   // Broker-style paper account ledger (entries, exits, balance walk).
   fastify.get("/api/bot/statements", async (request, reply) => {
     const query = request.query as { userId?: string; limit?: string };
-    const userId = query.userId || "default_user";
+    const userId = query.userId;
+    if (!userId) {
+      return reply.status(400).send({
+        error: "userId is required — the implicit default_user fallback was removed",
+      });
+    }
     const limit = Math.min(parseInt(query.limit || "50", 10) || 50, 200);
     return reply.send({
       statements: orderGateway.getStatements(userId, limit),
@@ -630,7 +675,16 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
   // ── WebSocket /ws ──────────────────────────────────────────────────────────
   fastify.get("/ws", { websocket: true }, (connection, req) => {
     const query = req.query as { userId?: string; ticket?: string };
-    const userId = query.userId || "default_user";
+    if (!query.userId) {
+      const ws = (connection as any).socket || connection;
+      try {
+        ws.close(4008, "userId required");
+      } catch {
+        // socket may be gone
+      }
+      return;
+    }
+    const userId = query.userId;
     const ws = (connection as any).socket || connection;
 
     // Handshake auth (CR-05): browsers cannot set WebSocket headers, so the
