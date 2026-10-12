@@ -349,6 +349,19 @@ export class TenantManager extends EventEmitter {
     return user;
   }
 
+  /** Syncs a user's paperBalance mirror from the gateway account and
+   *  persists — used by the account-adjust route after capital changes. */
+  public syncPaperBalance(userId: string): UserBotState {
+    const user = this.getOrCreateUser(userId);
+    user.paperBalance = this.orderGateway.getOrCreatePaperAccount(
+      userId,
+    ).balance;
+    user.updatedAt = new Date().toISOString();
+    this.emitUserUpdate(user);
+    this.persistUserStates();
+    return user;
+  }
+
   public updateConfig(
     userId: string,
     config: Partial<StrategyConfig>,

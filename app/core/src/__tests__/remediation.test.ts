@@ -328,6 +328,89 @@ describe("CR-06: persistence faults block live entries mid-session", () => {
   });
 });
 
+// ─── Account adjust (browser-parity manual capital adjustment) ──────────────
+
+describe("account adjust — manual capital adjustment", () => {
+  const prevDataDirAdj = process.env.DATA_DIR;
+  afterEach(() => {
+    if (prevDataDirAdj === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prevDataDirAdj;
+  });
+
+  it("adjust deposit increases balance, shifts baseline, records manual_adjust", () => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "adjust-"));
+    const { manager } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "",
+      filledPrice: 0,
+      quantity: 0,
+    });
+    const gateway = (
+      manager as unknown as {
+        orderGateway: InstanceType<typeof OrderGateway>;
+      }
+    ).orderGateway;
+
+    const before = gateway.getOrCreatePaperAccount("adj_user").balance;
+    const { account, deltaPaise, entryType } = gateway.adjustPaperAccount(
+      "adj_user",
+      500_000, // ₹5,000
+      "adjust",
+    );
+    expect(deltaPaise).toBe(500_000);
+    expect(account.balance).toBe(before + 500_000);
+    expect(entryType).toBe("manual_adjust");
+    expect(account.startingBalance).toBeGreaterThan(0);
+
+    const stmts = gateway.getStatements("adj_user", 10);
+    expect(stmts.some((s) => s.entryType === "manual_adjust")).toBe(true);
+  });
+
+  it("set mode sets absolute balance and records manual_set", () => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "adjust-set-"));
+    const { manager } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "",
+      filledPrice: 0,
+      quantity: 0,
+    });
+    const gateway = (
+      manager as unknown as {
+        orderGateway: InstanceType<typeof OrderGateway>;
+      }
+    ).orderGateway;
+
+    const { account, entryType } = gateway.adjustPaperAccount(
+      "set_user",
+      2_000_000, // ₹20,000 absolute
+      "set",
+    );
+    expect(account.balance).toBe(2_000_000);
+    expect(entryType).toBe("manual_set");
+  });
+
+  it("rejects a withdrawal below zero", () => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "adjust-neg-"));
+    const { manager } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "",
+      filledPrice: 0,
+      quantity: 0,
+    });
+    const gateway = (
+      manager as unknown as {
+        orderGateway: InstanceType<typeof OrderGateway>;
+      }
+    ).orderGateway;
+    expect(() =>
+      gateway.adjustPaperAccount("neg_user", -999_999_999, "adjust"),
+    ).toThrowError(/below zero/i);
+  });
+})
+
 // ─── Single-active-trader invariant ─────────────────────────────────────────
 
 describe("single-active-trader invariant", () => {

@@ -123,6 +123,14 @@ Content-Type: application/json
 ### Reset Paper Account
 
 ```http
+POST /api/bot/account/adjust
+  Manual capital adjustment (browser-parity with /api/paper/account/adjust).
+  Body: { userId (required), amount (rupees, required), mode ("set" = absolute
+  balance [default] | "adjust" = relative delta), note? }
+  Records a manual_set / manual_adjust statement entry; rejects withdrawals
+  below zero; shifts the CR-20 equity baseline by the same delta.
+  Returns: { success, balance (paise), startingBalance (paise), userState }
+
 POST /api/bot/paper-reset
 Content-Type: application/json
 

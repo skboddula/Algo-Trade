@@ -366,6 +366,56 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     });
   });
 
+  // ── POST /api/bot/account/adjust ──────────────────────────────────────────
+  // Manual capital adjustment — unified with the browser reference
+  // (worker/paperTrading.ts handlePaperAccountAdjust): amount in RUPEES,
+  // mode 'set' (absolute, default) or 'adjust' (relative delta).
+  const ACCOUNT_ADJUST_SCHEMA = {
+    type: "object",
+    required: ["userId", "amount"],
+    properties: {
+      userId: { type: "string", minLength: 1, maxLength: 64 },
+      amount: { type: "number" },
+      mode: { type: "string", enum: ["set", "adjust"] },
+      note: { type: "string", maxLength: 200 },
+    },
+  } as const;
+  fastify.post(
+    "/api/bot/account/adjust",
+    { schema: { body: ACCOUNT_ADJUST_SCHEMA } },
+    async (request, reply) => {
+      const body = request.body as {
+        userId: string;
+        amount: number;
+        mode?: "set" | "adjust";
+        note?: string;
+      };
+      const amountPaise = Math.round(body.amount * 100);
+      if (amountPaise === 0 && body.mode !== "set") {
+        return reply
+          .status(400)
+          .send({ error: "Adjustment amount cannot be zero" });
+      }
+      try {
+        const { account } = orderGateway.adjustPaperAccount(
+          body.userId,
+          amountPaise,
+          body.mode ?? "set",
+          body.note,
+        );
+        const userState = tenantManager.syncPaperBalance(body.userId);
+        return reply.send({
+          success: true,
+          balance: account.balance,
+          startingBalance: account.startingBalance,
+          userState: sanitizeUserState(userState),
+        });
+      } catch (error) {
+        return reply.status(400).send({ error: (error as Error).message });
+      }
+    },
+  );
+
   // ── GET /api/bot/equity-curve ─────────────────────────────────────────────
   // Returns trade history formatted for charting: running balance over time
   fastify.get("/api/bot/equity-curve", async (request, reply) => {

@@ -83,7 +83,7 @@ export interface OrderResult {
 export interface PaperStatementEntry {
   id: string;
   accountId: string;
-  entryType: "paper_enter" | "paper_exit";
+  entryType: "paper_enter" | "paper_exit" | "manual_set" | "manual_adjust";
   amountPaise: number;
   balanceBeforePaise: number;
   balanceAfterPaise: number;
@@ -195,6 +195,64 @@ export class OrderGateway {
       this.persistAccounts();
     }
     return account;
+  }
+
+  /**
+   * Manual capital adjustment — unified with the browser reference
+   * (worker/paperTrading.ts handlePaperAccountAdjust): mode 'set' = absolute
+   * balance, 'adjust' = relative delta, amounts in PAISE, the delta is the
+   * statement amount, below-zero rejected.
+   *
+   * Daemon enhancement over the browser reference: the CR-20 equity baseline
+   * (startingBalance) shifts by the same delta so the equity curve stays
+   * PnL-pure; legacy null baselines are reconstructed first
+   * (balance − Σ realized PnL).
+   */
+  public adjustPaperAccount(
+    userId: string,
+    amountPaise: number,
+    mode: "set" | "adjust",
+    note?: string,
+  ): {
+    account: PaperAccount;
+    deltaPaise: number;
+    entryType: PaperStatementEntry["entryType"];
+  } {
+    const account = this.getOrCreatePaperAccount(userId);
+
+    // Reconstruct a legacy null baseline so the shift below is exact.
+    if (account.startingBalance == null) {
+      const realized = Array.from(this.paperTrades.values())
+        .filter((t) => t.accountId === account.id)
+        .reduce((s, t) => s + (t.realizedPnl ?? 0), 0);
+      account.startingBalance = account.balance - realized;
+    }
+
+    const balanceBefore = account.balance;
+    const balanceAfter =
+      mode === "set" ? amountPaise : balanceBefore + amountPaise;
+    if (balanceAfter < 0) {
+      throw new Error("Paper credit cannot go below zero");
+    }
+    const deltaPaise = balanceAfter - balanceBefore;
+
+    account.balance = balanceAfter;
+    account.startingBalance += deltaPaise;
+    account.updatedAt = new Date().toISOString();
+    const entryType: PaperStatementEntry["entryType"] =
+      mode === "set" ? "manual_set" : "manual_adjust";
+    this.recordStatement(
+      account,
+      entryType,
+      deltaPaise,
+      balanceBefore,
+      note ??
+        (mode === "set"
+          ? "Manual paper credit set"
+          : "Manual paper credit adjustment"),
+    );
+    this.persistAccounts();
+    return { account, deltaPaise, entryType };
   }
 
   public resetPaperAccount(userId: string): PaperAccount {
