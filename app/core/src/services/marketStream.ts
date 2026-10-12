@@ -24,7 +24,11 @@ import protobuf from "protobufjs";
 import { readFileSync } from "fs";
 import { join } from "path";
 
-const FEED_URL = "wss://api.upstox.com/v3/feed/market-data-feed";
+// V3 feed requires the authorize step: the access token is exchanged (REST)
+// for a one-time signed WSS URL. Connecting to the feed URL directly with a
+// Bearer header is rejected by Upstox (socket closes 1006, reconnect loop).
+const AUTHORIZE_URL =
+  "https://api.upstox.com/v3/feed/market-data-feed/authorize";
 const FEED_PACKAGE = "com.upstox.marketdatafeederv3udapi.rpc.proto";
 const INDIA_VIX_KEY = "NSE_INDEX|India VIX";
 import { VIX_FRESHNESS_WINDOW_MS } from "../constants";
@@ -320,14 +324,35 @@ export class UpstoxMarketStream extends EventEmitter {
 
     this.setStatus("connecting");
 
+    // Upstox V3 feed: exchange the token for a one-time signed WSS URL
+    // (same flow the browser version uses via the Worker's feed-authorize).
+    let feedUrl: string;
     try {
-      // Node.js ws can set headers directly — no authorize URL needed.
-      this.ws = new WebSocket(FEED_URL, {
+      const res = await fetch(AUTHORIZE_URL, {
         headers: {
           Authorization: `Bearer ${token}`,
           Accept: "application/json",
         },
       });
+      const raw = (await res.json()) as {
+        status?: string;
+        data?: { authorized_redirect_uri?: string };
+      };
+      const uri = raw.data?.authorized_redirect_uri;
+      if (!res.ok || raw.status !== "success" || !uri?.startsWith("wss://")) {
+        this.scheduleReconnect(`feed authorize failed (HTTP ${res.status})`);
+        return;
+      }
+      feedUrl = uri;
+    } catch (error) {
+      this.scheduleReconnect(
+        `feed authorize error: ${(error as Error).message}`,
+      );
+      return;
+    }
+
+    try {
+      this.ws = new WebSocket(feedUrl);
     } catch (error) {
       this.setStatus(
         "closed",
