@@ -50,6 +50,9 @@ export async function fetchWsTicket(): Promise<string | undefined> {
   if (!key) return undefined
   const res = await daemonFetch<{ ticket: string }>('/api/bot/ws-ticket', {
     method: 'POST',
+    // Fastify rejects an empty body when Content-Type is application/json
+    // (which daemonFetch always sets) — send an empty JSON object.
+    body: '{}',
   })
   return res.ticket
 }

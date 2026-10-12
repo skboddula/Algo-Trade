@@ -59,6 +59,10 @@ export class TenantManager extends EventEmitter {
   // blocked until persistence is healthy again.
   private persistenceFault: string | null = null;
 
+  // Rate-limit for the CR-11 data-stale WARN so a brief data outage at
+  // market open doesn't spam one log line per tick (every 2s).
+  private lastStaleWarnAtMs = new Map<UnderlyingSymbol, number>();
+
   // ── Live trading arming (CR-08) ────────────────────────────────────────
   private static readonly LIVE_ARM_ENV = "DAEMON_LIVE_ARMED";
 
@@ -1005,11 +1009,17 @@ export class TenantManager extends EventEmitter {
           // CR-11: block entries when required market data is stale
           const blockers = snapshot.sources?.entryBlockedReasons;
           if (blockers && blockers.length > 0) {
-            this.log(
-              "warn",
-              "data-stale",
-              `[${symbol}] Entry blocked — ${blockers.join("; ")}`,
-            );
+            // WARN at most once per 30s per symbol — the gate still blocks
+            // on EVERY tick, only the log line is throttled.
+            const lastWarn = this.lastStaleWarnAtMs.get(symbol) ?? 0;
+            if (Date.now() - lastWarn > 30_000) {
+              this.lastStaleWarnAtMs.set(symbol, Date.now());
+              this.log(
+                "warn",
+                "data-stale",
+                `[${symbol}] Entry blocked — ${blockers.join("; ")}`,
+              );
+            }
             continue;
           }
           const tradesCount = user.tradesCountPerSymbol[symbol] || 0;
