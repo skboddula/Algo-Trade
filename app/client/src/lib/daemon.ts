@@ -15,7 +15,7 @@
 /** The daemon user this dashboard controls. Deployment config — required,
  *  NOT a silent default: the old 'default_user' fallback once pointed at an
  *  archived user, making a UI "start" click able to resume a second bot. */
-function daemonUserId(): string {
+export function daemonUserId(): string {
   const id = import.meta.env.VITE_DAEMON_USER_ID
   if (typeof id !== 'string' || id.length === 0) {
     throw new Error(

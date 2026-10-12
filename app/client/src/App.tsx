@@ -6,7 +6,11 @@ import { hydrateStrategyConfig } from '@/lib/strategyConfig'
 import { useStrategyBot } from '@/hooks/useStrategyBot'
 import type { StrategyBotController } from '@/hooks/useStrategyBot'
 import { useDaemonBot } from '@/hooks/useDaemonBot'
-import { checkDaemonHealth, pushTokenToDaemon } from '@/lib/daemon'
+import {
+  checkDaemonHealth,
+  daemonUserId,
+  pushTokenToDaemon,
+} from '@/lib/daemon'
 import { ACCOUNTS_CHANGED_EVENT } from '@/lib/types'
 import { useAuth0 } from '@auth0/auth0-react'
 import { AuthService } from '@/lib/auth'
@@ -452,6 +456,7 @@ function DashboardShell({
             daemonMode={daemonAvailable ?? undefined}
             daemonTrades={daemonBot.daemonPaperTrades}
             daemonBalance={daemonBot.paperBalance}
+            daemonUserId={daemonUserId()}
           />
         )
       case 'settings':

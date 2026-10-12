@@ -161,7 +161,7 @@ describe("Daemon API key enforcement", () => {
 
     const goodKey = await guarded.app.inject({
       method: "GET",
-      url: "/api/bot/status?userId=shiva",
+      url: "/api/bot/status?userId=probe_user",
       headers: { "x-api-key": "test-secret-key" },
     });
     expect(goodKey.statusCode).toBe(200);
@@ -195,7 +195,7 @@ describe("Daemon API key enforcement", () => {
     await open.app.ready();
     const res = await open.app.inject({
       method: "GET",
-      url: "/api/bot/status?userId=shiva",
+      url: "/api/bot/status?userId=probe_user",
     });
     expect(res.statusCode).toBe(200);
     await open.app.close();

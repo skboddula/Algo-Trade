@@ -62,6 +62,7 @@ function buildDaemonSummary(
   statements: DaemonStatementEntry[],
   trades: DaemonPaperTrade[],
   balanceRupees: number | null,
+  userId?: string,
 ): PaperAccountSummary {
   const mapped = trades.map(daemonTradeToPaperTrade)
   const open = mapped.filter((t) => t.status === 'OPEN')
@@ -78,7 +79,7 @@ function buildDaemonSummary(
   }))
   return {
     account: {
-      id: last?.accountId ?? 'paper_acc_default_user',
+      id: last?.accountId ?? `paper_acc_${userId ?? 'unknown'}`,
       mode: 'paper',
       balance: balanceRupees ?? (last ? last.balanceAfterPaise / 100 : 0),
       currency: 'INR',
@@ -95,12 +96,14 @@ export function HistoryPage({
   daemonMode,
   daemonTrades,
   daemonBalance,
+  daemonUserId,
 }: {
   /** In daemon mode the authoritative ledger is the daemon's file store —
    *  the D1 copy belongs to the legacy browser bot and goes stale. */
   daemonMode?: boolean
   daemonTrades?: DaemonPaperTrade[]
   daemonBalance?: number | null
+  daemonUserId?: string
 }) {
   const [d1Data, setD1Data] = useState<PaperAccountSummary | null>(null)
   const [error, setError] = useState('')
@@ -155,6 +158,7 @@ export function HistoryPage({
       daemonStatements,
       daemonTrades ?? [],
       daemonBalance ?? null,
+      daemonUserId,
     )
   }, [daemonMode, d1Data, daemonStatements, daemonTrades, daemonBalance])
 
