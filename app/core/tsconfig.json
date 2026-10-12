@@ -17,9 +17,11 @@
   "include": [
     "src/server.ts",
     "src/types.ts",
+    "src/types/**/*",
     "src/constants.ts",
     "src/services/**/*",
     "src/routes/**/*",
+    "src/utils/**/*",
     "src/__tests__/**/*",
     "../../packages/shared/src/**/*"
   ],

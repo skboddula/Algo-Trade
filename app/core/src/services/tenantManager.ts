@@ -378,25 +378,10 @@ export class TenantManager extends EventEmitter {
   ): UserBotState {
     const user = this.getOrCreateUser(userId);
 
-    // ── Single-active-trader invariant ────────────────────────────────────
-    // Every user shares ONE broker token (primary_token), so two RUNNING
-    // users would place competing orders on the same account. Starting a
-    // second user must never silently double-trade.
-    const activeOther = Array.from(this.users.values()).find(
-      (u) =>
-        u.userId !== userId && (u.state === "RUNNING" || u.state === "ORDERED"),
-    );
-    if (activeOther) {
-      throw new Error(
-        `Cannot start ${userId}: user ${activeOther.userId} is already active (${activeOther.state}). ` +
-          `Stop it first — the daemon enforces a single active trader.`,
-      );
-    }
-
     // CR-08: live trading requires explicit SERVER-SIDE arming. A client
     // flipping executionMode:"live" in a request body can never arm real
     // orders without the operator setting DAEMON_LIVE_ARMED=true in the
-    // daemon's environment.
+    // daemon's environment. (Security gates run before business rules.)
     const requestedMode = executionMode ?? user.executionMode;
     if (requestedMode === "live") {
       if (process.env[TenantManager.LIVE_ARM_ENV] !== "true") {
@@ -431,6 +416,21 @@ export class TenantManager extends EventEmitter {
           `Live trading blocked: persistence fault (${this.persistenceFault})`,
         );
       }
+    }
+
+    // ── Single-active-trader invariant ────────────────────────────────────
+    // Every user shares ONE broker token (primary_token), so two RUNNING
+    // users would place competing orders on the same account. Starting a
+    // second user must never silently double-trade.
+    const activeOther = Array.from(this.users.values()).find(
+      (u) =>
+        u.userId !== userId && (u.state === "RUNNING" || u.state === "ORDERED"),
+    );
+    if (activeOther) {
+      throw new Error(
+        `Cannot start ${userId}: user ${activeOther.userId} is already active (${activeOther.state}). ` +
+          `Stop it first — the daemon enforces a single active trader.`,
+      );
     }
 
     if (executionMode) {

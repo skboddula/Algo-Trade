@@ -36,6 +36,7 @@ import { mkdtempSync as _mk } from "fs"; // (already imported above)
 function makeScriptedGateway(exitResult: OrderResult) {
   const dir = mkdtempSync(join(tmpdir(), "algo-gw-"));
   process.env.DATA_DIR = dir;
+  console.log(`[GW-DEBUG] makeScriptedGateway DATA_DIR=${dir}`);
   const gateway = new OrderGateway();
   const calls = { count: 0 };
   const originalExit = gateway.exitOrder.bind(gateway);
@@ -254,6 +255,10 @@ describe("CR-03: bot lifecycle vs position supervision", () => {
   });
 
   it("paper start still works without arming (regression)", () => {
+    // Isolated DATA_DIR: this test must not inherit a leaked env pointing
+    // at a store that already holds an active user.
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "paper-regression-"));
+    console.log(`[PAPER-DEBUG] test start DATA_DIR=${process.env.DATA_DIR}`);
     const { manager } = makeHarness({
       success: true,
       status: "filled",
