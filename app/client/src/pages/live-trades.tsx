@@ -1356,7 +1356,10 @@ export function LiveTradesPage() {
           {botState === 'RUNNING' || botState === 'ORDERED' ? (
             <div className="rounded-md border border-primary/20 bg-primary/5 px-4 py-3 flex items-center justify-between gap-3 text-sm text-foreground max-w-full">
               <div className="flex items-center gap-2">
-                <Zap size={16} className="text-primary animate-pulse" />
+                <Zap
+                  size={16}
+                  className="text-primary animate-pulse [animation-duration:3s]"
+                />
                 <span>
                   Strategy engine is actively running in{' '}
                   <span className="font-semibold uppercase">
@@ -1421,7 +1424,7 @@ export function LiveTradesPage() {
           {loading && !dataset && (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
               {[0, 1, 2, 3].map((i) => (
-                <Card key={i} className="animate-pulse">
+                <Card key={i} className="animate-pulse [animation-duration:3s]">
                   <CardHeader>
                     <div className="h-4 w-28 rounded bg-muted" />
                   </CardHeader>
