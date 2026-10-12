@@ -466,13 +466,20 @@ export class TenantManager extends EventEmitter {
     vix: number | null;
     subscribedKeys: number;
     lastTickAt: number | null;
+    tickAgeMs: number | null;
+    reconnectCount: number;
+    lastError: string | null;
   } {
     const vix = this.marketStream.getStreamedVix();
+    const telemetry = this.marketStream.getTelemetry();
     return {
-      status: this.marketStream.getStatus(),
+      status: telemetry.status,
       vix,
-      subscribedKeys: 0, // Internal to the stream
-      lastTickAt: vix !== null ? Date.now() : null,
+      subscribedKeys: telemetry.subscribedKeys,
+      lastTickAt: telemetry.lastTickAtMs,
+      tickAgeMs: telemetry.tickAgeMs,
+      reconnectCount: telemetry.reconnectCount,
+      lastError: telemetry.lastError,
     };
   }
 

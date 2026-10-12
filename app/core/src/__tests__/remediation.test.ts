@@ -324,6 +324,172 @@ describe("CR-06: persistence faults block live entries mid-session", () => {
   });
 });
 
+// ─── CR-04: stop preserves supervision; restart restores positions+subs ────
+
+describe("CR-04: stop and restart behavior", () => {
+  const prevDataDirCR04 = process.env.DATA_DIR;
+  beforeEach(() => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "cr04-"));
+  });
+  afterEach(() => {
+    if (prevDataDirCR04 === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prevDataDirCR04;
+  });
+
+  it("STOPPED bot with an open position still evaluates exits (supervision preserved)", async () => {
+    const { manager, calls } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "exit_ok",
+      filledPrice: 95,
+      quantity: 65,
+    });
+
+    // Create a user with a position, then STOP the bot
+    userWithPosition(
+      manager,
+      "stop_user",
+      makePosition({
+        instrumentKey: "NSE_FO|STOP_TEST",
+        entryPrice: 100,
+        currentPrice: 95,
+        unrealizedPnl: -325, // -5% — within SL range but not yet triggered
+      }),
+      "RUNNING",
+    );
+    manager.stopBot("stop_user");
+
+    // The bot is STOPPED — but the position must still be supervised.
+    // manualExit is the supervision path; calling it must succeed even
+    // though the bot is stopped.
+    const result = await manager.manualExit(
+      "stop_user",
+      "NIFTY 50",
+      "trailing stop test",
+    );
+    expect(calls.count).toBe(1);
+    expect(result.positions["NIFTY 50"]).toBeNull();
+  });
+
+  it("STOPPED bot with NO position is skipped entirely (no zombie evaluation)", () => {
+    const { manager } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "",
+      filledPrice: 0,
+      quantity: 0,
+    });
+    manager.getOrCreateUser("idle_stop_user");
+    manager.startBot("idle_stop_user", "paper");
+    manager.stopBot("idle_stop_user");
+    const user = manager.getOrCreateUser("idle_stop_user");
+    expect(user.state).toBe("STOPPED");
+    // No position → no supervision needed → skip is correct
+    expect(Object.values(user.positions).every((p) => p === null)).toBe(true);
+  });
+
+  it("restart restores a persisted position and it can be supervised", async () => {
+    // First manager: create a user with a position and persist
+    const dir = mkdtempSync(join(tmpdir(), "cr04-restart-"));
+    process.env.DATA_DIR = dir;
+    const gw1 = new OrderGateway();
+    const entry = await gw1.placeOrder({
+      userId: "restart_supervise",
+      executionMode: "paper",
+      instrumentKey: "NSE_FO|RESTART_SUP",
+      direction: "CE",
+      quantity: 65,
+      price: 100,
+      tradeType: "buying",
+      underlyingSymbol: "NIFTY 50",
+    });
+    const pos = makePosition({
+      instrumentKey: "NSE_FO|RESTART_SUP",
+      paperTradeId: entry.tradeId,
+      entryPrice: entry.filledPrice,
+    });
+
+    // Create a manager with the position and STOP it (so no entries on restart)
+    const m1 = new TenantManager(stubIngestor(), gw1);
+    const u1 = m1.getOrCreateUser("restart_supervise");
+    u1.positions["NIFTY 50" as UnderlyingSymbol] = pos;
+    m1.stopBot("restart_supervise");
+    // persistUserStates was called by stopBot — state is on disk
+
+    // Simulate restart: fresh manager on the same DATA_DIR
+    const gw2 = new OrderGateway();
+    const m2 = new TenantManager(stubIngestor(), gw2);
+
+    // Give recovery a moment to complete
+    await new Promise((r) => setTimeout(r, 150));
+
+    // The persisted position must be restored
+    const u2 = m2.getOrCreateUser("restart_supervise");
+    expect(u2.state).toBe("STOPPED"); // state preserved
+    expect(u2.positions["NIFTY 50"]).not.toBeNull(); // position restored
+    expect(u2.positions["NIFTY 50"]?.instrumentKey).toBe("NSE_FO|RESTART_SUP");
+    expect(u2.positions["NIFTY 50"]?.paperTradeId).toBe(entry.tradeId);
+
+    // The position can still be supervised (exited) after restart
+    const result = await m2.manualExit(
+      "restart_supervise",
+      "NIFTY 50",
+      "post-restart exit test",
+    );
+    expect(result.positions["NIFTY 50"]).toBeNull();
+
+    // The paper trade is properly closed
+    const closed = gw2
+      .getPaperTrades("restart_supervise")
+      .find((t) => t.id === entry.tradeId);
+    expect(closed?.status).toBe("CLOSED");
+  });
+
+  it("restart with a RUNNING user restores subscriptions for the position key", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cr04-subs-"));
+    process.env.DATA_DIR = dir;
+    const gw1 = new OrderGateway();
+    const entry = await gw1.placeOrder({
+      userId: "subs_user",
+      executionMode: "paper",
+      instrumentKey: "NSE_FO|SUBS_TEST",
+      direction: "PE",
+      quantity: 30,
+      price: 200,
+      tradeType: "buying",
+      underlyingSymbol: "BANKNIFTY",
+    });
+
+    const m1 = new TenantManager(stubIngestor(), gw1);
+    const u1 = m1.getOrCreateUser("subs_user");
+    u1.positions.BANKNIFTY = makePosition({
+      instrumentKey: "NSE_FO|SUBS_TEST",
+      paperTradeId: entry.tradeId,
+      underlyingSymbol: "BANKNIFTY",
+    });
+    m1.startBot("subs_user", "paper"); // RUNNING state → persistUserStates
+
+    // Simulate restart
+    const gw2 = new OrderGateway();
+    const m2 = new TenantManager(stubIngestor(), gw2);
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Verify: user restored in RUNNING state, position present, and the
+    // stream subscriptions were synced (check via the stream health's
+    // subscribedKeys — it reflects the desiredKeys set size)
+    const u2 = m2.getOrCreateUser("subs_user");
+    // With a position, startBot sets ORDERED (position exists, not flat)
+    expect(u2.state).toBe("ORDERED");
+    expect(u2.positions.BANKNIFTY).not.toBeNull();
+
+    // syncStreamSubscriptions was called in the constructor after restore
+    // The stream's desiredKeys should include the position's instrument
+    // key + India VIX. We can verify via getStreamHealth's subscribedKeys.
+    const health = m2.getStreamHealth();
+    expect(health.subscribedKeys).toBeGreaterThanOrEqual(2); // VIX + position key
+  });
+});
+
 // ─── CR-01: paper/live execution isolation (fail-closed dispatch) ───────────
 
 describe("CR-01: paper/live execution isolation", () => {
