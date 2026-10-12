@@ -358,6 +358,9 @@ export class TenantManager extends EventEmitter {
     user.executionMode = user.config.executionMode;
     user.updatedAt = new Date().toISOString();
     this.emitUserUpdate(user);
+    // Persist immediately: a pushed config must survive a restart, not
+    // silently revert to the last persisted copy on the next reboot.
+    this.persistUserStates();
     return user;
   }
 
