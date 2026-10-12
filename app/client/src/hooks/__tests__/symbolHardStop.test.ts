@@ -27,7 +27,15 @@
  * 20. Two symbols with positions — only the stopped one is force-exited
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  beforeAll,
+  afterAll,
+  vi,
+} from 'vitest'
 import { renderHook } from '@testing-library/react'
 import {
   useTradeExecution,
@@ -62,6 +70,21 @@ vi.mock('@/lib/paperTrading', () => ({
 vi.mock('@/lib/strategyEngine', () => ({
   shouldExit: vi.fn(() => ({ exit: false, reason: '' })),
 }))
+
+// ─── Frozen clock ────────────────────────────────────────────────────────────
+// Every entry/exit path gates on market hours (the CR-03 off-hours guard).
+// Without a frozen clock these tests only pass when the suite runs between
+// 09:15–15:30 IST. Freeze to a Monday 10:00 IST so wall-clock time is
+// irrelevant. shouldAdvanceTime keeps async flows alive.
+
+const MARKET_HOURS_NOW = new Date('2026-10-12T04:30:00Z') // Mon 10:00 IST
+
+beforeAll(() => {
+  vi.useFakeTimers({ now: MARKET_HOURS_NOW, shouldAdvanceTime: true })
+})
+afterAll(() => {
+  vi.useRealTimers()
+})
 
 // ─── Shared fixtures ──────────────────────────────────────────────────────────
 

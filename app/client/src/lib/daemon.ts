@@ -12,7 +12,8 @@
  *        USER_STATE_UPDATE, BOT_LOG message types — see app/core/API.md)
  */
 
-const DAEMON_USER_ID = 'default_user'
+const DAEMON_USER_ID =
+  (import.meta.env.VITE_DAEMON_USER_ID as string | undefined) ?? 'default_user'
 
 export function daemonBaseUrl(): string {
   const env = import.meta.env as Record<string, string | undefined>
