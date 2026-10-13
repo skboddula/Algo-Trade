@@ -437,7 +437,12 @@ function DashboardShell({
   const renderPage = () => {
     switch (activeItem) {
       case 'broker-accounts':
-        return <BrokerAccountsPage />
+        return (
+          <BrokerAccountsPage
+            daemonMode={daemonAvailable ?? undefined}
+            daemonHasToken={daemonBot.hasToken ?? undefined}
+          />
+        )
       case 'profile':
         return <ProfilePage />
       case 'live-trades':

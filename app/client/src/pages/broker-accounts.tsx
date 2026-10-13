@@ -7,10 +7,10 @@ import {
   ChevronRight,
   Copy,
   FlaskConical,
-  Link2,
   Link2Off,
   Loader2,
   Pencil,
+  Link2,
   Plus,
   RefreshCw,
   ShoppingCart,
@@ -978,7 +978,16 @@ function AddAccountPanel({
 }
 
 // ─── Page ─────────────────────────────────────────────────────────
-export function BrokerAccountsPage() {
+export function BrokerAccountsPage({
+  daemonMode,
+  daemonHasToken,
+}: {
+  /** In daemon mode the WORKING broker token lives on the daemon — this
+   *  device's localStorage list is not the authority on whether trading
+   *  can execute. */
+  daemonMode?: boolean
+  daemonHasToken?: boolean
+}) {
   const [accounts, setAccounts] = useState<BrokerAccount[]>(() => getAccounts())
   const [showAddPanel, setShowAddPanel] = useState(false)
   const [editingAccount, setEditingAccount] = useState<BrokerAccount | null>(
@@ -1035,6 +1044,10 @@ export function BrokerAccountsPage() {
 
   const showPanel = showAddPanel || editingAccount !== null
   const isEmpty = accounts.length === 0
+  // The daemon holds the working token even when THIS device's localStorage
+  // is empty (OAuth connected from another device). The empty state must
+  // not claim trading is impossible in that case.
+  const daemonActive = Boolean(daemonMode && daemonHasToken)
 
   return (
     <div className="flex flex-col gap-5 p-6 min-w-0">
@@ -1066,29 +1079,51 @@ export function BrokerAccountsPage() {
         />
       )}
 
-      {isEmpty && !showPanel ? (
-        <Card>
-          <CardContent className="pt-5">
-            <div className="flex flex-col items-center gap-3 py-10 text-center">
-              <div className="flex items-center justify-center w-12 h-12 rounded-full bg-muted">
-                <Link2Off size={20} className="text-muted-foreground" />
-              </div>
-              <div>
-                <p className="text-sm font-medium text-foreground">
-                  No accounts connected
-                </p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Add a broker account to start trading and accessing market
-                  data
-                </p>
-              </div>
-              <Button size="sm" onClick={() => setShowAddPanel(true)}>
-                <Plus size={14} />
-                Add Account
-              </Button>
+      {daemonActive && (
+        <Card className="border-success/30 bg-success/5">
+          <CardContent className="pt-4 flex items-start gap-3">
+            <div className="flex items-center justify-center w-10 h-10 rounded-full bg-success/15 shrink-0">
+              <Link2 size={18} className="text-success" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-foreground">
+                Broker token active on the daemon
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                The daemon executes trades and holds the working credentials —
+                connected devices don't need their own token. Connect here to
+                re-authenticate (pushes the fresh token to the daemon).
+              </p>
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {isEmpty && !showPanel ? (
+        daemonActive ? null : (
+          <Card>
+            <CardContent className="pt-5">
+              <div className="flex flex-col items-center gap-3 py-10 text-center">
+                <div className="flex items-center justify-center w-12 h-12 rounded-full bg-muted">
+                  <Link2Off size={20} className="text-muted-foreground" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-foreground">
+                    No accounts connected
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Add a broker account to start trading and accessing market
+                    data
+                  </p>
+                </div>
+                <Button size="sm" onClick={() => setShowAddPanel(true)}>
+                  <Plus size={14} />
+                  Add Account
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )
       ) : (
         !isEmpty && (
           <div className="flex flex-col gap-3 max-w-2xl">
