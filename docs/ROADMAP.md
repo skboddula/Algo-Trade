@@ -36,11 +36,14 @@ identity, authorization, deployment, and the platform decision itself.
 
 ## Phase 2 — Cloud deployment
 
-- Target: **OCI ap-hyderabad-1 (confirmed — the account's home region)**:
+- Target: **OCI ap-mumbai-1 (chosen — trading-loop priority)**:
   always-free ARM A1 up to 4 OCPU/24GB (or 2× x86 micro fallback) ·
-  ~5–15ms to Upstox · 200GB block storage · Object Storage 10GB for
-  nightly backups · reserved public IP (SEBI whitelisting asset) —
-  better latency than the laptop and capacity odds better than Mumbai
+  ~2–5ms daemon→Upstox (the engine's critical path: entries, exits,
+  SL triggers) vs ~10–15ms from Hyderabad · 200GB block storage ·
+  Object Storage 10GB for nightly backups · reserved public IP
+  (SEBI whitelisting asset).
+  Accepted trade-offs: operator dashboard ~29ms (immaterial), ARM
+  capacity contention at signup (retry; x86 micro as fallback)
 - Daemon as a systemd system service; dashboard = production build behind
   Caddy/nginx (TLS)
 - Access model (decide at deploy): Tailscale-on-VM (private, minimal) or
