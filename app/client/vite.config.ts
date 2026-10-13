@@ -68,6 +68,17 @@ export default defineConfig(({ mode }) => {
       // 127.0.0.1:5173; binding only ::1 (the default) makes the proxy 502.
       host: '127.0.0.1',
       port: 5173,
+      // Same-origin proxy: devices on the tailnet (phone/tablet) reach the
+      // dashboard via Tailscale serve → this vite server, and the daemon
+      // API is forwarded here — the daemon itself stays bound to
+      // 127.0.0.1 (fail-closed, CR-05). Without this, remote browsers
+      // probe localhost:3000 (their own device) and fall back to
+      // browser mode.
+      proxy: {
+        '/api': { target: 'http://127.0.0.1:3000', changeOrigin: true },
+        '/health': { target: 'http://127.0.0.1:3000', changeOrigin: true },
+        '/ws': { target: 'ws://127.0.0.1:3000', ws: true, changeOrigin: true },
+      },
     },
     resolve: {
       alias: {

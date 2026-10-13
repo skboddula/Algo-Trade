@@ -25,12 +25,15 @@ export function daemonUserId(): string {
   return id
 }
 
+/** Base URL for daemon API calls. Empty string = SAME-ORIGIN: requests go
+ *  to the page's own host (the vite dev server proxies /api, /health and
+ *  /ws to the daemon), so tailnet devices (phone/tablet) reach the daemon
+ *  through the same origin instead of probing their own localhost.
+ *  Set VITE_DAEMON_URL to override for a direct-connection deployment. */
 export function daemonBaseUrl(): string {
   const env = import.meta.env as Record<string, string | undefined>
   if (env.VITE_DAEMON_URL) return env.VITE_DAEMON_URL
-  const host = env.VITE_DAEMON_HOST ?? 'localhost'
-  const port = env.VITE_DAEMON_PORT ?? '3000'
-  return `http://${host}:${port}`
+  return '' // same-origin — the dev/proxy layer forwards to the daemon
 }
 
 /** Shared secret for the daemon API (set in the daemon's .env and mirrored
@@ -44,8 +47,16 @@ export function daemonApiKey(): string | undefined {
 }
 
 export function daemonWsUrl(userId = daemonUserId(), ticket?: string): string {
-  const http = daemonBaseUrl()
-  const wsBase = http.replace(/^http/, 'ws')
+  // Same-origin WebSocket: derive from the page location so tailnet
+  // devices connect through the vite ws proxy (wss under Tailscale HTTPS).
+  const env = import.meta.env as Record<string, string | undefined>
+  let wsBase: string
+  if (env.VITE_DAEMON_URL) {
+    wsBase = env.VITE_DAEMON_URL.replace(/^http/, 'ws')
+  } else {
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    wsBase = `${proto}://${window.location.host}`
+  }
   const auth = ticket ? `&ticket=${encodeURIComponent(ticket)}` : ''
   return `${wsBase}/ws?userId=${encodeURIComponent(userId)}${auth}`
 }
