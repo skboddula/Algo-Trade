@@ -176,15 +176,22 @@ export function useDaemonBot(_token: string | null) {
   // ── Initial logs + WS live stream ────────────────────────────────────────
   useEffect(() => {
     let cancelled = false
-    void fetchDaemonLogs()
-      .then((res) => {
-        if (!cancelled) setLogs(res.logs.slice(-MAX_LOGS))
-      })
-      .catch(() => {
-        /* daemon may be down; polling will surface it */
-      })
+    const pull = () => {
+      void fetchDaemonLogs()
+        .then((res) => {
+          if (!cancelled) setLogs(res.logs.slice(-MAX_LOGS))
+        })
+        .catch(() => {
+          /* daemon may be down; polling will surface it */
+        })
+    }
+    pull()
+    // Refresh periodically — the WS BOT_LOG stream covers live flow, but a
+    // dropped socket or missed message would otherwise freeze the panel.
+    const interval = setInterval(pull, 30_000)
     return () => {
       cancelled = true
+      clearInterval(interval)
     }
   }, [])
 
