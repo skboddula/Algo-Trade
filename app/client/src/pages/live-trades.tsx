@@ -1081,7 +1081,9 @@ export function LiveTradesPage() {
   }, [])
 
   // ── Daemon mode: the always-on daemon is the bot; render its state ──────
-  const [daemonMode, setDaemonMode] = useState(false)
+  // null = probe pending — the backend must be known before any ledger
+  // fetch, otherwise the D1 legacy balance flashes before the daemon's.
+  const [daemonMode, setDaemonMode] = useState<boolean | null>(null)
   const [daemonSummary, setDaemonSummary] =
     useState<PaperAccountSummary | null>(null)
 
@@ -1179,6 +1181,7 @@ export function LiveTradesPage() {
   }
 
   async function load(m: TradeMode) {
+    if (daemonMode === null) return // probe pending — no ledger fetch yet
     if (daemonMode && m === 'paper') {
       await loadDaemon()
       return
@@ -1414,14 +1417,14 @@ export function LiveTradesPage() {
           )}
 
           {/* Equity Curve — shows cumulative P&L over time */}
-          {mode === 'paper' && (
+          {mode === 'paper' && daemonMode !== null && (
             <EquityCurveChart
               summaryOverride={daemonMode ? daemonSummary : undefined}
             />
           )}
 
           {/* Loading skeleton */}
-          {loading && !dataset && (
+          {(loading || daemonMode === null) && !dataset && (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
               {[0, 1, 2, 3].map((i) => (
                 <Card key={i} className="animate-pulse [animation-duration:3s]">
