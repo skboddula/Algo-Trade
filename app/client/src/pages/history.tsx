@@ -160,7 +160,14 @@ export function HistoryPage({
       daemonBalance ?? null,
       daemonUserId,
     )
-  }, [daemonMode, d1Data, daemonStatements, daemonTrades, daemonBalance])
+  }, [
+    daemonMode,
+    d1Data,
+    daemonStatements,
+    daemonTrades,
+    daemonBalance,
+    daemonUserId,
+  ])
 
   const recentTrades = data?.trades ?? []
   const openTrades = data?.openTrades ?? []

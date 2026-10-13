@@ -16,7 +16,7 @@
  *  NOT a silent default: the old 'default_user' fallback once pointed at an
  *  archived user, making a UI "start" click able to resume a second bot. */
 export function daemonUserId(): string {
-  const id = import.meta.env.VITE_DAEMON_USER_ID
+  const id: unknown = import.meta.env.VITE_DAEMON_USER_ID
   if (typeof id !== 'string' || id.length === 0) {
     throw new Error(
       'VITE_DAEMON_USER_ID is not set — the daemon user must be explicit',

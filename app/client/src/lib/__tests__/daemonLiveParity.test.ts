@@ -126,7 +126,7 @@ describe.skipIf(!daemonReachable || !DAEMON_USER_ID)(
         try {
           const res = await fetchWithTimeout(
             `${DAEMON_URL}/api/bot/status?userId=${encodeURIComponent(
-              DAEMON_USER_ID as string,
+              DAEMON_USER_ID!,
             )}`,
             { headers: daemonHeaders() },
             3000,
