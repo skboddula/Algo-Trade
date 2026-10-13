@@ -104,11 +104,15 @@ export function useDaemonBot(_token: string | null) {
   // The daemon's own merged config — the values it actually trades with.
   const [daemonConfig, setDaemonConfig] =
     useState<Partial<StrategyConfig> | null>(null)
+  // Whether the DAEMON holds a working broker token (display-only — the
+  // token itself never leaves the daemon; devices don't need their own).
+  const [hasToken, setHasToken] = useState<boolean | null>(null)
 
   // ── REST polling (authority when WS is unavailable) ──────────────────────
   const refresh = useCallback(async () => {
     try {
       const res = await fetchDaemonStatus()
+      setHasToken(Boolean((res as { hasToken?: boolean }).hasToken))
       const user = (res.userState ?? {}) as unknown as DaemonUserState
       setState(user.state ?? 'IDLE')
       setPositions(user.positions ?? {})
@@ -346,6 +350,7 @@ export function useDaemonBot(_token: string | null) {
     position,
     positions: fullPositions,
     config: daemonConfig,
+    hasToken,
     indicators,
     symbolIndicators,
     vrdData,

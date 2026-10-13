@@ -59,6 +59,9 @@ export interface BotStatus {
    *  Display surfaces (backtests, threshold markers) must prefer this over
    *  getStrategyConfig() so they can never drift from what trades. */
   config?: Partial<StrategyConfig> | null
+  /** Whether the ACTIVE runtime holds a working broker token — the daemon's
+   *  in daemon mode (display-only boolean), localStorage in fallback mode. */
+  hasToken?: boolean | null
   logs: BotLog[]
   sourceStatus: Record<string, SourceStatus>
   globalIndices: GlobalIndexItem[] | null

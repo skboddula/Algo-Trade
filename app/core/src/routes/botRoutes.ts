@@ -184,6 +184,8 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
       paperTrades,
       recovery: tenantManager.getRecoveryStatus(),
       persistenceFault: tenantManager.getPersistenceFault(),
+      // Boolean only — the token itself never leaves the daemon.
+      hasToken: Boolean(masterIngestor.getPrimaryToken()),
     });
   });
 

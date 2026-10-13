@@ -11,6 +11,7 @@ import { UNDERLYING_INSTRUMENT_KEYS } from '@/lib/types'
 import { computeAllIndicators } from '@/lib/indicators'
 import { runHardStopChecks, getFinalSignal } from '@/lib/strategyEngine'
 import { getStrategyConfig } from '@/lib/strategyConfig'
+import { getAccounts } from '@/lib/accounts'
 import { appendTick } from '@/lib/tickLog'
 import type { SourceStatus, BotLog } from '@/lib/marketService'
 import {
@@ -1227,6 +1228,7 @@ export function useStrategyBot(token: string | null) {
     ...status,
     // BotStatus contract: the browser bot trades with the localStorage copy.
     config: getStrategyConfig(),
+    hasToken: Boolean(getAccounts().find((a) => a.accessToken)),
     liveArmed,
     start,
     stop,
