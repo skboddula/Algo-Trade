@@ -89,6 +89,12 @@ export class MasterIngestionEngine extends EventEmitter {
   }
 
   public setToken(token: string) {
+    // Same-token pushes (dashboard re-probes after restarts) must not
+    // tear down a healthy authenticated stream — only a real CHANGE does.
+    if (token && token === this.config.primaryUpstoxToken) {
+      this.sentimentIngestor.setToken(token);
+      return;
+    }
     this.config.primaryUpstoxToken = token;
     this.sentimentIngestor.setToken(token);
     // Persist so daemon restarts keep the freshest token (the static .env
@@ -515,8 +521,12 @@ export class MasterIngestionEngine extends EventEmitter {
     if (
       cached &&
       Date.now() - cached.fetchedMs < MasterIngestionEngine.EXPIRY_TTL_MS &&
-      cached.expiry >= today
+      cached.expiry > today
     ) {
+      // Strictly future: an expiry-day (0-DTE) contract must never be
+      // traded by this engine — its premium assumptions (SL/TP percentages,
+      // avg premium) assume multi-day weeklies, and 0-DTE gamma/theta make
+      // the risk layers tick-dominated.
       return cached.expiry;
     }
     if (cached) {
@@ -535,7 +545,9 @@ export class MasterIngestionEngine extends EventEmitter {
           .map((item) => item.expiry)
           .filter(
             (value): value is string =>
-              typeof value === "string" && value >= today,
+              // Strictly future — skip the expiry-day contract (0-DTE) and
+              // resolve to the next listed expiry instead.
+              typeof value === "string" && value > today,
           ),
       ),
     ].sort();
