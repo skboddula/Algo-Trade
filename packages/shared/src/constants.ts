@@ -49,6 +49,7 @@ export const DEFAULT_STRATEGY_CONFIG = {
   trailPct: 5,
   maxTradesPerDay: 5,
   lastEntryTime: "15:15",
+  squareOffTime: "15:35",
   /** 5-min EMA 10/42 confluence gate (browser default: enabled). */
   useMultiTimeframe: true,
   pollingIntervalSec: 2,

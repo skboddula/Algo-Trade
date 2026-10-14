@@ -36,10 +36,12 @@ export function getIndiaTime(date: Date = new Date()): IndiaTimeInfo {
   // Market days are Monday (1) to Friday (5)
   const isMarketDay = dayOfWeek >= 1 && dayOfWeek <= 5
 
-  // Market hours are 09:15 to 15:30 IST
+  // Market hours are 09:15 to 15:40 IST — the equity-derivatives segment
+  // close was extended to 15:40 (NSE Closing Auction Session alignment,
+  // per nseindia.com: "Equity Derivatives Segment: 9:15 am to 3:40 pm")
   const currentMinutesFromMidnight = hour * 60 + minute
   const marketOpenMinutes = 9 * 60 + 15 // 09:15
-  const marketCloseMinutes = 15 * 60 + 30 // 15:30
+  const marketCloseMinutes = 15 * 60 + 40 // 15:40
   const isMarketHours =
     isMarketDay &&
     currentMinutesFromMidnight >= marketOpenMinutes &&

@@ -12,12 +12,16 @@ describe('IST Time Utilities Suite', () => {
     expect(ist.isMarketHours).toBe(true)
   })
 
-  it('detects market hours between 09:15 and 15:30 IST on weekdays', () => {
+  it('detects market hours between 09:15 and 15:40 IST on weekdays', () => {
     // 08:00 UTC = 13:30 IST (Mid-day trading) on Friday
     const midDay = new Date('2026-08-14T08:00:00.000Z')
     expect(isMarketOpen(midDay)).toBe(true)
 
-    // 10:15 UTC = 15:45 IST (After market close)
+    // 10:05 UTC = 15:35 IST (Inside the extended derivatives session)
+    const extended = new Date('2026-08-14T10:05:00.000Z')
+    expect(isMarketOpen(extended)).toBe(true)
+
+    // 10:15 UTC = 15:45 IST (After the 15:40 derivatives close)
     const afterClose = new Date('2026-08-14T10:15:00.000Z')
     expect(isMarketOpen(afterClose)).toBe(false)
   })

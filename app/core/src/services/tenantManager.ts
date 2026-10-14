@@ -882,8 +882,14 @@ export class TenantManager extends EventEmitter {
         user.tradesCountPerSymbol = {};
       }
 
-      const afterCutoff = istInfo.isAfterCutoff(
+      // Two independent cutoffs: entries close at lastEntryTime; open
+      // positions are squared off at squareOffTime (later — aligned with
+      // the NSE 15:40 derivatives close).
+      const afterEntryCutoff = istInfo.isAfterCutoff(
         user.config.lastEntryTime || "15:15",
+      );
+      const afterSquareOff = istInfo.isAfterCutoff(
+        user.config.squareOffTime || "15:35",
       );
 
       // ── Market-hours guard (NSE: Mon–Fri, 09:15–15:30 IST) ─────────────
@@ -962,18 +968,20 @@ export class TenantManager extends EventEmitter {
           position.unrealizedPnl =
             Math.round(pnlPerUnit * position.quantity * 100) / 100;
 
-          // Check EOD auto square-off
-          if (afterCutoff) {
+          // Check EOD auto square-off (at squareOffTime — independent of
+          // the entry cutoff)
+          if (afterSquareOff) {
+            const squareOffLabel = user.config.squareOffTime || "15:35";
             this.log(
               "info",
               "eod",
-              `[${symbol}] 15:15 cutoff reached — squaring off open position`,
+              `[${symbol}] ${squareOffLabel} square-off reached — squaring off open position`,
               userId,
             );
             await this.manualExit(
               userId,
               symbol,
-              "15:15 EOD Cutoff Square-off",
+              `EOD Square-off (${squareOffLabel})`,
             );
             continue;
           }
@@ -1014,7 +1022,7 @@ export class TenantManager extends EventEmitter {
         // symbol; the position check above is the per-symbol duplicate guard).
         const entriesEnabled =
           user.state === "RUNNING" || user.state === "ORDERED";
-        if (!position && entriesEnabled && !afterCutoff) {
+        if (!position && entriesEnabled && !afterEntryCutoff) {
           // CR-06 (entry-path gate): a critical state write failure means the
           // daemon's persisted state no longer matches reality. BLOCK live
           // entries immediately — every new position would be invisible to a
@@ -1221,8 +1229,9 @@ export class TenantManager extends EventEmitter {
         }
       }
 
-      // After all symbols processed: check daily summary (after EOD, no positions)
-      if (afterCutoff) {
+      // After all symbols processed: check daily summary (after the
+      // square-off cutoff, no positions)
+      if (afterSquareOff) {
         this.checkDailySummary(user, istInfo);
       }
     }
