@@ -1,21 +1,31 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { mkdtempSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { buildServer } from "../server";
 
 describe("Fastify Bot Routes & API Suite", () => {
   let server: ReturnType<typeof buildServer>;
 
+  let prevDataDirRoutes: string | undefined;
   beforeAll(async () => {
     // Route-behavior suite: build with auth disabled (server.ts loads .env
     // at module scope, which now carries a real DAEMON_API_KEY). Enforcement
     // has its own suite below.
     delete process.env.DAEMON_API_KEY;
+    // ISOLATED store: never touch the real daemon.sqlite3 (the live daemon
+    // holds it — WAL collisions surface as "disk I/O error").
+    prevDataDirRoutes = process.env.DATA_DIR;
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "botroutes-routes-"));
     server = buildServer({ mockMode: true });
     await server.app.ready();
     await server.masterIngestor.fetchAndComputeMarketData();
   });
 
   afterAll(async () => {
-    await server.app.close();
+    await server?.app?.close();
+    if (prevDataDirRoutes === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prevDataDirRoutes;
   });
 
   it("GET /health returns healthy status and memory usage", async () => {
@@ -141,6 +151,18 @@ describe("Fastify Bot Routes & API Suite", () => {
 // ─── API key enforcement ─────────────────────────────────────────────────────
 
 describe("Daemon API key enforcement", () => {
+  // Isolate the store: without this the suite reads/opens the REAL
+  // daemon.sqlite3 — while the live daemon holds it — and WAL write
+  // collisions surface as "disk I/O error".
+  const prevDataDirAuth = process.env.DATA_DIR;
+  beforeEach(() => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "botroutes-auth-"));
+  });
+  afterEach(() => {
+    if (prevDataDirAuth === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prevDataDirAuth;
+  });
+
   it("rejects /api/* without the x-api-key header when DAEMON_API_KEY is set", async () => {
     process.env.DAEMON_API_KEY = "test-secret-key";
     const guarded = buildServer({ mockMode: true });
@@ -189,8 +211,11 @@ describe("Daemon API key enforcement", () => {
     await guarded.app.close();
     delete process.env.DAEMON_API_KEY;
   });
+  // (a failure above skips the delete — the afterEach-style cleanup below
+  // guards the next test from the leaked key)
 
   it("is inert when DAEMON_API_KEY is unset (loopback-only mode)", async () => {
+    delete process.env.DAEMON_API_KEY; // defensive: a prior failure may leak it
     const open = buildServer({ mockMode: true });
     await open.app.ready();
     const res = await open.app.inject({
@@ -266,4 +291,6 @@ describe("WS INITIAL_STATE must not leak the Upstox token", () => {
     await guarded.app.close();
     delete process.env.DAEMON_API_KEY;
   });
+  // (a failure above skips the delete — the afterEach-style cleanup below
+  // guards the next test from the leaked key)
 });

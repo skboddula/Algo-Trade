@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from "vitest";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -408,6 +408,197 @@ describe("account adjust — manual capital adjustment", () => {
     expect(() =>
       gateway.adjustPaperAccount("neg_user", -999_999_999, "adjust"),
     ).toThrowError(/below zero/i);
+  });
+})
+
+// ─── Breadth entry gate (the churn fix — the mirror of the breadth exits) ──
+
+describe("breadth entry gate", () => {
+  const prevDataDirBg = process.env.DATA_DIR;
+  afterEach(() => {
+    if (prevDataDirBg === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prevDataDirBg;
+  });
+
+  // Freeze the clock to market hours — the tick loop's market-hours guard
+  // blocks ALL entries off-hours, which would make even the "allows" tests
+  // fail and the "blocks" tests pass for the wrong reason.
+  const BG_MARKET_HOURS_NOW = new Date("2026-10-12T04:30:00Z"); // Mon 10:00 IST
+  beforeAll(() => {
+    vi.useFakeTimers({ now: BG_MARKET_HOURS_NOW, shouldAdvanceTime: true });
+  });
+  afterAll(() => {
+    vi.useRealTimers();
+  });
+
+  it("blocks a PE entry when the breadth ratio already contradicts it (> 1.5)", async () => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "bg-pe-"));
+    const { manager, gateway } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "t_bg_pe",
+      filledPrice: 100,
+      quantity: 60,
+    });
+    manager.startBot("bg_pe_user", "paper");
+    const user = manager.getOrCreateUser("bg_pe_user");
+    // Inject a bearish signal on a position-less symbol, with bullish breadth
+    const fakeSnapshot: any = {
+      timestamp: new Date().toISOString(),
+      underlyingSymbol: "FINNIFTY",
+      spotPrice: 25000,
+      candles: [],
+      optionChain: [],
+      indicators: null,
+      sources: {},
+      signal: { signal: "BUY_PE", confidence: "moderate", positionSize: "half", v3: "hold", v4: "Sell", bullScore: 2, bearScore: 12, scoreMax: 40 },
+      vrdData: {
+        mmi: null, fiiLongShort: null, fiiPositioning: null, pcr: null,
+        straddleIv: null, niftyPe: null, vix: null, giftNifty: null,
+        diiNetCashCr: null,
+        advancesDeclines: { advances: 30, declines: 10, ratio: 3.0, label: null },
+        supportWall: null, resistanceWall: null, maxPain: null,
+        newsAlerts: [], fetchedAt: new Date().toISOString(),
+      },
+      globalIndices: [],
+    };
+    const fakeTick: any = { snapshots: { FINNIFTY: fakeSnapshot } };
+    (manager as any).handleMarketTick(fakeTick, "bg_pe_user");
+    // The gate must have blocked — no position, no ledger entry
+    const pos = user.positions["FINNIFTY"];
+    expect(pos).toBeNull();
+    expect(gateway.getPaperTrades("bg_pe_user").length).toBe(0);
+  });
+
+  it("blocks a CE entry when the breadth ratio already contradicts it (< 0.8)", async () => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "bg-ce-"));
+    const { manager, gateway } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "t_bg_ce",
+      filledPrice: 100,
+      quantity: 60,
+    });
+    manager.startBot("bg_ce_user", "paper");
+    const user = manager.getOrCreateUser("bg_ce_user");
+    const fakeSnapshot: any = {
+      timestamp: new Date().toISOString(),
+      underlyingSymbol: "FINNIFTY",
+      spotPrice: 25000,
+      candles: [],
+      optionChain: [],
+      indicators: null,
+      sources: {},
+      signal: { signal: "BUY_CE", confidence: "moderate", positionSize: "half", v3: "hold", v4: "Buy", bullScore: 12, bearScore: 2, scoreMax: 40 },
+      vrdData: {
+        mmi: null, fiiLongShort: null, fiiPositioning: null, pcr: null,
+        straddleIv: null, niftyPe: null, vix: null, giftNifty: null,
+        diiNetCashCr: null,
+        advancesDeclines: { advances: 5, declines: 40, ratio: 0.125, label: null },
+        supportWall: null, resistanceWall: null, maxPain: null,
+        newsAlerts: [], fetchedAt: new Date().toISOString(),
+      },
+      globalIndices: [],
+    };
+    const fakeTick: any = { snapshots: { FINNIFTY: fakeSnapshot } };
+    (manager as any).handleMarketTick(fakeTick, "bg_ce_user");
+    expect(user.positions["FINNIFTY"]).toBeNull();
+    expect(gateway.getPaperTrades("bg_ce_user").length).toBe(0);
+  });
+
+  it("allows a PE entry when the breadth agrees (ratio <= 1.5)", async () => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "bg-pe-ok-"));
+    const { manager } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "t_bg_pe_ok",
+      filledPrice: 100,
+      quantity: 60,
+    });
+    manager.startBot("bg_pe_ok", "paper");
+    const user = manager.getOrCreateUser("bg_pe_ok");
+    const fakeSnapshot: any = {
+      timestamp: new Date().toISOString(),
+      underlyingSymbol: "FINNIFTY",
+      spotPrice: 25000,
+      candles: [],
+      optionChain: [{
+        strike_price: 24900,
+        expiry: "2026-10-27",
+        underlying_key: "NSE_INDEX|Fin Nifty",
+        underlying_spot_price: 25000,
+        call_options: {
+          instrument_key: "NSE_FO|TEST_CE",
+          market_data: { ltp: 200, volume: 0, oi: 0, close_price: 200, bid_price: 200, ask_price: 200, prev_oi: 0 },
+          option_greeks: { vega: 0, theta: 0, gamma: 0, delta: 0, iv: 0, pop: 0 },
+        },
+        put_options: {
+          instrument_key: "NSE_FO|TEST_PE",
+          market_data: { ltp: 150, volume: 0, oi: 0, close_price: 150, bid_price: 150, ask_price: 150, prev_oi: 0 },
+          option_greeks: { vega: 0, theta: 0, gamma: 0, delta: 0, iv: 0, pop: 0 },
+        },
+      }],
+      indicators: null,
+      sources: {},
+      signal: { signal: "BUY_PE", confidence: "moderate", positionSize: "half", v3: "hold", v4: "Sell", bullScore: 2, bearScore: 12, scoreMax: 40 },
+      vrdData: {
+        mmi: null, fiiLongShort: null, fiiPositioning: null, pcr: null,
+        straddleIv: null, niftyPe: null, vix: null, giftNifty: null,
+        diiNetCashCr: null,
+        advancesDeclines: { advances: 15, declines: 30, ratio: 0.5, label: null },
+        supportWall: null, resistanceWall: null, maxPain: null,
+        newsAlerts: [], fetchedAt: new Date().toISOString(),
+      },
+      globalIndices: [],
+    };
+    const fakeTick: any = { snapshots: { FINNIFTY: fakeSnapshot } };
+    await (manager as any).handleMarketTick(fakeTick, "bg_pe_ok");
+    // The gate is open — the (scripted) gateway fills, the position exists
+    expect(user.positions["FINNIFTY"]).not.toBeNull();
+  });
+
+  it("leaves the gate OPEN when the breadth data is missing (consistent with the exits)", async () => {
+    process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "bg-null-"));
+    const { manager } = makeHarness({
+      success: true,
+      status: "filled",
+      tradeId: "t_bg_null",
+      filledPrice: 100,
+      quantity: 60,
+    });
+    manager.startBot("bg_null_user", "paper");
+    const user = manager.getOrCreateUser("bg_null_user");
+    const fakeSnapshot: any = {
+      timestamp: new Date().toISOString(),
+      underlyingSymbol: "FINNIFTY",
+      spotPrice: 25000,
+      candles: [],
+      optionChain: [{
+        strike_price: 24900,
+        expiry: "2026-10-27",
+        underlying_key: "NSE_INDEX|Fin Nifty",
+        underlying_spot_price: 25000,
+        call_options: {
+          instrument_key: "NSE_FO|TEST_CE",
+          market_data: { ltp: 200, volume: 0, oi: 0, close_price: 200, bid_price: 200, ask_price: 200, prev_oi: 0 },
+          option_greeks: { vega: 0, theta: 0, gamma: 0, delta: 0, iv: 0, pop: 0 },
+        },
+        put_options: {
+          instrument_key: "NSE_FO|TEST_PE",
+          market_data: { ltp: 150, volume: 0, oi: 0, close_price: 150, bid_price: 150, ask_price: 150, prev_oi: 0 },
+          option_greeks: { vega: 0, theta: 0, gamma: 0, delta: 0, iv: 0, pop: 0 },
+        },
+      }],
+      indicators: null,
+      sources: {},
+      signal: { signal: "BUY_PE", confidence: "moderate", positionSize: "half", v3: "hold", v4: "Sell", bullScore: 2, bearScore: 12, scoreMax: 40 },
+      vrdData: null,
+      globalIndices: [],
+    };
+    const fakeTick: any = { snapshots: { FINNIFTY: fakeSnapshot } };
+    await (manager as any).handleMarketTick(fakeTick, "bg_null_user");
+    // No breadth data — the gate is open, the fill goes through
+    expect(user.positions["FINNIFTY"]).not.toBeNull();
   });
 })
 

@@ -1086,6 +1086,30 @@ export class TenantManager extends EventEmitter {
             }
             this.trackSignalChange(symbol, signal.signal, signal.confidence);
             const direction = signal.signal === "BUY_CE" ? "CE" : "PE";
+
+            // ── Breadth entry gate (the mirror of the breadth exits) ──────
+            // The breadth exits fire when the breadth contradicts the held
+            // direction (a CE exits at ratio < 0.8, a PE at > 1.5). Entering
+            // INTO an already-contradicted breadth churns: the exit fires
+            // within seconds (the Day 1-2 evidence: 6+ instant breadth-exit
+            // losses). The gate uses the same VRD data the exits use; the
+            // missing breadth leaves the gate open (consistent with the
+            // exits, which also need the ratio).
+            const breadthRatio =
+              snapshot.vrdData?.advancesDeclines?.ratio ?? null;
+            if (breadthRatio !== null) {
+              const breadthBlocked =
+                (direction === "CE" && breadthRatio < 0.8) ||
+                (direction === "PE" && breadthRatio > 1.5);
+              if (breadthBlocked) {
+                this.log(
+                  "warn",
+                  "breadth-gate",
+                  `[${symbol}] ${direction} entry BLOCKED — breadth ratio ${breadthRatio.toFixed(2)} contradicts the direction (CE needs ≥ 0.8, PE ≤ 1.5)`,
+                );
+                continue;
+              }
+            }
             const optionChain = snapshot.optionChain || [];
             const otmRow = getOtmStrike(
               optionChain,
