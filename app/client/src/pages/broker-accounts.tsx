@@ -1079,25 +1079,7 @@ export function BrokerAccountsPage({
         />
       )}
 
-      {daemonActive && (
-        <Card className="border-success/30 bg-success/5">
-          <CardContent className="pt-4 flex items-start gap-3">
-            <div className="flex items-center justify-center w-10 h-10 rounded-full bg-success/15 shrink-0">
-              <Link2 size={18} className="text-success" />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-foreground">
-                Broker token active on the daemon
-              </p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                The daemon executes trades and holds the working credentials —
-                connected devices don't need their own token. Connect here to
-                re-authenticate (pushes the fresh token to the daemon).
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+
 
       {isEmpty && !showPanel ? (
         daemonActive ? null : (
