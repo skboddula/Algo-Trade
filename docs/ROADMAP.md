@@ -100,6 +100,15 @@ identity, authorization, deployment, and the platform decision itself.
    Track whether this asymmetry holds across the 2 weeks.
 3. **0-DTE trades (Oct 13, 3 trades)** — eliminated by the expiry-day skip
    (fixed Oct 13); verify no 0-DTE recurs on NIFTY expiry days.
+4. **WS-first market data (the REST poll → fallback)** — the spot quotes
+   are the only live data still REST-polled (0.5/sec batched). The WS
+   stream's ltpc mode covers any instrument key: subscribe the 3 index
+   spot quotes → tick-level prices stream → the REST quote poll drops to
+   a 30–60s fallback (the API pressure ~10x down: 0.5/sec → 0.05/sec).
+   Matters at the multi-tenant scale (the per-token API budget is
+   shared across tenants); the chains/candles/breadth keep their REST
+   cadences (snapshot-shaped). The VIX is already dual-sourced (WS live
+   + REST 60s) — the model to follow.
 
 ## Non-code gates
 
