@@ -10,9 +10,19 @@
    Never caches /api/* (live data must always hit the network). */
 
 const CACHE_NAME = 'algo-trade-v2'
-const IS_DEV_ORIGIN = ['localhost', '127.0.0.1'].includes(
-  self.location.hostname,
-)
+const hostname = self.location.hostname
+
+// Dev origins: the vite DEV server is accessed through several hostnames —
+// localhost (direct), the Tailscale tailnet hostname (cachyos.*.ts.net),
+// and the LAN hostname/mDNS. On ALL of them this worker must bypass
+// itself: vite dev modules are unhashed and change on every edit — a
+// cache-first worker would pin the browser to stale modules (the
+// "missing x-api-key" class: an old cached daemon.ts against today's
+// daemon). Only the PRODUCTION PWA origin (Cloudflare) should cache.
+const IS_DEV_ORIGIN =
+  ['localhost', '127.0.0.1', 'cachyos'].includes(hostname) ||
+  hostname.endsWith('.ts.net') ||
+  hostname.endsWith('.local')
 
 self.addEventListener('install', (event) => {
   if (IS_DEV_ORIGIN) {
