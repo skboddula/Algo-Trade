@@ -90,14 +90,12 @@ export function StrategyHeaderBar({
   onTabChange,
   logErrorCount,
   underlyingMode = 'NIFTY',
-  daemonTokenActive,
 }: {
   state: BotState
   position: ActivePosition | null
   tradesCount: number
   lastUpdated: string | null
   daemonMode?: boolean
-  daemonTokenActive?: boolean
   pollingIntervalSec: number
   start: () => void
   stop: () => void
@@ -326,18 +324,11 @@ export function StrategyHeaderBar({
         </div>
       </div>
 
-      {daemonTokenActive ? (
-        <div className="mt-2 text-xs text-success bg-success/10 border border-success/20 rounded px-2.5 py-1">
-          Broker token active on the daemon — connected device needs its own
-          token only to re-authenticate.
+      {!token && (
+        <div className="mt-2 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded px-2.5 py-1">
+          ⚠️ No active broker token — add Upstox account first to execute
+          trades.
         </div>
-      ) : (
-        !token && (
-          <div className="mt-2 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded px-2.5 py-1">
-            ⚠️ No active broker token — add Upstox account first to execute
-            trades.
-          </div>
-        )
       )}
       {state === 'STOPPED' && position && (
         <div

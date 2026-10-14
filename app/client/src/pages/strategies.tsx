@@ -102,7 +102,6 @@ export function StrategiesPage({
         logErrorCount={errorLogsCount}
         streamHealth={bot.streamHealth}
         daemonMode={daemonMode === true}
-        daemonTokenActive={bot.hasToken}
       />
 
       {/* Data feed status */}
