@@ -17,10 +17,24 @@ export function parseRetryAfterSec(response: Response): number {
   return Math.min(sec, MAX_429_WAIT_SEC)
 }
 
+// After two consecutive 429s, cool down before touching the endpoint again
+// — the fixed 2s retry synchronized with the poll cadence and hammered the
+// rate limiter into a persistent 429 lock (the quotes/VIX stale for minutes).
+let rateLimitCooldownUntil = 0
+
 export async function fetchWithRetry(
   input: string | URL,
   init?: RequestInit,
 ): Promise<Response> {
+  if (Date.now() < rateLimitCooldownUntil) {
+    // Synthetic 429 — callers treat it exactly like a real one (the data
+    // stays stale, the gates block) without hitting the rate limiter.
+    return new Response(JSON.stringify({ status: 'error', reason: 'rate-limit cooldown' }), {
+      status: 429,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+
   let res = await fetch(input, init)
 
   if (res.status === 429) {
@@ -28,6 +42,10 @@ export async function fetchWithRetry(
     console.warn(`[fetch] 429 rate-limited, retrying in ${waitSec}s...`)
     await new Promise((resolve) => setTimeout(resolve, waitSec * 1000))
     res = await fetch(input, init)
+    if (res.status === 429) {
+      rateLimitCooldownUntil = Date.now() + 15_000
+      console.warn('[fetch] 429 persists — cooling down 15s')
+    }
   }
 
   return res

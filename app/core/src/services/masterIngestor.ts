@@ -172,6 +172,43 @@ export class MasterIngestionEngine extends EventEmitter {
     // parse it as UTC and convert to IST).
     const timestamp = new Date().toISOString();
 
+    // ── Batched spot quotes: ONE market-quote/quotes call for all 3
+    // indices per tick. Per-symbol calls (3 per 2s tick = 1.5/sec) exceeded
+    // Upstox's per-API rate limit (~1/sec) and 429-locked the endpoint for
+    // minutes at a time (the quotes/VIX stale, entries gate-blocked). The
+    // endpoint natively accepts multiple instrument keys.
+    let liveQuotes: Record<string, number> | null = null;
+    if (!this.config.mockMode && this.config.primaryUpstoxToken) {
+      try {
+        const batchHeaders = {
+          Authorization: `Bearer ${this.config.primaryUpstoxToken}`,
+          Accept: "application/json",
+        };
+        const batchKeys = symbols
+          .map((s) => UNDERLYING_INSTRUMENT_KEYS[s])
+          .join(",");
+        const quoteRes = await fetchWithRetry(
+          `${this.config.upstoxApiBaseUrl}/market-quote/quotes?instrument_key=${encodeURIComponent(batchKeys)}`,
+          { headers: batchHeaders },
+        );
+        if (quoteRes.ok) {
+          const data = (await quoteRes.json()) as {
+            data?: Record<string, { last_price?: number }>;
+          };
+          liveQuotes = {};
+          for (const [k, v] of Object.entries(data?.data ?? {})) {
+            if (typeof v?.last_price === "number") {
+              // Response keys use ':' (NSE_INDEX:Nifty 50) — map back to the
+              // '|' form the UNDERLYING_INSTRUMENT_KEYS registry uses.
+              liveQuotes[k.replace(":", "|")] = v.last_price;
+            }
+          }
+        }
+      } catch {
+        // Fall through — the newest candle close fills spotPrice below
+      }
+    }
+
     for (const symbol of symbols) {
       let spotPrice = 24000;
       let candles = this.candleBuffer.get(symbol) || [];
@@ -213,26 +250,12 @@ export class MasterIngestionEngine extends EventEmitter {
           Accept: "application/json",
         };
 
-        // 1. Spot quote — every tick
-        try {
-          const quoteRes = await fetchWithRetry(
-            `${this.config.upstoxApiBaseUrl}/market-quote/quotes?instrument_key=${encodeURIComponent(instrumentKey)}`,
-            { headers },
-          );
-          if (quoteRes.ok) {
-            const data = (await quoteRes.json()) as {
-              data?: Record<string, { last_price?: number }>;
-            };
-            const quote =
-              data?.data?.[instrumentKey.replace("|", ":")] ??
-              Object.values(data?.data ?? {})[0];
-            if (typeof quote?.last_price === "number") {
-              spotPrice = quote.last_price;
-              this.lastQuoteAtMs.set(symbol, Date.now());
-            }
-          }
-        } catch {
-          // Network glitch — fall through to newest candle close below
+        // 1. Spot quote — from the BATCHED fetch above (per-symbol calls
+        //    were 429-rate-limited; see the batch note at the top)
+        const batched = liveQuotes?.[instrumentKey];
+        if (typeof batched === "number") {
+          spotPrice = batched;
+          this.lastQuoteAtMs.set(symbol, Date.now());
         }
 
         // 2. Intraday 1-minute candles — 30s cadence per symbol
