@@ -47,9 +47,13 @@ export function StrategiesPage({
     void daemonUpdateConfig(config as unknown as Record<string, unknown>)
       .then(() => undefined)
       .catch(() => undefined)
-    // daemonMode in deps: when the daemon (re)appears, the current config
-    // is pushed immediately — closes the changed-while-fallback drift.
-  }, [config, daemonMode])
+    // NOTE: daemonMode is NOT in deps — the push fires only when the user
+    // CHANGES the config (saves). Including daemonMode caused every daemon
+    // reconnect to push the (possibly stale) localStorage values over the
+    // daemon's API-pushed config (the otmSkip regression: 1 → 3 on every
+    // restart). The daemon keeps its own config across restarts (SQLite);
+    // it only changes when the user explicitly saves.
+  }, [config])
 
   // Daemon mode: the daemon controller carries its own paper balance —
   // the Worker/D1 account belongs to the legacy browser bot.
