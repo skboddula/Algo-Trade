@@ -33,7 +33,9 @@ export function daemonUserId(): string {
 export function daemonBaseUrl(): string {
   const env = import.meta.env as Record<string, string | undefined>
   if (env.VITE_DAEMON_URL) return env.VITE_DAEMON_URL
-  return '' // same-origin — the dev/proxy layer forwards to the daemon
+  const host = env.VITE_DAEMON_HOST ?? 'localhost'
+  const port = env.VITE_DAEMON_PORT ?? '3000'
+  return `http://${host}:${port}`
 }
 
 /** Shared secret for the daemon API (set in the daemon's .env and mirrored
@@ -47,16 +49,10 @@ export function daemonApiKey(): string | undefined {
 }
 
 export function daemonWsUrl(userId = daemonUserId(), ticket?: string): string {
-  // Same-origin WebSocket: derive from the page location so tailnet
-  // devices connect through the vite ws proxy (wss under Tailscale HTTPS).
   const env = import.meta.env as Record<string, string | undefined>
-  let wsBase: string
-  if (env.VITE_DAEMON_URL) {
-    wsBase = env.VITE_DAEMON_URL.replace(/^http/, 'ws')
-  } else {
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    wsBase = `${proto}://${window.location.host}`
-  }
+  const host = env.VITE_DAEMON_HOST ?? 'localhost'
+  const port = env.VITE_DAEMON_PORT ?? '3000'
+  const wsBase = `ws://${host}:${port}`
   const auth = ticket ? `&ticket=${encodeURIComponent(ticket)}` : ''
   return `${wsBase}/ws?userId=${encodeURIComponent(userId)}${auth}`
 }
