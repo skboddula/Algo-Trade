@@ -336,6 +336,26 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
       if (!body?.token) {
         return reply.status(400).send({ error: "Missing token" });
       }
+      // Expired-token guard (Oct 14 incident: the dashboard re-pushed
+      // YESTERDAY'S expired token from its stored broker account,
+      // replacing a working one — the daemon went blind all day). A JWT
+      // with a past exp is rejected here so a stale push can never
+      // replace a usable token.
+      try {
+        const payload = JSON.parse(
+          Buffer.from(body.token.split(".")[1], "base64url").toString("utf-8"),
+        ) as { exp?: number };
+        if (
+          typeof payload.exp === "number" &&
+          payload.exp * 1000 < Date.now()
+        ) {
+          return reply.status(400).send({
+            error: `Token EXPIRED at ${new Date(payload.exp * 1000).toISOString()} — run a fresh Upstox OAuth and push the new token`,
+          });
+        }
+      } catch {
+        // Not a decodable JWT — accept (defensive; Upstox tokens are JWTs)
+      }
       // Update BOTH token surfaces:
       //  - masterIngestor: the primary token driving ALL market data
       //    (quotes, candles, chains, VIX, sentiment) — the daily expiry
