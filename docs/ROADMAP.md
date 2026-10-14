@@ -87,13 +87,10 @@ identity, authorization, deployment, and the platform decision itself.
 
 ## Tuning candidates (post-validation — from Day 1/2 evidence)
 
-1. **Breadth as an ENTRY gate, not just an exit** — Day 1 (Oct 13): 4 of 7
-   losses were PE entries exited within 2–10s by "Breadth turned bullish"
-   (the breadth was already > 1.5 at entry; the exit fired on the first
-   evaluation). Gating PE entries on ratio ≤ 1.5 (and CE on ≥ 0.8 — the
-   mirror of the exit rules) would have prevented the churn (~₹400–500 in
-   fees+spread) while keeping the winning FINNIFTY CE. Needs breadth-ratio
-   telemetry at entry/exit decisions to confirm before changing.
+1. **Breadth as an ENTRY gate** — ✅ IMPLEMENTED Oct 15 (mid-validation,
+   deliberately: the validation qualifies the go-live config). The gate
+   mirrors the exit rules (CE needs ≥ 0.8, PE ≤ 1.5); every decision logs
+   the ratio. Evidence: Day 1-2, 6+ instant breadth-exit losses.
 2. **Realized exit-layer asymmetry to track**: Day 1 avg win ₹1,423.74 vs
    avg loss ₹110.72 (the layered exits compress losses far below the −5%
    SL) — the realized breakeven win rate is ~7.6%, not the nominal ~40%.
