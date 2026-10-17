@@ -7,7 +7,7 @@ import {
 } from '../services/marketDataSources/upstoxFeedV3Source'
 import { decodeFeedResponse, getFeedResponseType } from '../services/marketDataSources/upstoxFeedV3Proto'
 import { getIndiaTime } from '../utils/timeUtils'
-import type { Candle } from '../types'
+import type { Candle, OptionData } from '../types'
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -113,6 +113,40 @@ function indexFeedFrame(
     }),
   ).finish()
   return Buffer.from(bytes)
+}
+
+function optionFeedFrame(instrumentKey: string, ltp: number): Buffer {
+  const type = getFeedResponseType()
+  const bytes = type.encode(
+    type.create({
+      type: 1,
+      feeds: { [instrumentKey]: { fullFeed: { marketFF: { ltpc: { ltp, ltt: Date.now(), ltq: 25, cp: ltp } } } } },
+      currentTs: Date.now(),
+    }),
+  ).finish()
+  return Buffer.from(bytes)
+}
+
+function makeChainRow(strike: number, callKey: string, putKey: string): OptionData {
+  return {
+    expiry: '2099-01-07',
+    strike_price: strike,
+    underlying_spot_price: 25000,
+    call_options: { instrument_key: callKey, market_data: { ltp: 100, volume: 1, oi: 1 } },
+    put_options: { instrument_key: putKey, market_data: { ltp: 200, volume: 1, oi: 1 } },
+  }
+}
+
+function computeSubscribed(messages: Harness['messages']): Set<string> {
+  const subscribed = new Set<string>()
+  for (const message of messages) {
+    if (message.method === 'sub') {
+      for (const key of message.data?.instrumentKeys ?? []) subscribed.add(key)
+    } else if (message.method === 'unsub') {
+      for (const key of message.data?.instrumentKeys ?? []) subscribed.delete(key)
+    }
+  }
+  return subscribed
 }
 
 function sendToLatest(harness: Harness, frame: Buffer): void {
@@ -383,6 +417,134 @@ describe('UpstoxFeedV3Source', () => {
     })
     expect(second.optionChain).toBe(res.optionChain)
     expect(second.fetchFailed).toBeUndefined()
+  })
+  it('subscribes open-position contracts and unsubscribes them on change', async () => {
+    const h = await startHarness()
+    activeHarness = h
+    const candles = sampleCandles(2)
+
+    h.source.setWatchedOptionContracts(['NSE_FO|POS_CE'])
+    await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't0', candles, optionChain: [] })
+    await waitFor(() => h.source.getConnectionState() === 'open', 3000, 'ws open')
+    await waitFor(() => h.messages.length > 0, 3000, 'initial subscription')
+
+    expect(h.messages[0].data?.instrumentKeys).toContain('NSE_FO|POS_CE')
+
+    h.source.setWatchedOptionContracts(['NSE_FO|POS_PE'])
+    await waitFor(
+      () =>
+        h.messages.find((m) => m.method === 'sub' && m.data?.instrumentKeys?.includes('NSE_FO|POS_PE')) &&
+        h.messages.find((m) => m.method === 'unsub' && m.data?.instrumentKeys?.includes('NSE_FO|POS_CE')),
+      3000,
+      'delta sub/unsub',
+    )
+
+    expect([...computeSubscribed(h.messages)].sort()).toEqual([
+      'NSE_FO|POS_PE',
+      'NSE_INDEX|Nifty 50',
+      'NSE_INDEX|Nifty Bank',
+      'NSE_INDEX|Nifty Fin Service',
+    ])
+  })
+
+  it('overlays tick-level option LTPs onto chain rows and ignores unwatched keys', async () => {
+    const h = await startHarness()
+    activeHarness = h
+    const candles = sampleCandles(2)
+
+    await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't0', candles, optionChain: [] })
+    await waitFor(() => h.source.getConnectionState() === 'open', 3000, 'ws open')
+
+    h.source.setWatchedOptionContracts(['NSE_FO|CE_25000'])
+    await waitFor(
+      () => h.messages.some((m) => m.method === 'sub' && m.data?.instrumentKeys?.includes('NSE_FO|CE_25000')),
+      3000,
+      'watched contract subscription',
+    )
+
+    sendToLatest(h, optionFeedFrame('NSE_FO|CE_25000', 130.75))
+    sendToLatest(h, optionFeedFrame('NSE_FO|UNWATCHED', 999))
+
+    const chain = [
+      makeChainRow(25000, 'NSE_FO|CE_25000', 'NSE_FO|PE_25000'),
+      makeChainRow(25050, 'NSE_FO|CE_25050', 'NSE_FO|PE_25050'),
+      makeChainRow(25100, 'NSE_FO|UNWATCHED', 'NSE_FO|PE_25100'),
+    ]
+    const res = await waitFor(
+      async () => {
+        const snapshot = await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't1', candles, optionChain: chain })
+        return snapshot.optionChain[0].call_options.market_data.ltp === 130.75 ? snapshot : null
+      },
+      3000,
+      'overlay applied',
+    )
+
+    expect(res.optionChain[0].call_options.market_data.ltp).toBe(130.75)
+    expect(res.optionChain[0].put_options.market_data.ltp).toBe(200) // untouched
+    expect(res.optionChain[1]).toBe(chain[1]) // unchanged row keeps identity
+    expect(res.optionChain[2].call_options.market_data.ltp).toBe(100) // unwatched key ignored
+  })
+
+  it('subscribes the nearest-strike window after a chain refresh', async () => {
+    const nearExpiry = istDatePlusDays(3)
+    const h = await startHarness({
+      source: { optionChainRefreshMs: 1, atmWindowStrikes: 2, restApiBaseUrl: 'http://upstox-rest.test/v2' },
+    })
+    activeHarness = h
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL) => {
+        const resolved = String(url)
+        if (resolved.includes('/option/contract')) {
+          return { ok: true, json: async () => ({ data: [{ expiry: nearExpiry }] }) } as unknown as Response
+        }
+        if (resolved.includes('/option/chain')) {
+          return {
+            ok: true,
+            json: async () => ({
+              data: [24900, 24950, 25000, 25050, 25100].map((strike) => ({
+                strike_price: strike,
+                expiry: nearExpiry,
+                underlying_spot_price: 25000,
+                call_options: { instrument_key: `NSE_FO|CE_${strike}`, market_data: { ltp: 100, volume: 1, oi: 1 } },
+                put_options: { instrument_key: `NSE_FO|PE_${strike}`, market_data: { ltp: 100, volume: 1, oi: 1 } },
+              })),
+            }),
+          } as unknown as Response
+        }
+        throw new Error(`unexpected fetch ${resolved}`)
+      }),
+    )
+
+    await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't0', candles: sampleCandles(2), optionChain: [] })
+    await waitFor(() => h.source.getConnectionState() === 'open', 3000, 'ws open')
+
+    const i1ts = Date.now()
+    sendToLatest(
+      h,
+      indexFeedFrame('NSE_INDEX|Nifty 50', 25000, { open: 24990, high: 25010, low: 24980, close: 25000, vol: 10, ts: i1ts }),
+    )
+    await waitFor(
+      async () => {
+        const snapshot = await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't1', candles: sampleCandles(2), optionChain: [] })
+        return snapshot.spotPrice === 25000
+      },
+      3000,
+      'spot from ws',
+    )
+
+    // Settled subscription set: nearest two strikes × CE/PE (added incrementally).
+    const expected = ['NSE_FO|CE_24950', 'NSE_FO|CE_25000', 'NSE_FO|PE_24950', 'NSE_FO|PE_25000']
+    const settled = await waitFor(
+      () => {
+        const subscribed = [...computeSubscribed(h.messages)].filter((key) => key.startsWith('NSE_FO|')).sort()
+        return JSON.stringify(subscribed) === JSON.stringify(expected) ? subscribed : null
+      },
+      3000,
+      'window settled',
+    )
+    expect(settled).toHaveLength(4)
   })
 })
 

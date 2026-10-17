@@ -43,6 +43,9 @@ export class TenantManager extends EventEmitter {
       }
     }
 
+    // Stream any rehydrated open-position contracts at tick level
+    this.syncWatchedOptionContracts()
+
     // Bind to master market ticks
     this.masterIngestor.on('marketTick', (tick) => {
       this.handleMarketTick(tick).catch((err) => {
@@ -149,6 +152,7 @@ export class TenantManager extends EventEmitter {
 
       user.positions[symbol] = null
       user.lastExitTimes[symbol] = Date.now()
+      this.syncWatchedOptionContracts()
       const hasOtherPositions = Object.values(user.positions).some((p) => p !== null)
       user.state = hasOtherPositions ? 'ORDERED' : (user.state === 'ORDERED' ? 'RUNNING' : user.state)
       user.paperBalance = this.orderGateway.getOrCreatePaperAccount(userId).balance
@@ -293,6 +297,7 @@ export class TenantManager extends EventEmitter {
 
                 user.positions[symbol] = newPos
                 user.state = 'ORDERED'
+                this.syncWatchedOptionContracts()
                 user.tradesCountToday = (user.tradesCountToday || 0) + 1
                 user.tradesCountPerSymbol[symbol] = (user.tradesCountPerSymbol[symbol] || 0) + 1
                 user.paperBalance = this.orderGateway.getOrCreatePaperAccount(userId).balance
@@ -322,6 +327,21 @@ export class TenantManager extends EventEmitter {
 
   private emitUserUpdate(user: UserBotState) {
     this.emit('userStateUpdate', { userId: user.userId, state: user })
+  }
+
+  /**
+   * Keep the live feed subscribed to every open position's option contract so
+   * supervision prices update tick-by-tick instead of waiting for the next
+   * option-chain refresh. Declarative: recomputed from all users' positions.
+   */
+  private syncWatchedOptionContracts(): void {
+    const keys = new Set<string>()
+    for (const user of this.users.values()) {
+      for (const position of Object.values(user.positions)) {
+        if (position?.instrumentKey) keys.add(position.instrumentKey)
+      }
+    }
+    this.masterIngestor.setWatchedOptionContracts([...keys])
   }
 
   /**

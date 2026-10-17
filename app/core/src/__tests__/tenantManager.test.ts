@@ -1,7 +1,13 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { TenantManager } from '../services/tenantManager'
 import { MasterIngestionEngine } from '../services/masterIngestor'
 import { OrderGateway } from '../services/orderGateway'
+import { StateStore } from '../services/stateStore'
+import { DEFAULT_STRATEGY_CONFIG } from '../constants'
+import type { UserBotState } from '../types'
 
 describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
   it('isolates user bot instances and configurations independently', () => {
@@ -90,5 +96,52 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
     const updatedUser = await manager.manualExit('alice', 'NIFTY 50', 'Test Manual Exit')
     expect(updatedUser.positions['NIFTY 50']).toBeNull()
     expect(updatedUser.state).toBe('RUNNING')
+  })
+
+  it('streams rehydrated open-position contracts and drops them on exit', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'algo-watch-test-'))
+    const store = new StateStore(dir)
+    const seeded: UserBotState = {
+      userId: 'u9',
+      state: 'ORDERED',
+      executionMode: 'paper',
+      config: { ...DEFAULT_STRATEGY_CONFIG },
+      positions: {
+        'NIFTY 50': {
+          instrumentKey: 'NSE_FO|OPT_REHYDRATED_CE',
+          direction: 'CE',
+          entryPrice: 100,
+          quantity: 75,
+          entryTime: '2026-10-17T04:00:00.000Z',
+          tradeId: 1,
+          tradeType: 'buying',
+          currentPrice: 100,
+          underlyingSymbol: 'NIFTY 50',
+        },
+        BANKNIFTY: null,
+        FINNIFTY: null,
+      },
+      tradesCountToday: 1,
+      tradesCountPerSymbol: { 'NIFTY 50': 1 },
+      lastTradeDate: '2026-10-17',
+      lastExitTimes: {},
+      totalRealizedPnl: 0,
+      paperBalance: 100000,
+      updatedAt: '2026-10-17T04:00:00.000Z',
+    }
+    store.saveUserState(seeded)
+
+    const ingestor = new MasterIngestionEngine({ mockMode: true })
+    const spy = vi.spyOn(ingestor, 'setWatchedOptionContracts')
+    const manager = new TenantManager(ingestor, new OrderGateway('https://api.upstox.com/v2', store), { store })
+
+    // Rehydration wired the open position's contract into the live feed
+    expect(spy).toHaveBeenCalledWith(['NSE_FO|OPT_REHYDRATED_CE'])
+
+    // Exit unsubscribes it again
+    await manager.manualExit('u9', 'NIFTY 50', 'test exit')
+    expect(spy).toHaveBeenLastCalledWith([])
+
+    store.close()
   })
 })

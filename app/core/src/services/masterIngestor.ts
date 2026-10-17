@@ -77,6 +77,14 @@ export class MasterIngestionEngine extends EventEmitter {
     this.wsSource.setToken(token) // drop the WS connection so it reconnects with the new token
   }
 
+  /**
+   * Declare which option contracts the live feed should stream at tick level
+   * (open positions). Only the WebSocket transport acts on this.
+   */
+  public setWatchedOptionContracts(instrumentKeys: string[]): void {
+    this.wsSource.setWatchedOptionContracts(instrumentKeys)
+  }
+
   public setMockMode(enabled: boolean) {
     this.config.mockMode = enabled
   }

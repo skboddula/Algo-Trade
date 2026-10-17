@@ -4,6 +4,8 @@
 //   - index ticks (LTPC) for the three tracked underlyings               [WS]
 //   - live 1-minute candles, merged from the feed's I1 OHLC entries       [WS]
 //   - tradeable option chains (strikes/keys/ltp/oi), refreshed from REST  [fallback]
+//   - tick-level option LTPs for open-position contracts + the nearest-strike
+//     window (subscribed over WS, overlaid onto the chain rows)
 //   - connection watchdog: a silent or dropped feed surfaces as `fetchFailed`,
 //     so the engine's existing feed-health alerts fire exactly once
 //
@@ -39,6 +41,8 @@ export interface UpstoxFeedV3SourceOptions {
   reconnectMaxMs?: number
   /** Option-chain refresh cadence per symbol (default 15000 ms; 0 disables). */
   optionChainRefreshMs?: number
+  /** Number of nearest strikes per symbol streamed live around spot (default 5; 0 disables). */
+  atmWindowStrikes?: number
   /** Test seam overriding local market-hours detection. */
   isMarketOpen?: () => boolean
   /** Diagnostics sink (defaults to console.warn). */
@@ -64,6 +68,8 @@ const DEFAULT_CONNECT_GRACE_MS = 20_000
 const DEFAULT_RECONNECT_MIN_MS = 3_000
 const DEFAULT_RECONNECT_MAX_MS = 30_000
 const DEFAULT_OPTION_CHAIN_REFRESH_MS = 15_000
+const DEFAULT_ATM_WINDOW_STRIKES = 5
+const MAX_OPTION_SUBSCRIPTIONS = 90
 const EXPIRY_RETRY_MS = 60_000
 const I1_INTERVAL = 'I1'
 
@@ -84,6 +90,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   private readonly reconnectMinMs: number
   private readonly reconnectMaxMs: number
   private readonly optionChainRefreshMs: number
+  private readonly atmWindowStrikes: number
   private readonly isMarketOpenFn: () => boolean
   private readonly onLog: (message: string) => void
 
@@ -100,6 +107,12 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   private readonly lastChainFetchAt = new Map<UnderlyingSymbol, number>()
   private readonly expiryCache = new Map<UnderlyingSymbol, ExpiryCacheEntry>()
 
+  // Option-contract streaming (tick-level pricing for open positions + ATM window)
+  private externalWatchedKeys = new Set<string>()
+  private readonly windowKeysBySymbol = new Map<UnderlyingSymbol, Set<string>>()
+  private subscribedOptionKeys = new Set<string>()
+  private readonly optionTickCache = new Map<string, number>()
+
   constructor(opts: UpstoxFeedV3SourceOptions) {
     this.restApiBaseUrl = opts.restApiBaseUrl
     this.feedApiBaseUrl = opts.feedApiBaseUrl ?? 'https://api.upstox.com/v3'
@@ -111,6 +124,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     this.reconnectMinMs = opts.reconnectMinMs ?? DEFAULT_RECONNECT_MIN_MS
     this.reconnectMaxMs = opts.reconnectMaxMs ?? DEFAULT_RECONNECT_MAX_MS
     this.optionChainRefreshMs = opts.optionChainRefreshMs ?? DEFAULT_OPTION_CHAIN_REFRESH_MS
+    this.atmWindowStrikes = opts.atmWindowStrikes ?? DEFAULT_ATM_WINDOW_STRIKES
     this.isMarketOpenFn = opts.isMarketOpen ?? (() => isMarketOpen())
     this.onLog = opts.onLog ?? ((message) => console.warn(message))
     this.reconnectDelay = this.reconnectMinMs
@@ -132,6 +146,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     if (marketOpen && this.optionChainRefreshMs > 0) {
       nextChain = await this.refreshOptionChainIfDue(symbol, optionChain, spotPrice)
     }
+    nextChain = this.overlayOptionTicks(nextChain)
 
     const staleReason = this.stalenessIssue(marketOpen)
     if (staleReason) {
@@ -154,6 +169,17 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   /** Visible for diagnostics/tests. */
   public getConnectionState(): ConnectionState {
     return this.state
+  }
+
+  /**
+   * Declarative set of option contracts to stream at tick level (open positions).
+   * Applied immediately while connected; otherwise picked up on (re)connect.
+   */
+  public setWatchedOptionContracts(instrumentKeys: string[]): void {
+    const next = new Set(instrumentKeys.filter((key) => typeof key === 'string' && key.length > 0))
+    if (setsEqual(next, this.externalWatchedKeys)) return
+    this.externalWatchedKeys = next
+    this.syncOptionSubscriptions()
   }
 
   // -- connection management -------------------------------------------------
@@ -226,13 +252,21 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   }
 
   private sendSubscription(socket: WebSocket): void {
+    const optionKeys = [...this.desiredOptionKeys()]
+    this.sendJson(socket, {
+      method: 'sub',
+      data: { mode: 'full', instrumentKeys: [...Object.values(UNDERLYING_INSTRUMENT_KEYS), ...optionKeys] },
+    })
+    this.subscribedOptionKeys = new Set(optionKeys)
+  }
+
+  private sendJson(socket: WebSocket, payload: Record<string, unknown>): void {
     try {
       socket.send(
         Buffer.from(
           JSON.stringify({
             guid: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-            method: 'sub',
-            data: { mode: 'full', instrumentKeys: Object.values(UNDERLYING_INSTRUMENT_KEYS) },
+            ...payload,
           }),
         ),
       )
@@ -254,15 +288,22 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     if (!decoded.feeds) return
     for (const [instrumentKey, feed] of Object.entries(decoded.feeds)) {
       const symbol = INSTRUMENT_KEY_TO_SYMBOL[instrumentKey]
-      if (!symbol) continue
-      const tick = extractIndexTick(feed)
-      if (tick) this.indexCache.set(symbol, tick)
+      if (symbol) {
+        const tick = extractIndexTick(feed)
+        if (tick) this.indexCache.set(symbol, tick)
+        continue
+      }
+      // Option contract: only keys we actually subscribed to are trusted.
+      if (!this.subscribedOptionKeys.has(instrumentKey)) continue
+      const ltp = extractOptionLtp(feed)
+      if (ltp !== null) this.optionTickCache.set(instrumentKey, ltp)
     }
   }
 
   private handleClose(code: number, reason: Buffer): void {
     this.socket = null
     this.state = 'closed'
+    this.subscribedOptionKeys.clear()
     if (this.stopped) return
     const detail = reason?.length ? `: ${reason.toString()}` : ''
     this.log(`ws closed (code ${code}${detail})`)
@@ -288,6 +329,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     const socket = this.socket
     this.socket = null
     this.state = 'closed'
+    this.subscribedOptionKeys.clear()
     this.reconnectDelay = this.reconnectMinMs
     if (!socket) return
     socket.removeAllListeners()
@@ -344,7 +386,12 @@ export class UpstoxFeedV3Source implements MarketDataSource {
         expiry,
         fallbackSpotPrice: spotPrice,
       })
-      return chain.length ? chain : currentChain
+      if (chain.length) {
+        this.updateWindowKeys(symbol, chain, spotPrice)
+        this.syncOptionSubscriptions()
+        return chain
+      }
+      return currentChain
     } catch (err) {
       this.log(`option-chain refresh failed for ${symbol}: ${(err as Error).message}`)
       return currentChain
@@ -368,6 +415,78 @@ export class UpstoxFeedV3Source implements MarketDataSource {
       this.expiryCache.set(symbol, { date: today, expiry: null, failedAt: Date.now() })
       return null
     }
+  }
+
+  // -- option-contract streaming ----------------------------------------------
+
+  private syncOptionSubscriptions(): void {
+    if (this.state !== 'open' || !this.socket) return
+    const desired = this.desiredOptionKeys()
+    const toAdd = [...desired].filter((key) => !this.subscribedOptionKeys.has(key))
+    const toRemove = [...this.subscribedOptionKeys].filter((key) => !desired.has(key))
+    if (toAdd.length > 0) {
+      this.sendJson(this.socket, { method: 'sub', data: { mode: 'full', instrumentKeys: toAdd } })
+    }
+    if (toRemove.length > 0) {
+      this.sendJson(this.socket, { method: 'unsub', data: { instrumentKeys: toRemove } })
+      for (const key of toRemove) this.optionTickCache.delete(key)
+    }
+    this.subscribedOptionKeys = new Set(desired)
+  }
+
+  /** Open-position contracts first, then the nearest-strike window, capped below the server limit. */
+  private desiredOptionKeys(): Set<string> {
+    const desired = new Set<string>()
+    for (const key of this.externalWatchedKeys) {
+      if (desired.size >= MAX_OPTION_SUBSCRIPTIONS) return desired
+      desired.add(key)
+    }
+    for (const keys of this.windowKeysBySymbol.values()) {
+      for (const key of keys) {
+        if (desired.size >= MAX_OPTION_SUBSCRIPTIONS) return desired
+        desired.add(key)
+      }
+    }
+    return desired
+  }
+
+  private updateWindowKeys(symbol: UnderlyingSymbol, chain: OptionData[], spotPrice: number): void {
+    if (this.atmWindowStrikes <= 0) return
+    const nearest = [...chain]
+      .sort((a, b) => Math.abs(a.strike_price - spotPrice) - Math.abs(b.strike_price - spotPrice))
+      .slice(0, this.atmWindowStrikes)
+    const keys = new Set<string>()
+    for (const row of nearest) {
+      keys.add(row.call_options.instrument_key)
+      keys.add(row.put_options.instrument_key)
+    }
+    this.windowKeysBySymbol.set(symbol, keys)
+  }
+
+  /** Replace REST-sourced leg prices with tick-level feed LTPs where available. */
+  private overlayOptionTicks(chain: OptionData[]): OptionData[] {
+    if (!chain.length || this.optionTickCache.size === 0) return chain
+
+    let changed = false
+    const next = chain.map((row) => {
+      const callLtp = this.optionTickCache.get(row.call_options.instrument_key)
+      const putLtp = this.optionTickCache.get(row.put_options.instrument_key)
+      if (callLtp === undefined && putLtp === undefined) return row
+
+      const nextCall =
+        callLtp !== undefined && callLtp !== row.call_options.market_data.ltp
+          ? { ...row.call_options, market_data: { ...row.call_options.market_data, ltp: callLtp } }
+          : row.call_options
+      const nextPut =
+        putLtp !== undefined && putLtp !== row.put_options.market_data.ltp
+          ? { ...row.put_options, market_data: { ...row.put_options.market_data, ltp: putLtp } }
+          : row.put_options
+      if (nextCall === row.call_options && nextPut === row.put_options) return row
+
+      changed = true
+      return { ...row, call_options: nextCall, put_options: nextPut }
+    })
+    return changed ? next : chain
   }
 
   private log(message: string): void {
@@ -410,6 +529,19 @@ function mergeOhlcIntoCandles(candles: Candle[], ohlc: DecodedOhlc): Candle[] {
   if (timestamp === last[0]) return [...candles.slice(0, -1), candle]
   if (ts > Date.parse(last[0])) return [...candles.slice(-99), candle]
   return candles
+}
+
+function extractOptionLtp(feed: DecodedFeed): number | null {
+  const ltp = feed.ltpc?.ltp ?? feed.fullFeed?.marketFF?.ltpc?.ltp ?? feed.firstLevelWithGreeks?.ltpc?.ltp
+  return typeof ltp === 'number' && ltp > 0 ? ltp : null
+}
+
+function setsEqual(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false
+  for (const value of a) {
+    if (!b.has(value)) return false
+  }
+  return true
 }
 
 function toBuffer(data: WebSocket.RawData): Buffer {
