@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:daemon": "tsc -b && vite build --mode daemon",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix",

@@ -7,8 +7,15 @@ import path from 'path'
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const isTest = process.env.VITEST === 'true' || mode === 'test'
+  // `build:daemon` produces a plain SPA for the daemon (app/core) to serve at
+  // http://127.0.0.1:3000 — the Cloudflare worker plugin stays out of that build.
+  const isDaemonBuild = mode === 'daemon'
   return {
-    plugins: [tailwindcss(), react(), ...(!isTest ? [cloudflare()] : [])],
+    plugins: [
+      tailwindcss(),
+      react(),
+      ...(!isTest && !isDaemonBuild ? [cloudflare()] : []),
+    ],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),

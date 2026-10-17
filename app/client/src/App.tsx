@@ -11,6 +11,7 @@ import { isAuth0Enabled } from '@/lib/auth0-config'
 import { ArrowRight } from 'lucide-react'
 import { AppLogo } from '@/components/ui/app-logo'
 import { ALGO_TRADE_PREFIX, STORAGE_KEY_ACTIVE_USER } from '@/lib/constants'
+import { DAEMON_MODE } from '@/lib/daemon'
 import './App.css'
 
 interface ErrorBoundaryProps {
@@ -74,6 +75,9 @@ const StrategiesPage = lazy(() =>
 )
 const LiveTradesPage = lazy(() =>
   import('@/pages/live-trades').then((m) => ({ default: m.LiveTradesPage })),
+)
+const DaemonApp = lazy(() =>
+  import('@/daemon/DaemonApp').then((m) => ({ default: m.DaemonApp })),
 )
 
 function Placeholder({ title }: { title: string }) {
@@ -435,6 +439,24 @@ function DashboardShell({
 }
 
 function App() {
+  // Served by the daemon itself (`yarn build:daemon`): the whole app is the
+  // daemon's window — no Auth0, no worker, no local strategy engine.
+  if (DAEMON_MODE) {
+    return (
+      <ErrorBoundary>
+        <Suspense
+          fallback={
+            <div className="flex min-h-dvh items-center justify-center bg-background text-sm text-muted-foreground">
+              Connecting to daemon…
+            </div>
+          }
+        >
+          <DaemonApp />
+        </Suspense>
+      </ErrorBoundary>
+    )
+  }
+
   return (
     <ErrorBoundary>
       <AuthGate />

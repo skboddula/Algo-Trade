@@ -1,0 +1,223 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { renderHook, act, waitFor } from '@testing-library/react'
+import { useDaemon } from '@/hooks/useDaemon'
+import type { DaemonHealth, DaemonStatus } from '@/lib/daemon'
+import { DAEMON_USER_ID } from '@/lib/daemon'
+import { DEFAULT_CONFIG } from '@/lib/types'
+import type { MarketSnapshot, UserBotState } from '@/lib/types'
+
+const daemonMocks = vi.hoisted(() => ({
+  status: vi.fn(),
+  health: vi.fn(),
+  start: vi.fn(),
+  stop: vi.fn(),
+  saveConfig: vi.fn(),
+  resetPaper: vi.fn(),
+  exitPosition: vi.fn(),
+}))
+
+vi.mock('@/lib/daemon', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/daemon')>()
+  return { ...actual, daemonApi: daemonMocks }
+})
+
+class MockWebSocket {
+  static instances: MockWebSocket[] = []
+  url: string
+  readyState = 0
+  onopen: (() => void) | null = null
+  onmessage: ((evt: { data: string }) => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: (() => void) | null = null
+
+  constructor(url: string) {
+    this.url = url
+    MockWebSocket.instances.push(this)
+  }
+
+  close() {
+    this.readyState = 3
+  }
+}
+
+function makeUserState(overrides: Partial<UserBotState> = {}): UserBotState {
+  return {
+    userId: DAEMON_USER_ID,
+    state: 'IDLE',
+    executionMode: 'paper',
+    config: DEFAULT_CONFIG,
+    positions: { 'NIFTY 50': null, BANKNIFTY: null, FINNIFTY: null },
+    tradesCountToday: 0,
+    tradesCountPerSymbol: {},
+    lastTradeDate: '2026-10-17',
+    lastExitTimes: {},
+    totalRealizedPnl: 0,
+    paperBalance: 1_500_000,
+    updatedAt: '2026-10-17T04:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function makeStatus(overrides: Partial<DaemonStatus> = {}): DaemonStatus {
+  return {
+    serverTime: '2026-10-17T04:00:00.000Z',
+    snapshots: {},
+    userState: makeUserState(),
+    paperTrades: [],
+    ...overrides,
+  }
+}
+
+function makeHealth(): DaemonHealth {
+  return {
+    status: 'healthy',
+    timestamp: '2026-10-17T04:00:00.000Z',
+    feed: {
+      source: 'upstox-ws-v3',
+      ws: {
+        state: 'open',
+        activeForMs: 1000,
+        frames: {
+          initial: 1,
+          live: 10,
+          marketInfo: 2,
+          other: 0,
+          decodeErrors: 0,
+        },
+        ticks: { index: 42, option: 7 },
+        optionKeys: { current: 30, peak: 30 },
+        reconnects: 0,
+        chain: { calls: 4, failures: 0, lastLatencyMs: 120 },
+        expiry: { calls: 1, failures: 0 },
+        lastMessageAgeMs: 800,
+      },
+    },
+  }
+}
+
+const snapshot = {
+  timestamp: '2026-10-17T04:00:00.000Z',
+  underlyingSymbol: 'NIFTY 50',
+  spotPrice: 25000,
+} as unknown as MarketSnapshot
+
+describe('useDaemon', () => {
+  beforeEach(() => {
+    MockWebSocket.instances = []
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    daemonMocks.status.mockReset()
+    daemonMocks.health.mockReset()
+    daemonMocks.start.mockReset()
+    daemonMocks.stop.mockReset()
+    daemonMocks.saveConfig.mockReset()
+    daemonMocks.resetPaper.mockReset()
+    daemonMocks.exitPosition.mockReset()
+    daemonMocks.status.mockResolvedValue(makeStatus())
+    daemonMocks.health.mockResolvedValue(makeHealth())
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('loads status + health and opens the daemon socket on mount', async () => {
+    const { result } = renderHook(() => useDaemon())
+
+    await waitFor(() =>
+      expect(result.current.status?.userState.userId).toBe(DAEMON_USER_ID),
+    )
+    expect(result.current.health?.feed.source).toBe('upstox-ws-v3')
+    expect(MockWebSocket.instances).toHaveLength(1)
+    expect(MockWebSocket.instances[0].url).toBe('ws://localhost:3000/ws')
+  })
+
+  it('marks the connection live when the socket opens', async () => {
+    const { result } = renderHook(() => useDaemon())
+
+    act(() => {
+      MockWebSocket.instances[0].onopen?.()
+    })
+    await waitFor(() => expect(result.current.connected).toBe(true))
+  })
+
+  it('applies INITIAL_STATE, MARKET_TICK and USER_STATE_UPDATE frames', async () => {
+    const { result } = renderHook(() => useDaemon())
+    // Let the initial REST poll settle first — socket frames then take over.
+    await waitFor(() => expect(result.current.status).not.toBeNull())
+    const socket = MockWebSocket.instances[0]
+
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'INITIAL_STATE',
+          data: {
+            snapshots: { 'NIFTY 50': snapshot },
+            userState: makeUserState({ state: 'RUNNING' }),
+          },
+        }),
+      })
+    })
+    await waitFor(() =>
+      expect(result.current.status?.userState.state).toBe('RUNNING'),
+    )
+    expect(result.current.status?.snapshots['NIFTY 50']).toEqual(snapshot)
+
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'MARKET_TICK',
+          data: {
+            timestamp: '2026-10-17T04:01:00.000Z',
+            snapshots: { 'NIFTY 50': snapshot },
+          },
+        }),
+      })
+    })
+    await waitFor(() =>
+      expect(result.current.lastTickAt).toBe('2026-10-17T04:01:00.000Z'),
+    )
+
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'USER_STATE_UPDATE',
+          data: makeUserState({ state: 'ORDERED', tradesCountToday: 1 }),
+        }),
+      })
+    })
+    await waitFor(() =>
+      expect(result.current.status?.userState.tradesCountToday).toBe(1),
+    )
+    expect(result.current.status?.userState.state).toBe('ORDERED')
+  })
+
+  it('routes actions through the daemon API and logs them', async () => {
+    daemonMocks.start.mockResolvedValue({ success: true })
+    const { result } = renderHook(() => useDaemon())
+
+    await act(async () => {
+      await result.current.start('paper')
+    })
+
+    expect(daemonMocks.start).toHaveBeenCalledWith('paper')
+    expect(
+      result.current.logs.some((entry) => entry.msg.includes('Start (paper)')),
+    ).toBe(true)
+  })
+
+  it('logs action failures without throwing', async () => {
+    daemonMocks.stop.mockRejectedValue(new Error('daemon offline'))
+    const { result } = renderHook(() => useDaemon())
+
+    await act(async () => {
+      await result.current.stop()
+    })
+
+    expect(
+      result.current.logs.some(
+        (entry) =>
+          entry.level === 'error' && entry.msg.includes('daemon offline'),
+      ),
+    ).toBe(true)
+  })
+})
