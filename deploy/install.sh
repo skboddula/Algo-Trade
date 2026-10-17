@@ -6,7 +6,8 @@
 #   deploy/install.sh
 #
 # Environment:
-#   SERVICE_NAME  override the installed unit name (default algo-trade-daemon-v2)
+#   SERVICE_NAME    override the installed unit name (default algo-trade-daemon-v2)
+#   SKIP_DASHBOARD  set to 1 to skip building the daemon-served dashboard window
 #
 # Installs/refreshes `algo-trade-daemon-v2`; if the legacy `algo-trade-daemon`
 # unit is still present, it is stopped and disabled so only one daemon runs.
@@ -52,6 +53,18 @@ fi
 # ── Build ────────────────────────────────────────────────────────────────────
 echo "▸ Building daemon (app/core)…"
 (cd "$APP_CORE" && yarn install && yarn build)
+
+# ── Dashboard window (optional, daemon-served UI) ────────────────────────────
+# Non-fatal: if the client build fails the daemon still runs API-only.
+if [[ "${SKIP_DASHBOARD:-0}" != "1" ]]; then
+  echo "▸ Building dashboard window (app/client → served by the daemon at /)…"
+  if (cd "$REPO_ROOT/app/client" && yarn install && yarn build:daemon); then
+    echo "  ✓ Window built — opens at http://127.0.0.1:3000 (SKIP_DASHBOARD=1 skips this)."
+  else
+    echo "⚠ Dashboard build failed — daemon will start in API-only mode."
+    echo "  Retry anytime with: (cd app/client && yarn install && yarn build:daemon)"
+  fi
+fi
 
 # ── Config ───────────────────────────────────────────────────────────────────
 if [[ ! -f "$APP_CORE/.env" ]]; then

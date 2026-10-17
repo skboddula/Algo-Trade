@@ -18,6 +18,7 @@ later (see [Moving to a cloud VM](#moving-to-a-cloud-vm-later)).
 | `app/core/data/algo-trade.sqlite` | Durable state: bot state, trailing-SL peaks, paper ledger — survives restarts/reboots |
 | `scripts/bot.sh` | Start/stop/status/exit/config/token from the terminal |
 | `scripts/refresh-token.sh` | Daily token refresh + restart in one command |
+| Dashboard window (`http://127.0.0.1:3000`) | React UI served by the daemon itself — live scores, positions, paper ledger, bot controls |
 | Telegram alerts (optional) | Notified on feed down/recovered, trades opened/closed, daemon start/stop |
 
 **What survives a reboot:** bot running state, open positions (with trailing-SL peak), daily trade
@@ -57,7 +58,8 @@ cp app/core/.env.sample app/core/.env
 #      ATM_WINDOW_STRIKES (default 5; 0 disables the tick-level window).
 #      Default binding is 127.0.0.1 — keep it that way unless you add auth.
 
-# 2. Build + install the service
+# 2. Build + install the service (also builds the dashboard window;
+#    skip the UI with: SKIP_DASHBOARD=1 ./deploy/install.sh)
 ./deploy/install.sh
 
 # 3. Arm the bot (paper by default)
@@ -66,7 +68,9 @@ cp app/core/.env.sample app/core/.env
 ```
 
 That's it. You can now close every browser tab. The service starts automatically on boot
-(`systemctl --user enable` was done by the installer).
+(`systemctl --user enable` was done by the installer). Open <http://127.0.0.1:3000> for the
+daemon's own dashboard window (see [Dashboard window](#dashboard-window)) — optional, the bot
+runs without it.
 
 > **Note:** `deploy/install.sh` installs `algo-trade-daemon-v2` and replaces any existing unit
 > with that name (back up customizations first). If the legacy `algo-trade-daemon` unit from an
@@ -149,6 +153,40 @@ The service has `Restart=on-failure`, so a crashed daemon comes back automatical
 An older `algo-trade-daemon` unit (legacy checkout) may still exist from earlier installs. The
 installer stops and disables it but keeps the file; re-enable it only if you intentionally switch
 back: `systemctl --user enable --now algo-trade-daemon` (never while `algo-trade-daemon-v2` runs).
+
+---
+
+## Dashboard window
+
+The daemon serves its own React UI on the same origin — one process, no cloud, no CORS:
+
+    http://127.0.0.1:3000
+
+- **Live Window** — start/stop (paper/live), reset paper, feed health (transport, last-message
+  age, reconnects, chain calls), per-symbol signal + score panels, indicators, 1-min chart and
+  ATM ±4 option chain, open positions with manual exits, recent paper trades, activity log.
+- **Trade History** — the daemon's full paper ledger with realized P&L and win rate.
+- **Strategy Config** — edit the running daemon's thresholds/risk config; saving applies it
+  immediately and persists in SQLite.
+
+The **Refresh Upstox token** button in the window header opens the browser OAuth flow (same as the
+[daily routine](#1-refresh-the-token--browser-recommended) link).
+
+Rebuild after pulling client changes, then restart so the daemon serves the new asset hashes:
+
+```bash
+( cd app/client && yarn build:daemon )
+systemctl --user restart algo-trade-daemon-v2
+```
+
+Notes:
+
+- `deploy/install.sh` builds the window automatically; skip it with `SKIP_DASHBOARD=1 ./deploy/install.sh`.
+- The daemon serves `app/client/dist`; override the location with `DASHBOARD_DIR` in `app/core/.env`.
+  Without a build the daemon starts in API-only mode — the bot never needs the window.
+- This window is *the daemon's state*. The Cloudflare-hosted dashboard (`yarn dev` / `yarn deploy`
+  in `app/client`) is a separate product: it keeps its own browser-side engine, worker ledger and
+  Upstox token, and does not command the daemon.
 
 ---
 
@@ -274,6 +312,10 @@ Same `scripts/` helpers work against the remote by setting `DAEMON_URL` (and lat
 
 - The daemon API is currently **unauthenticated**. Keep it bound to `127.0.0.1` (the default).
   Reaching it from your phone over Tailscale is possible, but add the API-key/CORS hardening first.
+- Browser cross-site protection is on: requests carrying an `Origin` header from anything other
+  than loopback (`127.0.0.1`, `localhost`, `::1`) are rejected with `403`. Add comma-separated
+  `ALLOWED_ORIGINS` in `app/core/.env` to permit extra origins explicitly. WebSocket state frames
+  never include broker tokens.
 - `app/core/.env` and `app/core/data/algo-trade.sqlite` both contain broker tokens — keep them
   `0600` (default from the installer) and out of git.
 - Never run two daemons on two hosts against the same Upstox account at the same time.
