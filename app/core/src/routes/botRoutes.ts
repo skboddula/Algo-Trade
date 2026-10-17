@@ -76,7 +76,11 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
   tenantManager.on('userStateUpdate', ({ userId, state }) => {
     const sockets = activeSockets.get(userId)
     if (sockets) {
-      const payload = JSON.stringify({ type: 'USER_STATE_UPDATE', data: state })
+      // Never leak credentials over the wire (the window may have many clients)
+      const payload = JSON.stringify({
+        type: 'USER_STATE_UPDATE',
+        data: sanitizeUserState(state),
+      })
       for (const ws of sockets) {
         if (ws.readyState === 1 /* OPEN */) {
           try {
@@ -180,7 +184,10 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     ws.send(
       JSON.stringify({
         type: 'INITIAL_STATE',
-        data: { snapshots: initialSnapshots, userState },
+        data: {
+          snapshots: initialSnapshots,
+          userState: sanitizeUserState(userState),
+        },
       }),
     )
 

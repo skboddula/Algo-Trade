@@ -2,7 +2,9 @@ import fastify from 'fastify'
 import cors from '@fastify/cors'
 import websocket from '@fastify/websocket'
 import rateLimit from '@fastify/rate-limit'
+import fastifyStatic from '@fastify/static'
 import dotenv from 'dotenv'
+import fs from 'node:fs'
 import path from 'path'
 import { MasterIngestionEngine } from './services/masterIngestor'
 import { OrderGateway } from './services/orderGateway'
@@ -14,12 +16,51 @@ import { upstoxAuthRoutes, type UpstoxAuthRoutesOptions } from './routes/upstoxA
 
 dotenv.config()
 
+// Hostnames that count as "this machine" for browser Origin checks.
+const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '::1'])
+
+/** True when a browser Origin header is acceptable (loopback or explicitly allowed). */
+export function isAllowedBrowserOrigin(origin: string, extraOrigins: string[] = []): boolean {
+  if (origin === 'null') return false // sandboxed iframes / opaque origins
+  try {
+    const url = new URL(origin)
+    const hostname = url.hostname.replace(/^\[|\]$/g, '') // URL keeps IPv6 brackets
+    return LOOPBACK_HOSTNAMES.has(hostname) || extraOrigins.includes(origin)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Locate the built dashboard (client `build:daemon` output) to serve as the
+ * daemon's window. Checks DASHBOARD_DIR first, then the conventional repo
+ * locations (daemon is usually started with cwd = app/core).
+ */
+export function resolveDashboardDir(): string | null {
+  const candidates = [
+    process.env.DASHBOARD_DIR,
+    path.resolve(process.cwd(), '..', 'client', 'dist'), // cwd = app/core
+    path.resolve(process.cwd(), 'app', 'client', 'dist'), // cwd = repo root
+  ].filter((c): c is string => Boolean(c && c.trim()))
+
+  for (const candidate of candidates) {
+    const dir = path.resolve(candidate)
+    if (fs.existsSync(path.join(dir, 'index.html'))) return dir
+  }
+  return null
+}
+
 export function buildServer(opts?: {
   mockMode?: boolean
   primaryToken?: string
   store?: StateStore | null
   /** Overrides for the Upstox OAuth routes; null skips registration. */
   upstoxAuth?: Omit<UpstoxAuthRoutesOptions, 'masterIngestor'> | null
+  /**
+   * Directory of the built dashboard to serve as the daemon's window
+   * (same-origin UI at `/`). Undefined disables static serving.
+   */
+  dashboardDir?: string
 }) {
   const app = fastify({
     logger: {
@@ -35,6 +76,25 @@ export function buildServer(opts?: {
             }
           : undefined,
     },
+  })
+
+  // ── Cross-site request guard ─────────────────────────────────────────────
+  // The daemon can place live orders. Browsers always attach an Origin header
+  // to cross-origin fetch/XHR/WebSocket requests, so anything explicitly
+  // originating from a foreign site is rejected. Requests without an Origin
+  // (curl, scripts/bot.sh, health probes, OAuth redirects) pass through.
+  const extraOrigins = (process.env.ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean)
+  app.addHook('onRequest', async (request, reply) => {
+    const origin = request.headers.origin
+    if (origin && !isAllowedBrowserOrigin(origin, extraOrigins)) {
+      return reply.status(403).send({
+        error:
+          'Cross-origin request rejected. Add the origin to ALLOWED_ORIGINS to permit it.',
+      })
+    }
   })
 
   // Register Plugins
@@ -115,6 +175,30 @@ export function buildServer(opts?: {
     }
   })
 
+  // ── Dashboard window (same-origin static UI) ─────────────────────────────
+  // When a built dashboard is present it is served at `/`; unknown non-API GET
+  // routes fall back to index.html so client-side routing works.
+  if (opts?.dashboardDir) {
+    const dashboardDir = path.resolve(opts.dashboardDir)
+    app.register(fastifyStatic, {
+      root: dashboardDir,
+      prefix: '/',
+      wildcard: false,
+    })
+    app.setNotFoundHandler((request, reply) => {
+      const { url, method } = request
+      const isApiPath =
+        url.startsWith('/api/') ||
+        url.startsWith('/auth/') ||
+        url.startsWith('/ws') ||
+        url === '/health'
+      if (method === 'GET' && !isApiPath) {
+        return reply.sendFile('index.html', dashboardDir)
+      }
+      return reply.status(404).send({ error: 'Not found' })
+    })
+  }
+
   // Graceful shutdown hooks
   app.addHook('onClose', async () => {
     masterIngestor.stop()
@@ -162,7 +246,11 @@ if (require.main === module) {
 
   const dataDir = path.resolve(process.env.DATA_DIR || 'data')
   const store = new StateStore(dataDir)
-  const { app, masterIngestor, notifier } = buildServer({ store })
+  const dashboardDir = resolveDashboardDir()
+  const { app, masterIngestor, notifier } = buildServer({
+    store,
+    ...(dashboardDir ? { dashboardDir } : {}),
+  })
 
   app.listen({ port: PORT, host: HOST }, (err, address) => {
     if (err) {
@@ -171,6 +259,13 @@ if (require.main === module) {
     }
     app.log.info(`⚡ Algo-Trade Fastify Daemon listening at ${address}`)
     app.log.info(`💾 State store active at ${dataDir}`)
+    if (dashboardDir) {
+      app.log.info(`🖥️  Dashboard window served from ${dashboardDir}`)
+    } else {
+      app.log.info(
+        '🖥️  No dashboard build found (run `yarn --cwd app/client build:daemon`) — API-only mode.',
+      )
+    }
     masterIngestor.start()
     app.log.info(`📡 Master Ingestion Engine started (Single 1-API fetch loop active)`)
     void notifier(
