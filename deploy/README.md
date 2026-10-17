@@ -81,7 +81,10 @@ Upstox access tokens expire **daily around 03:30 IST**. Each trading morning:
 # 1. Generate a new access token via the Upstox login flow, then:
 ./scripts/refresh-token.sh "<NEW_UPSTOX_ACCESS_TOKEN>"
 
-# 2. Make sure the bot is armed
+# 2. (Optional) Verify the fresh token end-to-end before arming:
+( cd app/core && yarn feed-check )
+
+# 3. Make sure the bot is armed
 ./scripts/bot.sh status        # check state: RUNNING / ORDERED
 ./scripts/bot.sh start paper   # if it is not running (paper or live)
 ```
@@ -165,11 +168,30 @@ To start fresh, stop the service and delete the file (and its `-wal`/`-shm` comp
 
 ## Troubleshooting
 
+### Feed preflight (`yarn feed-check`)
+
+Verifies the live-data path against real Upstox endpoints, in order: token +
+V3 authorize → WebSocket handshake (subscribe + protobuf decode) → REST quotes
+for the three indices → option chain (nearest expiry, full mapping, plus one
+`UpstoxFeedV3Source.acquire()` snapshot end-to-end). Safe to run outside market
+hours — expect a `market_info` frame plus an `initial_feed` snapshot carrying
+last-session values instead of live ticks.
+
+```bash
+cd app/core
+yarn feed-check                        # token read from app/core/.env
+FEED_CHECK_SECONDS=30 yarn feed-check  # watch the wire for longer
+FEED_CHECK_VERBOSE=1 yarn feed-check   # dump decoded frames (debugging)
+```
+
+Exit code 0 = token, feed handshake, quotes and chain all good.
+
 | Symptom | Check |
 | :--- | :--- |
 | Service not running | `systemctl --user status algo-trade-daemon` + `journalctl --user -u algo-trade-daemon -n 50` |
 | `❌ Fatal: ... PRIMARY_UPSTOX_TOKEN` | Fill `app/core/.env`, then `systemctl --user restart algo-trade-daemon` |
 | Feed down alert / 401s from Upstox | Token expired → `./scripts/refresh-token.sh "<NEW_TOKEN>"` |
+| Before enabling `MARKET_FEED_SOURCE=ws`, or odd feed behavior | `cd app/core && yarn feed-check` (see above) |
 | Bot armed but no trades | Check `./scripts/bot.sh status` → state must be `RUNNING`; entries pause after `lastEntryTime` (default 15:15) and per-symbol daily trade caps |
 | Service stops when you log out | `sudo loginctl enable-linger $USER` |
 | Machine suspends on lid close | See prerequisites above (logind + PowerDevil) |

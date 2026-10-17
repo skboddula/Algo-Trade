@@ -11,6 +11,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/app/core/src/server.js",
+    "feed-check": "tsx scripts/feedCheck.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

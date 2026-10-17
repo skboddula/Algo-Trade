@@ -21,6 +21,7 @@
     "src/services/**/*",
     "src/routes/**/*",
     "src/__tests__/**/*",
+    "scripts/**/*",
     "../../packages/shared/src/**/*"
   ],
   "exclude": [
