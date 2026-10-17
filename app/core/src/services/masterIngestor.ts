@@ -92,6 +92,11 @@ export class MasterIngestionEngine extends EventEmitter {
     this.wsSource.setToken(token) // drop the WS connection so it reconnects with the new token
   }
 
+  /** Current master ingestion token (undefined when unset). */
+  public getMasterToken(): string | undefined {
+    return this.config.primaryUpstoxToken
+  }
+
   /**
    * Declare which option contracts the live feed should stream at tick level
    * (open positions). Only the WebSocket transport acts on this.

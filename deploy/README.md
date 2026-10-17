@@ -129,6 +129,11 @@ always `systemctl --user stop algo-trade-daemon-v2` on one host before starting 
 
 Raw API equivalents (curl) and the full endpoint list are in `app/core/README.md`.
 
+**Live-order authentication (daemon-only mode):** live entries/exits authenticate with the same
+daily account token you refresh in the routine above (the master ingestion token) — no separate
+per-user token is needed. If you ever connect a different Upstox account, set a per-user token via
+`POST /api/bot/token` (or `./scripts/bot.sh token "<TOKEN>"`); it takes precedence for that user.
+
 ### Service management
 
 ```bash

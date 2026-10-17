@@ -144,7 +144,7 @@ export class TenantManager extends EventEmitter {
       await this.orderGateway.exitOrder({
         userId,
         executionMode: user.executionMode,
-        token: user.upstoxToken,
+        token: this.resolveOrderToken(user),
         position,
         exitPrice,
         reason,
@@ -162,6 +162,15 @@ export class TenantManager extends EventEmitter {
       this.fireAlert(`🔵 Algo-Trade: closed ${symbol} position for ${userId} (${reason}) @ ₹${exitPrice}`)
     }
     return user
+  }
+
+  /**
+   * Per-user Upstox token when one was set via POST /api/bot/token.
+   * In daemon-only single-account mode (no per-user token) live orders fall
+   * back to the master ingestion token refreshed through the OAuth flow.
+   */
+  private resolveOrderToken(user: UserBotState): string | undefined {
+    return user.upstoxToken || this.masterIngestor.getMasterToken()
   }
 
   private async handleMarketTick(tick: { timestamp: string; snapshots: Record<UnderlyingSymbol, MarketSnapshot> }) {
@@ -268,7 +277,7 @@ export class TenantManager extends EventEmitter {
               const orderRes = await this.orderGateway.placeOrder({
                 userId,
                 executionMode: user.executionMode,
-                token: user.upstoxToken,
+                token: this.resolveOrderToken(user),
                 instrumentKey: selectedContract.instrumentKey,
                 direction,
                 quantity: selectedContract.lotSize,
