@@ -50,6 +50,9 @@ cd /path/to/Algo-Trade
 cp app/core/.env.sample app/core/.env
 #    → edit app/core/.env: set PRIMARY_UPSTOX_TOKEN (Upstox access token),
 #      optionally TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID for alerts.
+#      Optional: MARKET_FEED_SOURCE=ws enables the Upstox Market Data Feed V3
+#      WebSocket transport (live index ticks + 1-min candles, with a REST
+#      option-chain refresh) instead of the default REST LTP polling.
 #      Default binding is 127.0.0.1 — keep it that way unless you add auth.
 
 # 2. Build + install the service

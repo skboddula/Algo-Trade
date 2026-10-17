@@ -48,8 +48,10 @@ export function buildServer(opts?: { mockMode?: boolean; primaryToken?: string; 
 
   const masterIngestor = new MasterIngestionEngine({
     pollingIntervalMs: parseInt(process.env.POLLING_INTERVAL_MS || '2000', 10),
+    upstoxApiBaseUrl: process.env.UPSTOX_API_URL || 'https://api.upstox.com/v2',
     primaryUpstoxToken: opts?.primaryToken || process.env.PRIMARY_UPSTOX_TOKEN,
     mockMode: opts?.mockMode ?? (process.env.NODE_ENV === 'test' || !process.env.PRIMARY_UPSTOX_TOKEN),
+    liveSource: process.env.MARKET_FEED_SOURCE === 'ws' ? 'ws' : 'rest',
     notifier,
   })
 

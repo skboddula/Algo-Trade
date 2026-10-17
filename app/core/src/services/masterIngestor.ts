@@ -15,12 +15,15 @@ import type { Notifier } from './notifier'
 import type { MarketDataSource } from './marketDataSource'
 import { MockMarketDataSource } from './marketDataSources/mockMarketDataSource'
 import { RestMarketDataSource } from './marketDataSources/restMarketDataSource'
+import { UpstoxFeedV3Source } from './marketDataSources/upstoxFeedV3Source'
 
 export interface MasterIngestorConfig {
   pollingIntervalMs: number
   upstoxApiBaseUrl: string
   primaryUpstoxToken?: string
   mockMode?: boolean
+  /** Live transport: 'rest' (LTP polling, default) or 'ws' (Upstox Feed V3 WebSocket). */
+  liveSource?: 'rest' | 'ws'
   notifier?: Notifier
 }
 
@@ -37,6 +40,7 @@ export class MasterIngestionEngine extends EventEmitter {
   private lastFeedError = ''
   private readonly mockSource: MockMarketDataSource
   private readonly restSource: RestMarketDataSource
+  private readonly wsSource: UpstoxFeedV3Source
 
   constructor(config?: Partial<MasterIngestorConfig>) {
     super()
@@ -46,6 +50,7 @@ export class MasterIngestionEngine extends EventEmitter {
       upstoxApiBaseUrl: config?.upstoxApiBaseUrl ?? 'https://api.upstox.com/v2',
       primaryUpstoxToken: config?.primaryUpstoxToken,
       mockMode: config?.mockMode ?? false,
+      liveSource: config?.liveSource ?? 'rest',
       notifier: config?.notifier,
     }
 
@@ -54,6 +59,10 @@ export class MasterIngestionEngine extends EventEmitter {
     this.mockSource = new MockMarketDataSource()
     this.restSource = new RestMarketDataSource({
       upstoxApiBaseUrl: this.config.upstoxApiBaseUrl,
+      getToken: () => this.config.primaryUpstoxToken,
+    })
+    this.wsSource = new UpstoxFeedV3Source({
+      restApiBaseUrl: this.config.upstoxApiBaseUrl,
       getToken: () => this.config.primaryUpstoxToken,
     })
 
@@ -65,6 +74,7 @@ export class MasterIngestionEngine extends EventEmitter {
 
   public setToken(token: string) {
     this.config.primaryUpstoxToken = token
+    this.wsSource.setToken(token) // drop the WS connection so it reconnects with the new token
   }
 
   public setMockMode(enabled: boolean) {
@@ -83,6 +93,7 @@ export class MasterIngestionEngine extends EventEmitter {
       clearTimeout(this.timer)
       this.timer = null
     }
+    this.wsSource.stop()
   }
 
   public getSnapshot(symbol: UnderlyingSymbol): MarketSnapshot | undefined {
@@ -248,8 +259,12 @@ export class MasterIngestionEngine extends EventEmitter {
     return candles
   }
 
-  /** Transport selection: mock synthesis unless a live master token is present. */
+  /**
+   * Transport selection: mock synthesis unless a live master token is present;
+   * with a token, the configured live transport (REST polling or Feed V3 WS).
+   */
   private resolveSource(): MarketDataSource {
-    return this.config.mockMode || !this.config.primaryUpstoxToken ? this.mockSource : this.restSource
+    if (this.config.mockMode || !this.config.primaryUpstoxToken) return this.mockSource
+    return this.config.liveSource === 'ws' ? this.wsSource : this.restSource
   }
 }
