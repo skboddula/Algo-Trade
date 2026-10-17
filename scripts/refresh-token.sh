@@ -6,6 +6,10 @@
 #   1. Generate a fresh token via the Upstox login flow
 #   2. scripts/refresh-token.sh <UPSTOX_ACCESS_TOKEN>
 #
+# Browser alternative (recommended): open http://127.0.0.1:3000/auth/upstox/start
+# (requires UPSTOX_API_KEY/UPSTOX_API_SECRET/UPSTOX_REDIRECT_URI in .env —
+# see deploy/README.md). This CLI path stays as the headless fallback.
+#
 # Updates PRIMARY_UPSTOX_TOKEN in app/core/.env (timestamped backup kept
 # alongside), restarts the systemd user service, and runs a health check.
 #

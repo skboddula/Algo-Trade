@@ -10,10 +10,17 @@ import { TenantManager } from './services/tenantManager'
 import { StateStore } from './services/stateStore'
 import { createTelegramNotifier } from './services/notifier'
 import { botRoutes } from './routes/botRoutes'
+import { upstoxAuthRoutes, type UpstoxAuthRoutesOptions } from './routes/upstoxAuth'
 
 dotenv.config()
 
-export function buildServer(opts?: { mockMode?: boolean; primaryToken?: string; store?: StateStore | null }) {
+export function buildServer(opts?: {
+  mockMode?: boolean
+  primaryToken?: string
+  store?: StateStore | null
+  /** Overrides for the Upstox OAuth routes; null skips registration. */
+  upstoxAuth?: Omit<UpstoxAuthRoutesOptions, 'masterIngestor'> | null
+}) {
   const app = fastify({
     logger: {
       level: process.env.LOG_LEVEL || 'info',
@@ -89,6 +96,14 @@ export function buildServer(opts?: { mockMode?: boolean; primaryToken?: string; 
     tenantManager,
     orderGateway,
   })
+
+  // Register Upstox OAuth routes (browser-based daily token refresh)
+  if (opts?.upstoxAuth !== null) {
+    app.register(upstoxAuthRoutes, {
+      masterIngestor,
+      ...(opts?.upstoxAuth ?? {}),
+    })
+  }
 
   // Health check route
   app.get('/health', async () => {

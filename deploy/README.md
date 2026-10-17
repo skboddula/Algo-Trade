@@ -76,20 +76,38 @@ That's it. You can now close every browser tab. The service starts automatically
 
 ---
 
-## Daily routine (2 commands, ~30 seconds)
+## Daily routine (~30 seconds)
 
-Upstox access tokens expire **daily around 03:30 IST**. Each trading morning:
+Upstox access tokens expire **daily around 03:30 IST**. Each trading morning: refresh the token,
+then make sure the bot is armed.
+
+### 1. Refresh the token — browser (recommended)
+
+Open (bookmark it):
+
+    http://127.0.0.1:3000/auth/upstox/start
+
+Log in to Upstox. The daemon exchanges the code, saves the new token to `app/core/.env`
+(timestamped backup kept), and hot-swaps the live feed — no restart, nothing to copy.
+
+One-time setup: set `UPSTOX_API_KEY`, `UPSTOX_API_SECRET`, and `UPSTOX_REDIRECT_URI` in
+`app/core/.env`, and register the same redirect URI in your Upstox app
+(<https://account.upstox.com/developer/apps>). The API secret stays on this machine — it is only
+ever sent from the daemon process to Upstox during the exchange.
+
+### 2. Refresh the token — CLI (fallback / headless hosts)
 
 ```bash
-# 1. Generate a new access token via the Upstox login flow, then:
+# Generate a new access token via the Upstox login flow, then:
 ./scripts/refresh-token.sh "<NEW_UPSTOX_ACCESS_TOKEN>"
+```
 
-# 2. (Optional) Verify the fresh token end-to-end before arming:
-( cd app/core && yarn feed-check )
+### 3. Verify + arm
 
-# 3. Make sure the bot is armed
-./scripts/bot.sh status        # check state: RUNNING / ORDERED
-./scripts/bot.sh start paper   # if it is not running (paper or live)
+```bash
+( cd app/core && yarn feed-check )   # optional: verify the fresh token end-to-end
+./scripts/bot.sh status              # check state: RUNNING / ORDERED
+./scripts/bot.sh start paper         # if it is not running (paper or live)
 ```
 
 If you ever run two daemons against the same Upstox account simultaneously, you can double-trade —
@@ -212,7 +230,8 @@ latency (`lastMessageAgeMs` doubles as a freshness probe). Use them to tune
 | :--- | :--- |
 | Service not running | `systemctl --user status algo-trade-daemon-v2` + `journalctl --user -u algo-trade-daemon-v2 -n 50` |
 | `❌ Fatal: ... PRIMARY_UPSTOX_TOKEN` | Fill `app/core/.env`, then `systemctl --user restart algo-trade-daemon-v2` |
-| Feed down alert / 401s from Upstox | Token expired → `./scripts/refresh-token.sh "<NEW_TOKEN>"` |
+| Feed down alert / 401s from Upstox | Token expired → browser refresh (`/auth/upstox/start`) or `./scripts/refresh-token.sh "<NEW_TOKEN>"` |
+| Browser refresh says "not configured" | Set `UPSTOX_API_KEY`/`UPSTOX_API_SECRET`/`UPSTOX_REDIRECT_URI` in `app/core/.env`, register that redirect URI in your Upstox app, restart `algo-trade-daemon-v2` |
 | Before enabling `MARKET_FEED_SOURCE=ws`, or odd feed behavior | `cd app/core && yarn feed-check` (see above) |
 | Bot armed but no trades | Check `./scripts/bot.sh status` → state must be `RUNNING`; entries pause after `lastEntryTime` (default 15:15) and per-symbol daily trade caps |
 | Service stops when you log out | `sudo loginctl enable-linger $USER` |
