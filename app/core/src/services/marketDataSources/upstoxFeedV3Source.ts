@@ -47,6 +47,22 @@ export interface UpstoxFeedV3SourceOptions {
   isMarketOpen?: () => boolean
   /** Diagnostics sink (defaults to console.warn). */
   onLog?: (message: string) => void
+  /** Periodic feed-stats log cadence (default 60000 ms; 0 disables the timer). */
+  statsIntervalMs?: number
+}
+
+/** Cumulative live-feed counters for calibration and health checks. */
+export interface UpstoxFeedStats {
+  state: ConnectionState
+  /** Time since the first connection attempt (0 while never used). */
+  activeForMs: number
+  frames: { initial: number; live: number; marketInfo: number; other: number; decodeErrors: number }
+  ticks: { index: number; option: number }
+  optionKeys: { current: number; peak: number }
+  reconnects: number
+  chain: { calls: number; failures: number; lastLatencyMs: number | null; lastError?: string }
+  expiry: { calls: number; failures: number }
+  lastMessageAgeMs: number | null
 }
 
 type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed'
@@ -69,6 +85,7 @@ const DEFAULT_RECONNECT_MIN_MS = 3_000
 const DEFAULT_RECONNECT_MAX_MS = 30_000
 const DEFAULT_OPTION_CHAIN_REFRESH_MS = 15_000
 const DEFAULT_ATM_WINDOW_STRIKES = 5
+const DEFAULT_STATS_INTERVAL_MS = 60_000
 const MAX_OPTION_SUBSCRIPTIONS = 90
 const EXPIRY_RETRY_MS = 60_000
 const I1_INTERVAL = 'I1'
@@ -93,6 +110,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   private readonly atmWindowStrikes: number
   private readonly isMarketOpenFn: () => boolean
   private readonly onLog: (message: string) => void
+  private readonly statsIntervalMs: number
 
   private state: ConnectionState = 'idle'
   private socket: WebSocket | null = null
@@ -102,6 +120,17 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   private connectStartedAt = 0
   private lastConnectAttemptAt = 0
   private lastMessageAt = 0
+
+  // Calibration counters (see getStats)
+  private statsTimer: NodeJS.Timeout | null = null
+  private statsStartedAt = 0
+  private readonly statFrames = { initial: 0, live: 0, marketInfo: 0, other: 0, decodeErrors: 0 }
+  private statIndexTicks = 0
+  private statOptionTicks = 0
+  private statPeakOptionKeys = 0
+  private statReconnects = 0
+  private readonly statChain = { calls: 0, failures: 0, lastLatencyMs: null as number | null, lastError: '' }
+  private readonly statExpiry = { calls: 0, failures: 0 }
 
   private readonly indexCache = new Map<UnderlyingSymbol, IndexTick>()
   private readonly lastChainFetchAt = new Map<UnderlyingSymbol, number>()
@@ -127,6 +156,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     this.atmWindowStrikes = opts.atmWindowStrikes ?? DEFAULT_ATM_WINDOW_STRIKES
     this.isMarketOpenFn = opts.isMarketOpen ?? (() => isMarketOpen())
     this.onLog = opts.onLog ?? ((message) => console.warn(message))
+    this.statsIntervalMs = opts.statsIntervalMs ?? DEFAULT_STATS_INTERVAL_MS
     this.reconnectDelay = this.reconnectMinMs
   }
 
@@ -163,12 +193,53 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   /** Close the feed and stop reconnecting (called on engine shutdown). */
   public stop(): void {
     this.stopped = true
+    if (this.statsTimer) {
+      clearInterval(this.statsTimer)
+      this.statsTimer = null
+    }
     this.teardownSocket()
   }
 
   /** Visible for diagnostics/tests. */
   public getConnectionState(): ConnectionState {
     return this.state
+  }
+
+  /** Cumulative feed counters for calibration and health checks (safe to call anytime). */
+  public getStats(): UpstoxFeedStats {
+    const now = Date.now()
+    this.statPeakOptionKeys = Math.max(this.statPeakOptionKeys, this.subscribedOptionKeys.size)
+    return {
+      state: this.state,
+      activeForMs: this.statsStartedAt ? now - this.statsStartedAt : 0,
+      frames: { ...this.statFrames },
+      ticks: { index: this.statIndexTicks, option: this.statOptionTicks },
+      optionKeys: { current: this.subscribedOptionKeys.size, peak: this.statPeakOptionKeys },
+      reconnects: this.statReconnects,
+      chain: {
+        calls: this.statChain.calls,
+        failures: this.statChain.failures,
+        lastLatencyMs: this.statChain.lastLatencyMs,
+        ...(this.statChain.lastError ? { lastError: this.statChain.lastError } : {}),
+      },
+      expiry: { calls: this.statExpiry.calls, failures: this.statExpiry.failures },
+      lastMessageAgeMs: this.lastMessageAt ? now - this.lastMessageAt : null,
+    }
+  }
+
+  private markFeedActive(): void {
+    if (!this.statsStartedAt) this.statsStartedAt = Date.now()
+    if (this.statsTimer || this.statsIntervalMs <= 0) return
+    this.statsTimer = setInterval(() => {
+      this.log(`feed-stats ${JSON.stringify(this.getStats())}`)
+    }, this.statsIntervalMs)
+    this.statsTimer.unref()
+  }
+
+  private trackPeakOptionKeys(): void {
+    if (this.subscribedOptionKeys.size > this.statPeakOptionKeys) {
+      this.statPeakOptionKeys = this.subscribedOptionKeys.size
+    }
   }
 
   /**
@@ -195,6 +266,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     const token = this.getToken()
     if (!token) return
 
+    this.markFeedActive()
     this.state = 'connecting'
     this.connectStartedAt = Date.now()
     this.lastConnectAttemptAt = this.connectStartedAt
@@ -258,6 +330,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
       data: { mode: 'full', instrumentKeys: [...Object.values(UNDERLYING_INSTRUMENT_KEYS), ...optionKeys] },
     })
     this.subscribedOptionKeys = new Set(optionKeys)
+    this.trackPeakOptionKeys()
   }
 
   private sendJson(socket: WebSocket, payload: Record<string, unknown>): void {
@@ -280,23 +353,35 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     try {
       decoded = decodeFeedResponse(data)
     } catch (err) {
+      this.statFrames.decodeErrors += 1
       this.log(`ws frame decode failed: ${(err as Error).message}`)
       return
     }
 
     this.lastMessageAt = Date.now()
+    if (decoded.type === 'market_info') this.statFrames.marketInfo += 1
+    else if (decoded.type === 'live_feed') this.statFrames.live += 1
+    else if (decoded.feeds) this.statFrames.initial += 1
+    else this.statFrames.other += 1
+
     if (!decoded.feeds) return
     for (const [instrumentKey, feed] of Object.entries(decoded.feeds)) {
       const symbol = INSTRUMENT_KEY_TO_SYMBOL[instrumentKey]
       if (symbol) {
         const tick = extractIndexTick(feed)
-        if (tick) this.indexCache.set(symbol, tick)
+        if (tick) {
+          this.indexCache.set(symbol, tick)
+          this.statIndexTicks += 1
+        }
         continue
       }
       // Option contract: only keys we actually subscribed to are trusted.
       if (!this.subscribedOptionKeys.has(instrumentKey)) continue
       const ltp = extractOptionLtp(feed)
-      if (ltp !== null) this.optionTickCache.set(instrumentKey, ltp)
+      if (ltp !== null) {
+        this.optionTickCache.set(instrumentKey, ltp)
+        this.statOptionTicks += 1
+      }
     }
   }
 
@@ -312,6 +397,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
 
   private scheduleReconnect(): void {
     if (this.stopped || this.reconnectTimer) return
+    this.statReconnects += 1
     const delay = this.reconnectDelay
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
@@ -379,6 +465,8 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     try {
       const expiry = await this.ensureExpiry(symbol, token, instrumentKey)
       if (!expiry) return currentChain
+      const startedAt = Date.now()
+      this.statChain.calls += 1
       const chain = await fetchOptionChain({
         restApiBaseUrl: this.restApiBaseUrl,
         token,
@@ -386,6 +474,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
         expiry,
         fallbackSpotPrice: spotPrice,
       })
+      this.statChain.lastLatencyMs = Date.now() - startedAt
       if (chain.length) {
         this.updateWindowKeys(symbol, chain, spotPrice)
         this.syncOptionSubscriptions()
@@ -393,6 +482,8 @@ export class UpstoxFeedV3Source implements MarketDataSource {
       }
       return currentChain
     } catch (err) {
+      this.statChain.failures += 1
+      this.statChain.lastError = (err as Error).message
       this.log(`option-chain refresh failed for ${symbol}: ${(err as Error).message}`)
       return currentChain
     }
@@ -406,11 +497,13 @@ export class UpstoxFeedV3Source implements MarketDataSource {
       if (cached.failedAt && Date.now() - cached.failedAt < EXPIRY_RETRY_MS) return null
     }
 
+    this.statExpiry.calls += 1
     try {
       const expiry = await fetchNearestExpiry({ restApiBaseUrl: this.restApiBaseUrl, token, instrumentKey })
       this.expiryCache.set(symbol, { date: today, expiry })
       return expiry
     } catch (err) {
+      this.statExpiry.failures += 1
       this.log(`expiry lookup failed for ${symbol}: ${(err as Error).message}`)
       this.expiryCache.set(symbol, { date: today, expiry: null, failedAt: Date.now() })
       return null
@@ -432,6 +525,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
       for (const key of toRemove) this.optionTickCache.delete(key)
     }
     this.subscribedOptionKeys = new Set(desired)
+    this.trackPeakOptionKeys()
   }
 
   /** Open-position contracts first, then the nearest-strike window, capped below the server limit. */

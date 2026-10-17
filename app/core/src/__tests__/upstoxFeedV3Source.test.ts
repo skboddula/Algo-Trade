@@ -546,6 +546,107 @@ describe('UpstoxFeedV3Source', () => {
     )
     expect(settled).toHaveLength(4)
   })
+
+  it('accumulates feed stats for calibration (frames, ticks, option keys, chain latency/failures)', async () => {
+    const nearExpiry = istDatePlusDays(3)
+    const h = await startHarness({
+      source: { optionChainRefreshMs: 1, restApiBaseUrl: 'http://upstox-rest.test/v2' },
+    })
+    activeHarness = h
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL) => {
+        const resolved = String(url)
+        if (resolved.includes('/option/contract')) {
+          return { ok: true, json: async () => ({ data: [{ expiry: nearExpiry }] }) } as unknown as Response
+        }
+        if (resolved.includes('/option/chain')) {
+          return {
+            ok: true,
+            json: async () => ({
+              data: [
+                {
+                  strike_price: 103,
+                  expiry: nearExpiry,
+                  underlying_spot_price: 103,
+                  call_options: { instrument_key: 'NSE_FO|CE1', market_data: { ltp: 10, volume: 1, oi: 1 } },
+                  put_options: { instrument_key: 'NSE_FO|PE1', market_data: { ltp: 20, volume: 1, oi: 1 } },
+                },
+              ],
+            }),
+          } as unknown as Response
+        }
+        throw new Error(`unexpected fetch ${resolved}`)
+      }),
+    )
+
+    await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't0', candles: sampleCandles(2), optionChain: [] })
+    await waitFor(() => h.source.getConnectionState() === 'open', 3000, 'ws open')
+    await waitFor(() => computeSubscribed(h.messages).has('NSE_FO|CE1'), 3000, 'option subscription')
+
+    const i1ts = Date.now()
+    sendToLatest(
+      h,
+      indexFeedFrame('NSE_INDEX|Nifty 50', 104, { open: 100, high: 105, low: 99, close: 104, vol: 5, ts: i1ts }),
+    )
+    sendToLatest(h, optionFeedFrame('NSE_FO|CE1', 12.5))
+
+    const stats = await waitFor(
+      () => {
+        const current = h.source.getStats()
+        return current.ticks.index >= 1 && current.ticks.option >= 1 ? current : null
+      },
+      3000,
+      'ticks counted',
+    )
+
+    expect(stats.state).toBe('open')
+    expect(stats.activeForMs).toBeGreaterThanOrEqual(0)
+    expect(stats.frames).toEqual({ initial: 0, live: 2, marketInfo: 0, other: 0, decodeErrors: 0 })
+    expect(stats.ticks).toEqual({ index: 1, option: 1 })
+    expect(stats.optionKeys).toEqual({ current: 2, peak: 2 })
+    expect(stats.reconnects).toBe(0)
+    expect(stats.chain.calls).toBe(1)
+    expect(stats.chain.failures).toBe(0)
+    expect(typeof stats.chain.lastLatencyMs).toBe('number')
+    expect(stats.expiry).toEqual({ calls: 1, failures: 0 })
+    expect(stats.lastMessageAgeMs).toBeGreaterThanOrEqual(0)
+
+    // Chain failure on the next due refresh: counters record it, expiry stays cached.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('rest down')
+      }),
+    )
+    await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't1', candles: sampleCandles(2), optionChain: [] })
+
+    const failed = h.source.getStats()
+    expect(failed.chain.calls).toBe(2)
+    expect(failed.chain.failures).toBe(1)
+    expect(failed.chain.lastError).toContain('rest down')
+    expect(failed.expiry.calls).toBe(1)
+  })
+
+  it('emits a periodic feed-stats log line while active and stops on stop()', async () => {
+    const h = await startHarness({ source: { statsIntervalMs: 25 } })
+    activeHarness = h
+
+    await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't0', candles: sampleCandles(2), optionChain: [] })
+    await waitFor(() => h.source.getConnectionState() === 'open', 3000, 'ws open')
+
+    const line = await waitFor(() => h.logs.find((entry) => entry.includes('feed-stats ')), 3000, 'stats log')
+    const parsed = JSON.parse(line.slice(line.indexOf('feed-stats ') + 'feed-stats '.length))
+    expect(parsed.state).toBe('open')
+    expect(parsed.frames).toBeDefined()
+    expect(parsed.optionKeys.current).toBeGreaterThanOrEqual(0)
+
+    h.source.stop()
+    const logged = h.logs.filter((entry) => entry.includes('feed-stats ')).length
+    await sleep(80)
+    expect(h.logs.filter((entry) => entry.includes('feed-stats ')).length).toBe(logged)
+  })
 })
 
 describe('upstoxFeedV3Proto', () => {

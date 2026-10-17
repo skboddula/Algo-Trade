@@ -92,7 +92,12 @@ export function buildServer(opts?: { mockMode?: boolean; primaryToken?: string; 
 
   // Health check route
   app.get('/health', async () => {
-    return { status: 'healthy', timestamp: new Date().toISOString(), memoryUsage: process.memoryUsage() }
+    return {
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      memoryUsage: process.memoryUsage(),
+      feed: masterIngestor.getFeedStats(),
+    }
   })
 
   // Graceful shutdown hooks

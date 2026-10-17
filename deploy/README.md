@@ -188,6 +188,21 @@ FEED_CHECK_VERBOSE=1 yarn feed-check   # dump decoded frames (debugging)
 
 Exit code 0 = token, feed handshake, quotes and chain all good.
 
+### Live feed telemetry (calibration)
+
+While the WS feed is active, the daemon emits one `feed-stats` JSON line per
+minute (`journalctl --user -u algo-trade-daemon -f | grep feed-stats`). The
+same counters are available on demand:
+
+```bash
+./scripts/bot.sh health | jq .feed     # or: curl -s 127.0.0.1:3000/health | jq .feed
+```
+
+Counters: decoded frames by type, index/option tick counts, subscribed option
+keys (current/peak), reconnects, and option-chain REST calls, failures and
+latency (`lastMessageAgeMs` doubles as a freshness probe). Use them to tune
+`OPTION_CHAIN_REFRESH_MS` and `ATM_WINDOW_STRIKES`.
+
 | Symptom | Check |
 | :--- | :--- |
 | Service not running | `systemctl --user status algo-trade-daemon` + `journalctl --user -u algo-trade-daemon -n 50` |

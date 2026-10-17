@@ -67,4 +67,20 @@ describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
     expect((defaults as any).wsSource.optionChainRefreshMs).toBe(15000)
     expect((defaults as any).wsSource.atmWindowStrikes).toBe(5)
   })
+
+  it('exposes feed stats for health checks (transport + WS counters)', () => {
+    const mock = new MasterIngestionEngine({ mockMode: true })
+    const mockStats = mock.getFeedStats()
+    expect(mockStats.source).toBe('mock')
+    expect(mockStats.ws.state).toBe('idle')
+
+    const ws = new MasterIngestionEngine({ liveSource: 'ws', primaryUpstoxToken: 'test-token' })
+    const wsStats = ws.getFeedStats()
+    expect(wsStats.source).toBe('upstox-ws-v3')
+    expect(wsStats.ws.state).toBe('idle')
+    expect(wsStats.ws.frames).toEqual({ initial: 0, live: 0, marketInfo: 0, other: 0, decodeErrors: 0 })
+    expect(wsStats.ws.optionKeys).toEqual({ current: 0, peak: 0 })
+    expect(wsStats.ws.chain.calls).toBe(0)
+    expect(wsStats.ws.lastMessageAgeMs).toBeNull()
+  })
 })

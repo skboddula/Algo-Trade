@@ -14,7 +14,7 @@ describe('Fastify Bot Routes & API Suite', () => {
     await server.app.close()
   })
 
-  it('GET /health returns healthy status and memory usage', async () => {
+  it('GET /health returns healthy status, memory usage, and feed stats', async () => {
     const res = await server.app.inject({
       method: 'GET',
       url: '/health',
@@ -23,6 +23,9 @@ describe('Fastify Bot Routes & API Suite', () => {
     const json = JSON.parse(res.body)
     expect(json.status).toBe('healthy')
     expect(json.memoryUsage).toBeDefined()
+    expect(json.feed).toBeDefined()
+    expect(json.feed.source).toBe('mock')
+    expect(json.feed.ws.state).toBe('idle')
   })
 
   it('GET /api/bot/status returns snapshots, user state, and paper trades', async () => {

@@ -15,7 +15,7 @@ import type { Notifier } from './notifier'
 import type { MarketDataSource } from './marketDataSource'
 import { MockMarketDataSource } from './marketDataSources/mockMarketDataSource'
 import { RestMarketDataSource } from './marketDataSources/restMarketDataSource'
-import { UpstoxFeedV3Source } from './marketDataSources/upstoxFeedV3Source'
+import { UpstoxFeedV3Source, type UpstoxFeedStats } from './marketDataSources/upstoxFeedV3Source'
 
 export interface MasterIngestorConfig {
   pollingIntervalMs: number
@@ -133,6 +133,11 @@ export class MasterIngestionEngine extends EventEmitter {
 
   public getOptionChain(symbol: UnderlyingSymbol): OptionData[] {
     return this.latestOptionChains.get(symbol) || []
+  }
+
+  /** Live-feed diagnostics: active transport name + WS counters (calibration / health checks). */
+  public getFeedStats(): { source: string; ws: UpstoxFeedStats } {
+    return { source: this.resolveSource().name, ws: this.wsSource.getStats() }
   }
 
   private async runTick() {
