@@ -10,13 +10,13 @@
 # alongside), restarts the systemd user service, and runs a health check.
 #
 # Environment:
-#   SERVICE_NAME  systemd user unit name  (default algo-trade-daemon)
+#   SERVICE_NAME  systemd user unit name  (default algo-trade-daemon-v2)
 #   DAEMON_URL    daemon base URL         (default http://127.0.0.1:3000)
 #
 set -euo pipefail
 
 TOKEN="${1:?usage: refresh-token.sh <upstox-access-token>}"
-SERVICE_NAME="${SERVICE_NAME:-algo-trade-daemon}"
+SERVICE_NAME="${SERVICE_NAME:-algo-trade-daemon-v2}"
 DAEMON_URL="${DAEMON_URL:-http://127.0.0.1:3000}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

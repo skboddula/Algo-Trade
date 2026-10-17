@@ -68,10 +68,11 @@ cp app/core/.env.sample app/core/.env
 That's it. You can now close every browser tab. The service starts automatically on boot
 (`systemctl --user enable` was done by the installer).
 
-> **Note:** `deploy/install.sh` replaces any existing systemd user unit with the same name
-> (`algo-trade-daemon.service`). If you keep customizations there, back it up first. Make sure only
-> **one** daemon runs per Upstox account — stop any other host/checkout first (see the warning in
-> [Daily routine](#daily-routine-2-commands-30-seconds)).
+> **Note:** `deploy/install.sh` installs `algo-trade-daemon-v2` and replaces any existing unit
+> with that name (back up customizations first). If the legacy `algo-trade-daemon` unit from an
+> older checkout is still present, the installer stops and disables it so only one daemon runs.
+> Make sure only **one** daemon runs per Upstox account — stop any other host/checkout first (see
+> the warning in [Daily routine](#daily-routine-2-commands-30-seconds)).
 
 ---
 
@@ -92,7 +93,7 @@ Upstox access tokens expire **daily around 03:30 IST**. Each trading morning:
 ```
 
 If you ever run two daemons against the same Upstox account simultaneously, you can double-trade —
-always `systemctl --user stop algo-trade-daemon` on one host before starting another.
+always `systemctl --user stop algo-trade-daemon-v2` on one host before starting another.
 
 ---
 
@@ -113,14 +114,18 @@ Raw API equivalents (curl) and the full endpoint list are in `app/core/README.md
 ### Service management
 
 ```bash
-systemctl --user status  algo-trade-daemon
-systemctl --user restart algo-trade-daemon
-systemctl --user stop    algo-trade-daemon
-journalctl --user -u algo-trade-daemon -f          # live logs
-journalctl --user -u algo-trade-daemon --since today
+systemctl --user status  algo-trade-daemon-v2
+systemctl --user restart algo-trade-daemon-v2
+systemctl --user stop    algo-trade-daemon-v2
+journalctl --user -u algo-trade-daemon-v2 -f          # live logs
+journalctl --user -u algo-trade-daemon-v2 --since today
 ```
 
 The service has `Restart=on-failure`, so a crashed daemon comes back automatically in ~5 seconds.
+
+An older `algo-trade-daemon` unit (legacy checkout) may still exist from earlier installs. The
+installer stops and disables it but keeps the file; re-enable it only if you intentionally switch
+back: `systemctl --user enable --now algo-trade-daemon` (never while `algo-trade-daemon-v2` runs).
 
 ---
 
@@ -157,9 +162,9 @@ secret and never commit it (the directory is git-ignored).
 Backup (while the daemon is running it is safest to use SQLite's own copy):
 
 ```bash
-systemctl --user stop algo-trade-daemon
+systemctl --user stop algo-trade-daemon-v2
 cp app/core/data/algo-trade.sqlite "$HOME/algo-trade-backup-$(date +%F).sqlite"
-systemctl --user start algo-trade-daemon
+systemctl --user start algo-trade-daemon-v2
 ```
 
 Restore: stop the service, copy the file back to `app/core/data/algo-trade.sqlite`, start again.
@@ -191,7 +196,7 @@ Exit code 0 = token, feed handshake, quotes and chain all good.
 ### Live feed telemetry (calibration)
 
 While the WS feed is active, the daemon emits one `feed-stats` JSON line per
-minute (`journalctl --user -u algo-trade-daemon -f | grep feed-stats`). The
+minute (`journalctl --user -u algo-trade-daemon-v2 -f | grep feed-stats`). The
 same counters are available on demand:
 
 ```bash
@@ -205,8 +210,8 @@ latency (`lastMessageAgeMs` doubles as a freshness probe). Use them to tune
 
 | Symptom | Check |
 | :--- | :--- |
-| Service not running | `systemctl --user status algo-trade-daemon` + `journalctl --user -u algo-trade-daemon -n 50` |
-| `❌ Fatal: ... PRIMARY_UPSTOX_TOKEN` | Fill `app/core/.env`, then `systemctl --user restart algo-trade-daemon` |
+| Service not running | `systemctl --user status algo-trade-daemon-v2` + `journalctl --user -u algo-trade-daemon-v2 -n 50` |
+| `❌ Fatal: ... PRIMARY_UPSTOX_TOKEN` | Fill `app/core/.env`, then `systemctl --user restart algo-trade-daemon-v2` |
 | Feed down alert / 401s from Upstox | Token expired → `./scripts/refresh-token.sh "<NEW_TOKEN>"` |
 | Before enabling `MARKET_FEED_SOURCE=ws`, or odd feed behavior | `cd app/core && yarn feed-check` (see above) |
 | Bot armed but no trades | Check `./scripts/bot.sh status` → state must be `RUNNING`; entries pause after `lastEntryTime` (default 15:15) and per-symbol daily trade caps |
@@ -225,12 +230,12 @@ The layout is deliberately host-agnostic — no path is baked into the code:
 3. Install as a **system** service instead of a user service:
 
    ```bash
-   sudo cp deploy/systemd/algo-trade-daemon.service /etc/systemd/system/
+   sudo cp deploy/systemd/algo-trade-daemon-v2.service /etc/systemd/system/
    sudo sed -i "s|__APP_CORE_DIR__|/opt/Algo-Trade/app/core|g; s|__NODE_BIN__|$(command -v node)|g" \
-       /etc/systemd/system/algo-trade-daemon.service
+       /etc/systemd/system/algo-trade-daemon-v2.service
    sudo sed -i "s|WantedBy=default.target|WantedBy=multi-user.target|" \
-       /etc/systemd/system/algo-trade-daemon.service
-   sudo systemctl daemon-reload && sudo systemctl enable --now algo-trade-daemon
+       /etc/systemd/system/algo-trade-daemon-v2.service
+   sudo systemctl daemon-reload && sudo systemctl enable --now algo-trade-daemon-v2
    ```
 
 4. Set `HOST=0.0.0.0` in `.env` **only** together with a firewall / reverse proxy. The API has no

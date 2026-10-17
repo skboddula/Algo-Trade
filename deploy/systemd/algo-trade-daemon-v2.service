@@ -4,9 +4,9 @@
 # __APP_CORE_DIR__ and __NODE_BIN__ with the real paths for this machine.
 #
 # Laptop usage (user service, survives logout when lingering is enabled):
-#   systemctl --user status  algo-trade-daemon
-#   systemctl --user restart algo-trade-daemon
-#   journalctl   --user -u algo-trade-daemon -f
+#   systemctl --user status  algo-trade-daemon-v2
+#   systemctl --user restart algo-trade-daemon-v2
+#   journalctl   --user -u algo-trade-daemon-v2 -f
 #
 # Cloud-VM usage (system service): copy this file to /etc/systemd/system/,
 # replace the placeholders, add `User=<you>` under [Service], and change

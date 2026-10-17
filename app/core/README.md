@@ -80,7 +80,7 @@ Install the daemon as a systemd user service (starts on boot, auto-restarts on c
 
 ```bash
 ./deploy/install.sh                    # from the repo root
-systemctl --user status algo-trade-daemon
+systemctl --user status algo-trade-daemon-v2
 ./scripts/bot.sh start paper           # arm the bot; ./scripts/bot.sh status to check
 ```
 

@@ -5,6 +5,12 @@
 #
 #   deploy/install.sh
 #
+# Environment:
+#   SERVICE_NAME  override the installed unit name (default algo-trade-daemon-v2)
+#
+# Installs/refreshes `algo-trade-daemon-v2`; if the legacy `algo-trade-daemon`
+# unit is still present, it is stopped and disabled so only one daemon runs.
+#
 # Works on any Linux host with systemd (laptop, home server, cloud VM — see
 # deploy/README.md for the VM variant).
 #
@@ -12,10 +18,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_CORE="$REPO_ROOT/app/core"
-UNIT_TEMPLATE="$REPO_ROOT/deploy/systemd/algo-trade-daemon.service"
+UNIT_TEMPLATE="$REPO_ROOT/deploy/systemd/algo-trade-daemon-v2.service"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-UNIT_DST="$UNIT_DIR/algo-trade-daemon.service"
-SERVICE_NAME="algo-trade-daemon"
+SERVICE_NAME="${SERVICE_NAME:-algo-trade-daemon-v2}"
+UNIT_DST="$UNIT_DIR/$SERVICE_NAME.service"
+LEGACY_SERVICE_NAME="${LEGACY_SERVICE_NAME:-algo-trade-daemon}"
 
 # ── Preflight checks ─────────────────────────────────────────────────────────
 NODE_BIN="$(command -v node || true)"
@@ -61,6 +68,21 @@ sed -e "s|__APP_CORE_DIR__|$APP_CORE|g" \
     -e "s|__NODE_BIN__|$NODE_BIN|g" \
     "$UNIT_TEMPLATE" > "$UNIT_DST"
 systemctl --user daemon-reload
+
+# ── Retire the legacy unit ───────────────────────────────────────────────────
+# Older deployments used `algo-trade-daemon` (pointing at a legacy checkout,
+# same port). Stop + disable it so exactly one daemon ever talks to the
+# Upstox account; the unit file is kept and can be re-enabled manually.
+if [[ "$SERVICE_NAME" != "$LEGACY_SERVICE_NAME" ]] && systemctl --user cat "$LEGACY_SERVICE_NAME" >/dev/null 2>&1; then
+  if systemctl --user is-enabled "$LEGACY_SERVICE_NAME" >/dev/null 2>&1 \
+     || systemctl --user is-active "$LEGACY_SERVICE_NAME" >/dev/null 2>&1; then
+    if systemctl --user disable --now "$LEGACY_SERVICE_NAME" >/dev/null 2>&1; then
+      echo "▸ Legacy unit $LEGACY_SERVICE_NAME stopped + disabled (file kept)."
+    else
+      echo "⚠ Found legacy unit $LEGACY_SERVICE_NAME but could not disable it — check: systemctl --user status $LEGACY_SERVICE_NAME"
+    fi
+  fi
+fi
 
 # ── Start (only when the config looks usable) ────────────────────────────────
 if grep -qE '^[[:space:]]*PRIMARY_UPSTOX_TOKEN=.+' "$APP_CORE/.env" \
