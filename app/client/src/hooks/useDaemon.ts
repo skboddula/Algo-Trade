@@ -6,7 +6,9 @@ import type {
   UnderlyingSymbol,
   UserBotState,
 } from '@/lib/types'
+import { DEFAULT_CONFIG } from '@/lib/types'
 import { MAX_LOGS } from '@/lib/constants'
+import { appendTick } from '@/lib/tickLog'
 
 const STATUS_POLL_MS = 5000
 const HEALTH_POLL_MS = 5000
@@ -22,6 +24,8 @@ export interface DaemonController {
   busy: boolean
   lastTickAt: string | null
   clearLogs: () => void
+  /** Force an immediate status + health refresh (header refresh button). */
+  refresh: () => void
   start: (mode: 'paper' | 'live') => Promise<void>
   stop: () => Promise<void>
   exitPosition: (symbol: UnderlyingSymbol, reason?: string) => Promise<void>
@@ -46,6 +50,12 @@ export function useDaemon(): DaemonController {
   const logSeqRef = useRef(0)
   /** Epoch ms of the last socket frame — REST polls that started earlier are stale. */
   const lastSocketFrameRef = useRef(0)
+  /** Latest status snapshot, for handlers that must not close over stale state. */
+  const statusRef = useRef<DaemonStatus | null>(null)
+
+  useEffect(() => {
+    statusRef.current = status
+  }, [status])
 
   const addLog = useCallback(
     (level: BotLog['level'], msg: string, source = 'window') => {
@@ -85,6 +95,45 @@ export function useDaemon(): DaemonController {
       // Transient failure — the next poll retries.
     }
   }, [])
+
+  const refresh = useCallback(() => {
+    void refreshStatus()
+    void refreshHealth()
+  }, [refreshStatus, refreshHealth])
+
+  /**
+   * Mirror the daemon's tick signal into the rolling tick log so the
+   * Threshold Optimizer can replay ticks from this window (same behavior as
+   * the cloud dashboard's browser engine).
+   */
+  const feedTickLog = useCallback(
+    (timestamp: string, snapshots: DaemonStatus['snapshots']) => {
+      try {
+        const preferred =
+          snapshots['NIFTY 50'] ?? Object.values(snapshots).find(Boolean)
+        const signal = preferred?.signal
+        if (!signal) return
+        const config = statusRef.current?.userState?.config ?? DEFAULT_CONFIG
+        const parsed = Date.parse(timestamp)
+        appendTick({
+          ts: Number.isFinite(parsed) ? parsed : Date.now(),
+          bullScore: signal.bullScore,
+          bearScore: signal.bearScore,
+          scoreMax: signal.scoreMax,
+          confidence: signal.confidence,
+          signal: signal.signal,
+          vix: preferred?.vix ?? preferred?.vrdData?.vix ?? null,
+          strongThreshold: config.strongThreshold,
+          moderateThreshold: config.moderateThreshold,
+          strongGap: config.strongGap,
+          moderateGap: config.moderateGap,
+        })
+      } catch {
+        // Storage full/unavailable — the optimizer just sees fewer ticks.
+      }
+    },
+    [],
+  )
 
   useEffect(() => {
     mountedRef.current = true
@@ -136,6 +185,7 @@ export function useDaemon(): DaemonController {
               snapshots: DaemonStatus['snapshots']
             }
             setLastTickAt(data.timestamp)
+            feedTickLog(data.timestamp, data.snapshots)
             setStatus((prev) =>
               prev ? { ...prev, snapshots: data.snapshots } : prev,
             )
@@ -180,7 +230,7 @@ export function useDaemon(): DaemonController {
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
       socket?.close()
     }
-  }, [addLog, refreshStatus, refreshHealth])
+  }, [addLog, refreshStatus, refreshHealth, feedTickLog])
 
   // ── Actions ───────────────────────────────────────────────────────────────
   const runAction = useCallback(
@@ -238,6 +288,7 @@ export function useDaemon(): DaemonController {
     busy,
     lastTickAt,
     clearLogs,
+    refresh,
     start,
     stop,
     exitPosition,

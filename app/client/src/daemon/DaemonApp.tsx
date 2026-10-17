@@ -1,44 +1,71 @@
-import { useEffect, useState } from 'react'
-import type { LucideIcon } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import {
-  Activity,
+  Bell,
   Clock,
-  LayoutDashboard,
+  LineChart,
+  Link2,
   RefreshCw,
   Settings,
-  WifiOff,
+  Trash2,
+  TrendingUp,
+  User,
 } from 'lucide-react'
 import { AppLogo } from '@/components/ui/app-logo'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
+import { InfoTooltip } from '@/components/ui/tooltip'
 import { useDaemon, type DaemonController } from '@/hooks/useDaemon'
-import { DAEMON_SYMBOLS } from '@/lib/daemon'
-import { formatAge, formatPrice } from '@/pages/daemon/format'
-import { DaemonWindowPage } from '@/pages/daemon/window'
+import { DAEMON_USER_ID } from '@/lib/daemon'
+import { cn, getUpcomingIndexExpiry } from '@/lib/utils'
+import type { MarketSnapshot, UnderlyingSymbol } from '@/lib/types'
+import { formatPrice } from '@/pages/daemon/format'
+import { DaemonLiveTradesPage } from '@/pages/daemon/live-trades'
+import { DaemonStrategiesPage } from '@/pages/daemon/strategies'
 import { DaemonHistoryPage } from '@/pages/daemon/history'
-import { DaemonConfigPage } from '@/pages/daemon/config'
+import { DaemonBrokerAccountsPage } from '@/pages/daemon/broker-accounts'
+import { DaemonProfilePage } from '@/pages/daemon/profile'
 
-type DaemonPage = 'window' | 'history' | 'config'
+export type DaemonPage =
+  | 'live-trades'
+  | 'strategies'
+  | 'history'
+  | 'broker-accounts'
+  | 'profile'
+  | 'settings'
 
-const PAGE_TITLES: Record<DaemonPage, string> = {
-  window: 'Live Window',
-  history: 'Trade History',
-  config: 'Strategy Config',
+const PATH_PAGE_MAP: Record<string, DaemonPage> = {
+  '/': 'live-trades',
+  '/live-trades': 'live-trades',
+  '/strategies': 'strategies',
+  '/history': 'history',
+  '/broker-accounts': 'broker-accounts',
+  '/profile': 'profile',
+  '/settings': 'settings',
+}
+
+const PAGE_PATH_MAP: Record<DaemonPage, string> = {
+  'live-trades': '/live-trades',
+  strategies: '/strategies',
+  history: '/history',
+  'broker-accounts': '/broker-accounts',
+  profile: '/profile',
+  settings: '/settings',
 }
 
 function pageFromLocation(): DaemonPage {
-  const path = window.location.pathname.replace(/\/+$/, '') || '/'
-  if (path === '/history') return 'history'
-  if (path === '/config') return 'config'
-  return 'window'
-}
-
-function pathForPage(page: DaemonPage): string {
-  return page === 'window' ? '/' : `/${page}`
+  const pathname = window.location.pathname
+  const normalized =
+    pathname.length > 1 && pathname.endsWith('/')
+      ? pathname.slice(0, -1)
+      : pathname
+  return PATH_PAGE_MAP[normalized] ?? 'live-trades'
 }
 
 /**
- * Thin window over the daemon: served by the daemon itself (`build:daemon`),
- * every page reads live state from `/ws` + `/api/bot/*` on the same origin.
+ * The daemon's own window: the same shell as the cloud dashboard
+ * (sidebar + ticker header + pages), but every panel reads live state from
+ * the daemon on this origin (`/ws`, `/api/bot/*`, `/health`).
  */
 export function DaemonApp() {
   const daemon = useDaemon()
@@ -52,7 +79,7 @@ export function DaemonApp() {
 
   const navigate = (next: DaemonPage) => {
     setPage(next)
-    const target = pathForPage(next)
+    const target = PAGE_PATH_MAP[next]
     if (window.location.pathname !== target) {
       window.history.pushState({}, '', target)
     }
@@ -60,162 +87,461 @@ export function DaemonApp() {
 
   return (
     <div className="flex min-h-dvh bg-background">
-      <DaemonSidebar
-        page={page}
-        onNavigate={navigate}
-        connected={daemon.connected}
-      />
+      <DaemonSidebar page={page} onNavigate={navigate} daemon={daemon} />
       <div className="flex flex-col flex-1 min-w-0">
-        <DaemonHeader daemon={daemon} title={PAGE_TITLES[page]} />
+        <DaemonHeader daemon={daemon} />
         <main className="flex-1 overflow-y-auto">
-          {page === 'window' && <DaemonWindowPage daemon={daemon} />}
+          {page === 'live-trades' && (
+            <DaemonLiveTradesPage daemon={daemon} onNavigate={navigate} />
+          )}
+          {page === 'strategies' && <DaemonStrategiesPage daemon={daemon} />}
           {page === 'history' && <DaemonHistoryPage daemon={daemon} />}
-          {page === 'config' && <DaemonConfigPage daemon={daemon} />}
+          {page === 'broker-accounts' && (
+            <DaemonBrokerAccountsPage daemon={daemon} />
+          )}
+          {page === 'profile' && <DaemonProfilePage daemon={daemon} />}
+          {page === 'settings' && (
+            <div className="flex items-center justify-center flex-1 text-muted-foreground text-sm p-6">
+              Settings — coming soon
+            </div>
+          )}
         </main>
       </div>
     </div>
   )
 }
 
+// ── Sidebar (cloud markup, daemon data) ───────────────────────────────────────
+
+const NAV_ITEMS: { id: DaemonPage; icon: React.ReactNode; label: string }[] = [
+  { id: 'live-trades', icon: <TrendingUp size={16} />, label: 'Live Trades' },
+  { id: 'strategies', icon: <LineChart size={16} />, label: 'Strategies' },
+  { id: 'history', icon: <Clock size={16} />, label: 'Trade History' },
+]
+
+const BOTTOM_ITEMS: { id: DaemonPage; icon: React.ReactNode; label: string }[] =
+  [
+    { id: 'broker-accounts', icon: <Link2 size={16} />, label: 'Brokers' },
+    { id: 'profile', icon: <User size={16} />, label: 'Profile' },
+    { id: 'settings', icon: <Settings size={16} />, label: 'Settings' },
+  ]
+
 function DaemonSidebar({
   page,
   onNavigate,
-  connected,
+  daemon,
 }: {
   page: DaemonPage
   onNavigate: (page: DaemonPage) => void
-  connected: boolean
+  daemon: DaemonController
 }) {
-  const items: { id: DaemonPage; label: string; icon: LucideIcon }[] = [
-    { id: 'window', label: 'Live Window', icon: LayoutDashboard },
-    { id: 'history', label: 'Trade History', icon: Clock },
-    { id: 'config', label: 'Strategy Config', icon: Settings },
-  ]
+  const openPositions = daemon.status?.userState
+    ? Object.values(daemon.status.userState.positions ?? {}).filter(Boolean)
+        .length
+    : 0
+
+  const status = daemonStatusSummary(daemon)
 
   return (
     <aside className="flex flex-col w-[220px] min-h-dvh bg-sidebar border-r border-sidebar-border shrink-0">
+      {/* Logo */}
       <div className="flex items-center px-4 py-4 h-14">
         <AppLogo size="sm" showText />
       </div>
+
       <Separator className="bg-sidebar-border" />
-      <nav className="flex flex-col gap-1 p-2">
-        {items.map(({ id, label, icon: Icon }) => (
+
+      {/* Main nav */}
+      <nav className="flex-1 px-2 py-3 space-y-0.5">
+        {NAV_ITEMS.map((item) => {
+          const badge =
+            item.id === 'live-trades' && openPositions > 0
+              ? String(openPositions)
+              : undefined
+          return (
+            <button
+              key={item.id}
+              onClick={() => onNavigate(item.id)}
+              className={cn(
+                'w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors cursor-pointer',
+                page === item.id
+                  ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
+                  : 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground',
+              )}
+            >
+              {item.icon}
+              <span className="flex-1 text-left">{item.label}</span>
+              {badge && (
+                <span className="flex items-center justify-center min-w-5 h-5 px-1.5 text-xs font-semibold rounded-full bg-primary/20 text-primary">
+                  {badge}
+                </span>
+              )}
+            </button>
+          )
+        })}
+      </nav>
+
+      <Separator className="bg-sidebar-border" />
+
+      {/* Bottom nav */}
+      <nav className="px-2 py-3 space-y-0.5">
+        {BOTTOM_ITEMS.map((item) => (
           <button
-            key={id}
-            type="button"
-            onClick={() => onNavigate(id)}
-            className={`flex items-center gap-2.5 rounded-md px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
-              page === id
-                ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                : 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground'
-            }`}
+            key={item.id}
+            onClick={() => onNavigate(item.id)}
+            className={cn(
+              'w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors cursor-pointer',
+              page === item.id
+                ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
+                : 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground',
+            )}
           >
-            <Icon size={16} />
-            {label}
+            {item.icon}
+            <span>{item.label}</span>
           </button>
         ))}
       </nav>
-      <div className="mt-auto p-3 space-y-1.5">
-        <Separator className="bg-sidebar-border mb-2" />
-        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-          <span
-            className={`inline-block h-2 w-2 rounded-full ${
-              connected ? 'bg-success' : 'bg-destructive animate-pulse'
-            }`}
-          />
-          {connected ? 'Daemon connected' : 'Reconnecting to daemon…'}
+
+      {/* Daemon status */}
+      <div className="px-4 py-3 border-t border-sidebar-border">
+        <div className="flex items-center gap-2">
+          <span className={cn('w-2 h-2 rounded-full', status.dot)} />
+          <span className="text-xs text-muted-foreground">{status.text}</span>
         </div>
-        <p className="text-[10px] text-muted-foreground/70">
-          Headless engine · this window is read/control only
-        </p>
       </div>
     </aside>
   )
 }
 
-function DaemonHeader({
-  daemon,
-  title,
-}: {
-  daemon: DaemonController
-  title: string
-}) {
-  const snapshots = daemon.status?.snapshots
-
-  return (
-    <header className="flex items-center gap-4 h-14 px-4 border-b border-border bg-card/40 shrink-0">
-      <div className="flex items-center gap-2">
-        <Activity size={16} className="text-primary" />
-        <span className="text-sm font-semibold">{title}</span>
-      </div>
-
-      <div className="hidden md:flex items-center gap-4 ml-2">
-        {DAEMON_SYMBOLS.map((symbol) => (
-          <div key={symbol} className="flex items-baseline gap-1.5">
-            <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-              {symbol === 'NIFTY 50' ? 'NIFTY' : symbol}
-            </span>
-            <span className="text-xs font-semibold tabular-nums">
-              {formatPrice(snapshots?.[symbol]?.spotPrice)}
-            </span>
-          </div>
-        ))}
-      </div>
-
-      <div className="ml-auto flex items-center gap-3">
-        <FeedBadge daemon={daemon} />
-        <a
-          href="/auth/upstox/start"
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-          title="Open the Upstox login flow to refresh today's account token"
-        >
-          <RefreshCw size={12} />
-          Refresh Upstox token
-        </a>
-      </div>
-    </header>
-  )
+function daemonStatusSummary(daemon: DaemonController): {
+  dot: string
+  text: string
+} {
+  const feed = daemon.health?.feed
+  if (!daemon.connected) {
+    return { dot: 'bg-destructive', text: 'Daemon link down' }
+  }
+  const wsOpen = feed?.ws?.state === 'open'
+  if (feed && (wsOpen || feed.source === 'mock')) {
+    return {
+      dot: 'bg-success animate-pulse',
+      text: `Connected · ${feed.source}`,
+    }
+  }
+  if (feed) {
+    return { dot: 'bg-amber-500', text: `Feed ${feed.ws?.state ?? 'starting'}` }
+  }
+  return { dot: 'bg-muted-foreground', text: 'Connecting to daemon…' }
 }
 
-function FeedBadge({ daemon }: { daemon: DaemonController }) {
+// ── Header (cloud markup: ticker + market bar) ────────────────────────────────
+
+interface TickerItem {
+  name: string
+  symbol: UnderlyingSymbol | null
+  label: string
+  change: string
+  pct: string
+  up: boolean
+}
+
+const TICKER_DEFS: { name: string; symbol: UnderlyingSymbol | null }[] = [
+  { name: 'NIFTY 50', symbol: 'NIFTY 50' },
+  { name: 'BANK NIFTY', symbol: 'BANKNIFTY' },
+  { name: 'FIN NIFTY', symbol: 'FINNIFTY' },
+  { name: 'SENSEX', symbol: null },
+  { name: 'INDIA VIX', symbol: null },
+]
+
+function buildTicker(snapshots: DaemonController['status']): TickerItem[] {
+  return TICKER_DEFS.map(({ name, symbol }) => {
+    const snap: MarketSnapshot | undefined = symbol
+      ? snapshots?.snapshots?.[symbol]
+      : undefined
+    if (!snap) {
+      return { name, symbol, label: '—', change: '—', pct: '', up: true }
+    }
+    const open = snap.candles[0]?.[1] ?? snap.spotPrice
+    const change = snap.spotPrice - open
+    const pct = open ? (change / open) * 100 : 0
+    const sign = change >= 0 ? '+' : ''
+    return {
+      name,
+      symbol,
+      label: formatPrice(snap.spotPrice),
+      change: `${sign}${change.toFixed(2)}`,
+      pct: `${sign}${pct.toFixed(2)}%`,
+      up: change >= 0,
+    }
+  })
+}
+
+// NSE: 9:15–15:30 IST on weekdays
+function getMarketInfo() {
+  const now = new Date()
+  const day = now.getDay() // 0=Sun, 6=Sat
+  const total = now.getHours() * 60 + now.getMinutes()
+  const isWeekday = day >= 1 && day <= 5
+  const isOpen = isWeekday && total >= 555 && total <= 930
+
+  let hint: string
+  if (isOpen) {
+    const closeAt = new Date(now)
+    closeAt.setHours(15, 30, 0, 0)
+    const diff = closeAt.getTime() - now.getTime()
+    const h = Math.floor(diff / 3_600_000)
+    const m = Math.floor((diff % 3_600_000) / 60_000)
+    hint = h > 0 ? `closes in ${h}h ${m}m` : `closes in ${m}m`
+  } else {
+    const next = new Date(now)
+    next.setSeconds(0, 0)
+    if (total >= 930 || !isWeekday) next.setDate(next.getDate() + 1)
+    while (next.getDay() === 0 || next.getDay() === 6)
+      next.setDate(next.getDate() + 1)
+    next.setHours(9, 15, 0, 0)
+    const diff = next.getTime() - now.getTime()
+    const h = Math.floor(diff / 3_600_000)
+    const m = Math.floor((diff % 3_600_000) / 60_000)
+    hint =
+      h >= 24
+        ? `opens ${next.toLocaleDateString('en-IN', { weekday: 'short' })} 9:15 AM`
+        : h > 0
+          ? `opens in ${h}h ${m}m`
+          : `opens in ${m}m`
+  }
+  return { isOpen, hint }
+}
+
+function DaemonHeader({ daemon }: { daemon: DaemonController }) {
+  const { isOpen: isMarketOpen, hint: marketHint } = getMarketInfo()
+  const [showLogs, setShowLogs] = useState(false)
+  const [showMenu, setShowMenu] = useState(false)
+  const logsRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (logsRef.current && !logsRef.current.contains(event.target as Node)) {
+        setShowLogs(false)
+      }
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setShowMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  const now = new Date()
+  const timeStr = now.toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+  const dateStr = now.toLocaleDateString('en-IN', {
+    weekday: 'short',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  })
+
+  const ticker = buildTicker(daemon.status)
+  const tickerItems = [...ticker, ...ticker]
   const feed = daemon.health?.feed
   const age = feed?.ws?.lastMessageAgeMs ?? null
-  const wsOpen = feed?.ws?.state === 'open'
-  const fresh = age !== null && age < 15_000
+  const isLive =
+    daemon.connected &&
+    (feed?.ws?.state === 'open' || feed?.source === 'mock') &&
+    (age === null || age < 15_000)
 
-  let dotClass = 'bg-muted-foreground/40'
-  let label = feed?.source ? `feed ${feed.source}` : 'feed —'
-  if (!daemon.connected) {
-    dotClass = 'bg-destructive animate-pulse'
-    label = 'daemon offline'
-  } else if (wsOpen && fresh) {
-    dotClass = 'bg-success'
-    label = `feed ${feed?.source ?? ''} · ${formatAge(age)}`
-  } else if (wsOpen) {
-    dotClass = 'bg-warning'
-    label = `feed stale · ${formatAge(age)}`
-  } else if (feed?.source?.includes('ws')) {
-    dotClass = 'bg-warning'
-    label = `ws ${feed.ws?.state ?? 'starting'}`
-  }
+  const state = daemon.status?.userState?.state ?? 'IDLE'
+  const mode = daemon.status?.userState?.executionMode ?? '—'
+  const recentLogs = [...daemon.logs].reverse().slice(0, 30)
 
   return (
-    <div
-      className="flex items-center gap-2 text-[11px] text-muted-foreground"
-      title={
-        feed?.ws
-          ? `ticks idx ${feed.ws.ticks.index} / opt ${feed.ws.ticks.option} · reconnects ${feed.ws.reconnects}`
-          : undefined
-      }
-    >
-      {daemon.connected ? (
-        <span className={`inline-block h-2 w-2 rounded-full ${dotClass}`} />
-      ) : (
-        <WifiOff size={12} className="text-destructive" />
-      )}
-      <span className="tabular-nums">{label}</span>
-    </div>
+    <header className="flex flex-col border-b border-border bg-card shrink-0">
+      {/* Indices ticker */}
+      <div className="ticker-marquee border-b border-border px-4 py-2 sm:px-6">
+        <div className="ticker-marquee__track">
+          {tickerItems.map((idx, index) => {
+            const expiry = getUpcomingIndexExpiry(idx.name)
+            const showExpiry = idx.name !== 'INDIA VIX'
+            return (
+              <div
+                key={`${idx.name}-${index}`}
+                className="flex items-center gap-2 shrink-0 whitespace-nowrap"
+              >
+                <span className="text-xs text-muted-foreground font-medium flex items-center gap-1">
+                  {idx.name}
+                  {showExpiry && (
+                    <InfoTooltip
+                      content={`${idx.name} Expiry: ${expiry.fullLabel} (${expiry.relativeText})`}
+                      iconSize={11}
+                    />
+                  )}
+                </span>
+                <span className="text-xs font-semibold text-foreground">
+                  {idx.label}
+                </span>
+                {idx.pct && (
+                  <span
+                    className={`text-xs font-medium ${idx.up ? 'text-success' : 'text-destructive'}`}
+                  >
+                    {idx.change} ({idx.pct})
+                  </span>
+                )}
+              </div>
+            )
+          })}
+          {isLive && (
+            <span className="shrink-0 whitespace-nowrap flex items-center gap-1 text-xs text-muted-foreground pl-1 pr-5 sm:pr-6">
+              <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+              live
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Main header bar */}
+      <div className="flex items-center justify-between px-6 h-14">
+        <div className="flex items-center gap-3">
+          <Badge
+            variant={isMarketOpen ? 'success' : 'secondary'}
+            className="text-xs"
+          >
+            {isMarketOpen ? '● NSE OPEN' : '○ NSE CLOSED'}
+          </Badge>
+          {marketHint && (
+            <span className="text-xs text-muted-foreground">{marketHint}</span>
+          )}
+          <span className="text-sm text-muted-foreground">{dateStr}</span>
+          <span className="text-sm font-mono font-medium text-foreground">
+            {timeStr}
+          </span>
+          {!daemon.connected && (
+            <span className="text-xs text-destructive">
+              daemon link reconnecting…
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            title="Refresh data"
+            onClick={() => daemon.refresh()}
+          >
+            <RefreshCw size={15} />
+          </Button>
+
+          <div className="relative" ref={logsRef}>
+            <Button
+              variant="ghost"
+              size="icon"
+              title="Activity log"
+              onClick={() => setShowLogs(!showLogs)}
+            >
+              <Bell size={15} />
+              {daemon.logs.some((l) => l.level === 'error') && (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-destructive" />
+              )}
+            </Button>
+
+            {showLogs && (
+              <div className="absolute right-0 mt-2 w-80 bg-popover text-popover-foreground border border-border rounded-md shadow-md z-50 overflow-hidden flex flex-col">
+                <div className="p-3 font-semibold border-b border-border flex justify-between items-center text-sm">
+                  <span>Activity</span>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={daemon.clearLogs}
+                      title="Clear activity"
+                    >
+                      <Trash2 size={14} />
+                    </Button>
+                  </div>
+                </div>
+                <div className="max-h-96 overflow-y-auto">
+                  {recentLogs.length === 0 ? (
+                    <div className="p-4 text-center text-muted-foreground text-sm">
+                      No activity yet
+                    </div>
+                  ) : (
+                    recentLogs.map((n) => (
+                      <div
+                        key={n.id}
+                        className={`p-3 border-b border-border last:border-b-0 text-sm transition-colors ${n.level === 'error' ? 'bg-destructive/5' : ''}`}
+                      >
+                        <div className="flex justify-between items-start gap-2">
+                          <span
+                            className={`font-semibold ${n.level === 'error' ? 'text-destructive' : 'text-foreground'}`}
+                          >
+                            {n.source}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                            {new Date(n.ts).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                            })}
+                          </span>
+                        </div>
+                        <div className="text-muted-foreground mt-1 text-xs">
+                          {n.msg}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 ml-2 relative" ref={menuRef}>
+            <button
+              onClick={() => setShowMenu(!showMenu)}
+              className="w-8 h-8 rounded-full overflow-hidden border border-border bg-primary/20 flex items-center justify-center text-xs font-semibold text-primary hover:opacity-85 transition-opacity cursor-pointer focus:outline-none"
+            >
+              <span>DW</span>
+            </button>
+
+            {showMenu && (
+              <div className="absolute right-0 top-10 w-56 bg-popover text-popover-foreground border border-border rounded-md shadow-md z-50 overflow-hidden flex flex-col p-2">
+                <div className="px-3 py-2 border-b border-border mb-1 text-left">
+                  <p className="text-xs font-semibold text-foreground truncate">
+                    Daemon Window
+                  </p>
+                  <p className="text-[10px] text-muted-foreground truncate">
+                    {DAEMON_USER_ID} · {state} · {mode}
+                  </p>
+                </div>
+                <a
+                  href="/auth/upstox/start"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-2 px-3 py-2 rounded text-xs text-foreground hover:bg-accent transition-colors"
+                  onClick={() => setShowMenu(false)}
+                >
+                  <RefreshCw size={12} />
+                  Refresh Upstox token
+                </a>
+                <a
+                  href="/health"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3 py-2 rounded text-xs text-foreground hover:bg-accent transition-colors"
+                  onClick={() => setShowMenu(false)}
+                >
+                  Daemon /health
+                </a>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </header>
   )
 }

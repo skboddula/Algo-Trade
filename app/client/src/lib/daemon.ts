@@ -110,6 +110,10 @@ export const daemonApi = {
   stop: (): Promise<unknown> =>
     post('/api/bot/stop', { userId: DAEMON_USER_ID }),
 
+  /** Per-user live-order token (overrides the daemon's master token). */
+  setToken: (token: string): Promise<unknown> =>
+    post('/api/bot/token', { userId: DAEMON_USER_ID, token }),
+
   saveConfig: (config: StrategyConfig): Promise<unknown> =>
     post('/api/bot/config', { userId: DAEMON_USER_ID, config }),
 
