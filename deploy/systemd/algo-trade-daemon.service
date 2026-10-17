@@ -1,0 +1,38 @@
+# Algo-Trade always-on daemon (systemd user service TEMPLATE)
+#
+# Do not install this file by hand — run deploy/install.sh, which substitutes
+# __APP_CORE_DIR__ and __NODE_BIN__ with the real paths for this machine.
+#
+# Laptop usage (user service, survives logout when lingering is enabled):
+#   systemctl --user status  algo-trade-daemon
+#   systemctl --user restart algo-trade-daemon
+#   journalctl   --user -u algo-trade-daemon -f
+#
+# Cloud-VM usage (system service): copy this file to /etc/systemd/system/,
+# replace the placeholders, add `User=<you>` under [Service], and change
+# [Install] WantedBy=default.target → multi-user.target. See deploy/README.md.
+
+[Unit]
+Description=Algo-Trade always-on trading daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__APP_CORE_DIR__
+ExecStart=__NODE_BIN__ __APP_CORE_DIR__/dist/app/core/src/server.js
+
+# Structured JSON logs (journald-friendly)
+Environment=NODE_ENV=production
+EnvironmentFile=__APP_CORE_DIR__/.env
+
+# Restart automatically if the daemon crashes
+Restart=on-failure
+RestartSec=5
+
+# Give the daemon time to flush SQLite state and send the shutdown alert
+TimeoutStopSec=15
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target

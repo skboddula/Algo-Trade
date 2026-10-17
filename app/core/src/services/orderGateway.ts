@@ -5,6 +5,7 @@ import type {
   PaperTradeRecord,
 } from '../types'
 import { DEFAULT_INITIAL_PAPER_BALANCE } from '../constants'
+import type { StateStore } from './stateStore'
 
 export interface OrderPlacementRequest {
   userId: string
@@ -39,9 +40,21 @@ export class OrderGateway {
   private paperAccounts: Map<string, PaperAccount> = new Map()
   private paperTrades: Map<string, PaperTradeRecord> = new Map()
   private upstoxApiBaseUrl: string
+  private store: StateStore | null
 
-  constructor(upstoxApiBaseUrl = 'https://api.upstox.com/v2') {
+  constructor(upstoxApiBaseUrl = 'https://api.upstox.com/v2', store?: StateStore | null) {
     this.upstoxApiBaseUrl = upstoxApiBaseUrl
+    this.store = store ?? null
+
+    // Rehydrate paper ledger from disk (restart / reboot recovery)
+    if (this.store) {
+      for (const account of this.store.loadPaperAccounts()) {
+        this.paperAccounts.set(account.userId ?? account.id, account)
+      }
+      for (const trade of this.store.loadPaperTrades()) {
+        this.paperTrades.set(trade.id, trade)
+      }
+    }
   }
 
   public getOrCreatePaperAccount(userId: string): PaperAccount {
@@ -55,6 +68,7 @@ export class OrderGateway {
         updatedAt: new Date().toISOString(),
       }
       this.paperAccounts.set(userId, account)
+      this.store?.savePaperAccount(account)
     }
     return account
   }
@@ -68,12 +82,14 @@ export class OrderGateway {
       updatedAt: new Date().toISOString(),
     }
     this.paperAccounts.set(userId, account)
+    this.store?.savePaperAccount(account)
 
     // Clear user's open paper trades
     for (const [_id, trade] of this.paperTrades.entries()) {
       if (trade.accountId === account.id && trade.status === 'OPEN') {
         trade.status = 'CANCELLED'
         trade.closedAt = new Date().toISOString()
+        this.store?.savePaperTrade(trade)
       }
     }
     return account
@@ -134,6 +150,7 @@ export class OrderGateway {
     }
 
     this.paperTrades.set(tradeId, record)
+    this.store?.savePaperTrade(record)
 
     return {
       success: true,
@@ -158,6 +175,7 @@ export class OrderGateway {
 
     account.balance += realizedPnlPaise
     account.updatedAt = new Date().toISOString()
+    this.store?.savePaperAccount(account)
 
     if (position.paperTradeId && this.paperTrades.has(position.paperTradeId)) {
       const record = this.paperTrades.get(position.paperTradeId)!
@@ -167,6 +185,7 @@ export class OrderGateway {
       record.realizedPnl = realizedPnlPaise
       record.closedAt = new Date().toISOString()
       record.metadata = { ...(record.metadata || {}), exitReason: req.reason }
+      this.store?.savePaperTrade(record)
     }
 
     return {

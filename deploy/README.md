@@ -1,0 +1,208 @@
+# Always-On Deployment Guide
+
+Run the Algo-Trade bot so it keeps working **without any browser tab open** — you can close the
+tab, close the laptop lid, or log out. The daemon keeps supervising positions, trailing stops and
+the 15:15 IST square-off on its own.
+
+Everything here is **host-agnostic**: the same steps work on this laptop today and on a cloud VM
+later (see [Moving to a cloud VM](#moving-to-a-cloud-vm-later)).
+
+---
+
+## What you get
+
+| Piece | Purpose |
+| :--- | :--- |
+| `app/core` (Fastify daemon) | The actual bot — headless, no browser needed |
+| `deploy/install.sh` | Builds it and installs a systemd user service that auto-restarts on crash |
+| `app/core/data/algo-trade.sqlite` | Durable state: bot state, trailing-SL peaks, paper ledger — survives restarts/reboots |
+| `scripts/bot.sh` | Start/stop/status/exit/config/token from the terminal |
+| `scripts/refresh-token.sh` | Daily token refresh + restart in one command |
+| Telegram alerts (optional) | Notified on feed down/recovered, trades opened/closed, daemon start/stop |
+
+**What survives a reboot:** bot running state, open positions (with trailing-SL peak), daily trade
+counts, cooldowns, and the paper ledger. When the daemon comes back up it resumes supervising any
+open positions immediately.
+
+---
+
+## First-time install (this laptop)
+
+Prerequisites — already true on this machine, verify on any new host:
+
+```bash
+node --version                 # must be >= 24
+systemctl --user status        # systemd user session must work
+loginctl show-user $USER -p Linger    # want: Linger=yes (else: sudo loginctl enable-linger $USER)
+```
+
+Also ensure the machine does not suspend:
+
+- Laptop lid: `sudo systemctl status systemd-logind` → lid should be ignored (`HandleLidSwitch=ignore`)
+- KDE: System Settings → Power Management → *Do nothing* on lid close, disable "Suspend session" on AC and battery
+
+Then:
+
+```bash
+cd /path/to/Algo-Trade
+
+# 1. Configure
+cp app/core/.env.sample app/core/.env
+#    → edit app/core/.env: set PRIMARY_UPSTOX_TOKEN (Upstox access token),
+#      optionally TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID for alerts.
+#      Default binding is 127.0.0.1 — keep it that way unless you add auth.
+
+# 2. Build + install the service
+./deploy/install.sh
+
+# 3. Arm the bot (paper by default)
+./scripts/bot.sh start paper
+./scripts/bot.sh status
+```
+
+That's it. You can now close every browser tab. The service starts automatically on boot
+(`systemctl --user enable` was done by the installer).
+
+> **Note:** `deploy/install.sh` replaces any existing systemd user unit with the same name
+> (`algo-trade-daemon.service`). If you keep customizations there, back it up first. Make sure only
+> **one** daemon runs per Upstox account — stop any other host/checkout first (see the warning in
+> [Daily routine](#daily-routine-2-commands-30-seconds)).
+
+---
+
+## Daily routine (2 commands, ~30 seconds)
+
+Upstox access tokens expire **daily around 03:30 IST**. Each trading morning:
+
+```bash
+# 1. Generate a new access token via the Upstox login flow, then:
+./scripts/refresh-token.sh "<NEW_UPSTOX_ACCESS_TOKEN>"
+
+# 2. Make sure the bot is armed
+./scripts/bot.sh status        # check state: RUNNING / ORDERED
+./scripts/bot.sh start paper   # if it is not running (paper or live)
+```
+
+If you ever run two daemons against the same Upstox account simultaneously, you can double-trade —
+always `systemctl --user stop algo-trade-daemon` on one host before starting another.
+
+---
+
+## Controlling the bot
+
+```bash
+./scripts/bot.sh health                 # is the daemon alive?
+./scripts/bot.sh status                 # market snapshots + your bot state + paper trades
+./scripts/bot.sh start paper            # arm in paper mode (or: start live)
+./scripts/bot.sh stop                   # disarm new entries (open positions keep being supervised)
+./scripts/bot.sh exit "NIFTY 50"        # manually close a position
+./scripts/bot.sh config my-config.json  # partial StrategyConfig update
+./scripts/bot.sh paper-reset            # reset paper balance to ₹1,00,000
+```
+
+Raw API equivalents (curl) and the full endpoint list are in `app/core/README.md`.
+
+### Service management
+
+```bash
+systemctl --user status  algo-trade-daemon
+systemctl --user restart algo-trade-daemon
+systemctl --user stop    algo-trade-daemon
+journalctl --user -u algo-trade-daemon -f          # live logs
+journalctl --user -u algo-trade-daemon --since today
+```
+
+The service has `Restart=on-failure`, so a crashed daemon comes back automatically in ~5 seconds.
+
+---
+
+## Alerts (optional but recommended)
+
+Set both keys in `app/core/.env` and restart the service:
+
+```ini
+TELEGRAM_BOT_TOKEN=123456:ABC...
+TELEGRAM_CHAT_ID=987654321
+```
+
+You will then get a Telegram message for:
+
+- 🟢 daemon started / 🔴 daemon stopping
+- 🔴 market feed down after ~10s of failed polls (likely expired token) / 🟢 feed recovered
+- 🟢 position opened / 🔵 position closed (symbol, price, reason)
+
+Leave the keys blank to disable alerts entirely.
+
+---
+
+## Data, backup and restore
+
+All durable state lives in one SQLite file:
+
+```
+app/core/data/algo-trade.sqlite        (+ -wal / -shm companions while running)
+```
+
+The file is created with `0600` permissions and **contains your broker token** — treat it as a
+secret and never commit it (the directory is git-ignored).
+
+Backup (while the daemon is running it is safest to use SQLite's own copy):
+
+```bash
+systemctl --user stop algo-trade-daemon
+cp app/core/data/algo-trade.sqlite "$HOME/algo-trade-backup-$(date +%F).sqlite"
+systemctl --user start algo-trade-daemon
+```
+
+Restore: stop the service, copy the file back to `app/core/data/algo-trade.sqlite`, start again.
+
+To start fresh, stop the service and delete the file (and its `-wal`/`-shm` companions).
+
+---
+
+## Troubleshooting
+
+| Symptom | Check |
+| :--- | :--- |
+| Service not running | `systemctl --user status algo-trade-daemon` + `journalctl --user -u algo-trade-daemon -n 50` |
+| `❌ Fatal: ... PRIMARY_UPSTOX_TOKEN` | Fill `app/core/.env`, then `systemctl --user restart algo-trade-daemon` |
+| Feed down alert / 401s from Upstox | Token expired → `./scripts/refresh-token.sh "<NEW_TOKEN>"` |
+| Bot armed but no trades | Check `./scripts/bot.sh status` → state must be `RUNNING`; entries pause after `lastEntryTime` (default 15:15) and per-symbol daily trade caps |
+| Service stops when you log out | `sudo loginctl enable-linger $USER` |
+| Machine suspends on lid close | See prerequisites above (logind + PowerDevil) |
+| Laptop asleep → no ticks | Disable suspend on AC *and* battery; battery works as a built-in UPS if power drops |
+
+---
+
+## Moving to a cloud VM later
+
+The layout is deliberately host-agnostic — no path is baked into the code:
+
+1. Rsync the repo (without `node_modules`, `dist`, `data`) to the VM and install Node >= 24 + yarn.
+2. Copy `app/core/.env` (or re-create it) and optionally the SQLite file from `app/core/data/`.
+3. Install as a **system** service instead of a user service:
+
+   ```bash
+   sudo cp deploy/systemd/algo-trade-daemon.service /etc/systemd/system/
+   sudo sed -i "s|__APP_CORE_DIR__|/opt/Algo-Trade/app/core|g; s|__NODE_BIN__|$(command -v node)|g" \
+       /etc/systemd/system/algo-trade-daemon.service
+   sudo sed -i "s|WantedBy=default.target|WantedBy=multi-user.target|" \
+       /etc/systemd/system/algo-trade-daemon.service
+   sudo systemctl daemon-reload && sudo systemctl enable --now algo-trade-daemon
+   ```
+
+4. Set `HOST=0.0.0.0` in `.env` **only** together with a firewall / reverse proxy. The API has no
+   authentication yet — do not expose it without adding auth (API key + CORS allowlist) first.
+
+Same `scripts/` helpers work against the remote by setting `DAEMON_URL` (and later
+`DAEMON_API_KEY` once hardening lands).
+
+---
+
+## Security notes
+
+- The daemon API is currently **unauthenticated**. Keep it bound to `127.0.0.1` (the default).
+  Reaching it from your phone over Tailscale is possible, but add the API-key/CORS hardening first.
+- `app/core/.env` and `app/core/data/algo-trade.sqlite` both contain broker tokens — keep them
+  `0600` (default from the installer) and out of git.
+- Never run two daemons on two hosts against the same Upstox account at the same time.

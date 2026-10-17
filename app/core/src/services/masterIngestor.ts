@@ -12,12 +12,14 @@ import { computeAllIndicators } from './indicators'
 import { getFinalSignal } from './strategyEngine'
 import { DEFAULT_STRATEGY_CONFIG } from '../constants'
 import { getIndiaTime } from '../utils/timeUtils'
+import type { Notifier } from './notifier'
 
 export interface MasterIngestorConfig {
   pollingIntervalMs: number
   upstoxApiBaseUrl: string
   primaryUpstoxToken?: string
   mockMode?: boolean
+  notifier?: Notifier
 }
 
 export class MasterIngestionEngine extends EventEmitter {
@@ -28,6 +30,9 @@ export class MasterIngestionEngine extends EventEmitter {
   private latestOptionChains: Map<UnderlyingSymbol, OptionData[]> = new Map()
   private latestVrd: VrdData | null = null
   private config: MasterIngestorConfig
+  private consecutiveFailedTicks = 0
+  private feedDownAlerted = false
+  private lastFeedError = ''
 
   constructor(config?: Partial<MasterIngestorConfig>) {
     super()
@@ -37,6 +42,7 @@ export class MasterIngestionEngine extends EventEmitter {
       upstoxApiBaseUrl: config?.upstoxApiBaseUrl ?? 'https://api.upstox.com/v2',
       primaryUpstoxToken: config?.primaryUpstoxToken,
       mockMode: config?.mockMode ?? false,
+      notifier: config?.notifier,
     }
 
     // Seed initial candle buffer
@@ -103,6 +109,7 @@ export class MasterIngestionEngine extends EventEmitter {
     const symbols: UnderlyingSymbol[] = ['NIFTY 50', 'BANKNIFTY', 'FINNIFTY']
     const istInfo = getIndiaTime()
     const timestamp = istInfo.date.toISOString()
+    let liveFetchFailures = 0
 
     for (const symbol of symbols) {
       let spotPrice = 24000
@@ -151,9 +158,17 @@ export class MasterIngestionEngine extends EventEmitter {
             const quote = data?.data?.[instrumentKey.replace('|', ':')] || Object.values(data?.data || {})[0] as any
             if (quote?.last_price) {
               spotPrice = quote.last_price
+            } else {
+              liveFetchFailures++
+              this.lastFeedError = 'response missing last_price'
             }
+          } else {
+            liveFetchFailures++
+            this.lastFeedError = `HTTP ${quoteRes.status}`
           }
-        } catch {
+        } catch (err) {
+          liveFetchFailures++
+          this.lastFeedError = (err as Error).message || 'network error'
           // Fallback to previous price on network glitch
           spotPrice = candles.length ? candles[candles.length - 1][4] : 24500
         }
@@ -201,11 +216,46 @@ export class MasterIngestionEngine extends EventEmitter {
       this.latestSnapshots.set(symbol, snapshot)
     }
 
+    // Feed health monitoring (live mode only): alert after repeated wholesale failures
+    if (!this.config.mockMode && this.config.primaryUpstoxToken) {
+      this.trackFeedHealth(liveFetchFailures, symbols.length)
+    }
+
     // Emit tick event to all listeners (TenantManager & WebSockets)
     this.emit('marketTick', {
       timestamp,
       snapshots: this.getAllSnapshots(),
     })
+  }
+
+  /**
+   * Track live-feed health: a tick counts as failed only when every symbol's
+   * quote fetch fails (e.g. expired token → HTTP 401). Alerts fire once after
+   * consecutive wholesale failures and once when the feed recovers.
+   */
+  private trackFeedHealth(failures: number, total: number): void {
+    if (failures < total) {
+      this.consecutiveFailedTicks = 0
+      if (this.feedDownAlerted) {
+        this.feedDownAlerted = false
+        this.fireAlert('🟢 Algo-Trade: market feed recovered — quotes are flowing again.')
+      }
+      return
+    }
+
+    this.consecutiveFailedTicks++
+    if (!this.feedDownAlerted && this.consecutiveFailedTicks >= 5) {
+      this.feedDownAlerted = true
+      this.fireAlert(
+        `🔴 Algo-Trade: market feed DOWN (last error: ${this.lastFeedError || 'unknown'}). ` +
+          'The Upstox access token may have expired — refresh it and restart the daemon.',
+      )
+    }
+  }
+
+  private fireAlert(text: string): void {
+    if (!this.config.notifier) return
+    void this.config.notifier(text)
   }
 
   private generateSeedCandles(symbol: UnderlyingSymbol): Candle[] {

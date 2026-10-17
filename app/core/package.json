@@ -2,12 +2,15 @@
   "name": "algo-trade-core",
   "version": "2.0.0",
   "description": "High Performance Algorithmic Trading Daemon & Master Ingestor",
-  "main": "dist/server.js",
+  "main": "dist/app/core/src/server.js",
   "type": "commonjs",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "node dist/app/core/src/server.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
@@ -24,7 +27,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/node": "^20.14.9",
+    "@types/node": "^25.0.0",
     "@types/ws": "^8.5.10",
     "tsx": "^4.16.0",
     "typescript": "^5.5.2",

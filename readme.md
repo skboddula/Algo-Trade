@@ -55,7 +55,7 @@ For detailed client setup and migration steps, refer to [app/client/README.md](a
 
 ### Fastify Backend Daemon & Master Ingestor Setup (`app/core`)
 
-To run the headless backend daemon (with 1-API master market ingestion and multi-tenant execution on a GCP Always Free VM / AWS Lightsail with Static IP):
+To run the headless backend daemon (1-API master market ingestion, multi-tenant execution, SQLite-backed always-on operation — on this laptop or a cloud VM with a Static IP):
 
 1. Navigate to the core directory:
    ```bash
@@ -76,8 +76,14 @@ To run the headless backend daemon (with 1-API master market ingestion and multi
    yarn build   # Build TypeScript for production
    yarn start   # Start Fastify server
    ```
+5. Always-on operation (close every browser tab — the bot keeps running):
+   ```bash
+   cd ../..                   # back to the repo root
+   ./deploy/install.sh        # systemd user service, auto-restart, SQLite persistence
+   ./scripts/bot.sh start paper
+   ```
 
-For detailed backend architecture, endpoints, and GCP Free VM deployment instructions, see [app/core/README.md](app/core/README.md).
+For detailed backend architecture, endpoints, and deployment instructions (laptop always-on + GCP Free VM), see [app/core/README.md](app/core/README.md) and [deploy/README.md](deploy/README.md).
 
 ---
 

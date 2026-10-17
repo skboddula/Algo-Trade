@@ -2,7 +2,7 @@
 
 High-performance, low-memory **Fastify** trading daemon and **Master Market Ingestor** for Indian Equity & Derivatives markets (NIFTY / BANKNIFTY / FINNIFTY).
 
-Designed to run 24/7 on a **GCP Always Free `e2-micro` VM** (or AWS Lightsail / Oracle Cloud) with a dedicated **Static IP** for broker API whitelisting.
+Designed to run 24/7 on a laptop, a home server, or a **GCP Always Free `e2-micro` VM** (or AWS Lightsail / Oracle Cloud) with a dedicated **Static IP** for broker API whitelisting.
 
 ---
 
@@ -17,6 +17,7 @@ Designed to run 24/7 on a **GCP Always Free `e2-micro` VM** (or AWS Lightsail / 
    - Evaluates each user's unique strategy configuration, lot size, and risk rules.
    - Continuously supervises **trailing stop losses**, **hard stop daily limits**, and **15:15 IST EOD auto square-offs** server-side.
    - Users can safely close their browsers or shut down laptops without halting active position supervision.
+   - Bot state and the paper ledger **persist to SQLite** (`DATA_DIR`, default `./data`), so daemon restarts and machine reboots resume supervision exactly where they stopped.
 3. **Broker Static IP Gateway**:
    - Outbound live orders to Upstox API (`/v2/order/place`) originate from the VM's registered Static IP address.
    - Integrated Paper Trading ledger with 0.1% simulated slippage and real-time PnL accounting.
@@ -69,9 +70,29 @@ yarn test
 yarn build
 ```
 
+### 6. Run Production Build
+```bash
+yarn start
+```
+
+### 7. Always-On Operation
+Install the daemon as a systemd user service (starts on boot, auto-restarts on crash, survives closing every browser):
+
+```bash
+./deploy/install.sh                    # from the repo root
+systemctl --user status algo-trade-daemon
+./scripts/bot.sh start paper           # arm the bot; ./scripts/bot.sh status to check
+```
+
+See [`deploy/README.md`](../../deploy/README.md) for the daily token-refresh routine, Telegram alerts, backup/restore, and moving the same setup to a cloud VM later.
+
 ---
 
 ## ☁️ Deployment on GCP Always Free VM (`e2-micro`)
+
+> **Any host works:** [`deploy/install.sh`](../../deploy/README.md) installs the daemon as a systemd
+> service on this laptop or any Linux machine, and the guide includes host-agnostic migration steps.
+> The GCP flow below is an alternative for a dedicated cloud IP.
 
 1. **Create Compute Instance**:
    - Instance Type: `e2-micro` (2 vCPUs, 1 GB RAM)
@@ -88,7 +109,7 @@ yarn build
    yarn install
    yarn build
    npm install -g pm2
-   pm2 start dist/server.js --name "algo-trade-backend"
+   pm2 start dist/app/core/src/server.js --name "algo-trade-backend"
    pm2 startup
    pm2 save
    ```

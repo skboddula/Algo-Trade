@@ -1,5 +1,8 @@
 /node_modules
 /dist
 
+# Durable state (SQLite) — never commit
+/data
 
 .env
+.env.bak-*

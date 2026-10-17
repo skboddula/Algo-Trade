@@ -13,17 +13,35 @@ import { OrderGateway } from './orderGateway'
 import { pickBestOptionContract } from './syntheticCalculators'
 import { runHardStopChecks } from './strategyEngine'
 import { getIndiaTime } from '../utils/timeUtils'
+import type { StateStore } from './stateStore'
+import type { Notifier } from './notifier'
 
 export class TenantManager extends EventEmitter {
   private users: Map<string, UserBotState> = new Map()
   private masterIngestor: MasterIngestionEngine
   private orderGateway: OrderGateway
+  private store: StateStore | null
+  private notifier?: Notifier
+  private lastPersistAt: Map<string, number> = new Map()
 
-  constructor(masterIngestor: MasterIngestionEngine, orderGateway: OrderGateway) {
+  constructor(
+    masterIngestor: MasterIngestionEngine,
+    orderGateway: OrderGateway,
+    opts: { store?: StateStore | null; notifier?: Notifier } = {},
+  ) {
     super()
     this.setMaxListeners(100)
     this.masterIngestor = masterIngestor
     this.orderGateway = orderGateway
+    this.store = opts.store ?? null
+    this.notifier = opts.notifier
+
+    // Rehydrate persisted bot states first (restart / reboot recovery)
+    if (this.store) {
+      for (const persisted of this.store.loadUserStates()) {
+        this.users.set(persisted.userId, persisted)
+      }
+    }
 
     // Bind to master market ticks
     this.masterIngestor.on('marketTick', (tick) => {
@@ -57,12 +75,14 @@ export class TenantManager extends EventEmitter {
         updatedAt: istInfo.date.toISOString(),
       }
       this.users.set(userId, user)
+      this.persistUser(user, true)
     } else {
       // Date rollover check: reset daily counts if new IST trading day
       if (user.lastTradeDate !== istInfo.dateString) {
         user.lastTradeDate = istInfo.dateString
         user.tradesCountToday = 0
         user.tradesCountPerSymbol = {}
+        this.persistUser(user, true)
       }
       const paperAccount = this.orderGateway.getOrCreatePaperAccount(userId)
       user.paperBalance = paperAccount.balance
@@ -76,6 +96,7 @@ export class TenantManager extends EventEmitter {
     user.executionMode = user.config.executionMode
     user.updatedAt = new Date().toISOString()
     this.emitUserUpdate(user)
+    this.persistUser(user, true)
     return user
   }
 
@@ -84,6 +105,7 @@ export class TenantManager extends EventEmitter {
     user.upstoxToken = token
     user.updatedAt = new Date().toISOString()
     this.emitUserUpdate(user)
+    this.persistUser(user, true)
     return user
   }
 
@@ -98,6 +120,7 @@ export class TenantManager extends EventEmitter {
     user.error = undefined
     user.updatedAt = new Date().toISOString()
     this.emitUserUpdate(user)
+    this.persistUser(user, true)
     return user
   }
 
@@ -106,6 +129,7 @@ export class TenantManager extends EventEmitter {
     user.state = 'STOPPED'
     user.updatedAt = new Date().toISOString()
     this.emitUserUpdate(user)
+    this.persistUser(user, true)
     return user
   }
 
@@ -130,6 +154,8 @@ export class TenantManager extends EventEmitter {
       user.paperBalance = this.orderGateway.getOrCreatePaperAccount(userId).balance
       user.updatedAt = new Date().toISOString()
       this.emitUserUpdate(user)
+      this.persistUser(user, true)
+      this.fireAlert(`🔵 Algo-Trade: closed ${symbol} position for ${userId} (${reason}) @ ₹${exitPrice}`)
     }
     return user
   }
@@ -145,6 +171,7 @@ export class TenantManager extends EventEmitter {
         user.lastTradeDate = istInfo.dateString
         user.tradesCountToday = 0
         user.tradesCountPerSymbol = {}
+        this.persistUser(user, true)
       }
 
       const afterCutoff = istInfo.isAfterCutoff(user.config.lastEntryTime || '15:15')
@@ -153,6 +180,8 @@ export class TenantManager extends EventEmitter {
         user.config.underlyingMode === 'ALL_PARALLEL'
           ? ['NIFTY 50', 'BANKNIFTY', 'FINNIFTY']
           : [user.config.underlyingMode as UnderlyingSymbol]
+
+      let supervisedAny = false
 
       for (const symbol of targetSymbols) {
         const snapshot = tick.snapshots[symbol]
@@ -192,6 +221,7 @@ export class TenantManager extends EventEmitter {
               ? position.entryPrice - currentPrice
               : currentPrice - position.entryPrice
           position.unrealizedPnl = Math.round(pnlPerUnit * position.quantity * 100) / 100
+          supervisedAny = true
 
           // Check EOD auto square-off
           if (afterCutoff) {
@@ -268,18 +298,48 @@ export class TenantManager extends EventEmitter {
                 user.paperBalance = this.orderGateway.getOrCreatePaperAccount(userId).balance
                 user.updatedAt = new Date().toISOString()
                 this.emitUserUpdate(user)
+                this.persistUser(user, true)
+                this.fireAlert(
+                  `🟢 Algo-Trade: opened ${symbol} ${direction} for ${userId} ` +
+                    `@ ₹${orderRes.filledPrice} × ${orderRes.quantity} (${user.executionMode})`,
+                )
               } else {
                 user.error = orderRes.error
                 this.emitUserUpdate(user)
+                this.persistUser(user)
               }
             }
           }
         }
+      }
+
+      // Persist supervised position updates (peak price, unrealized PnL) — throttled
+      if (supervisedAny) {
+        this.persistUser(user)
       }
     }
   }
 
   private emitUserUpdate(user: UserBotState) {
     this.emit('userStateUpdate', { userId: user.userId, state: user })
+  }
+
+  /**
+   * Persist a user's bot state to the durable store.
+   * Throttled by default (tick-driven updates); pass immediate=true for
+   * critical transitions (start/stop/config/token/entry/exit).
+   */
+  private persistUser(user: UserBotState, immediate = false): void {
+    if (!this.store) return
+    const now = Date.now()
+    const last = this.lastPersistAt.get(user.userId) ?? 0
+    if (!immediate && now - last < 2000) return
+    this.lastPersistAt.set(user.userId, now)
+    this.store.saveUserState(user)
+  }
+
+  private fireAlert(text: string): void {
+    if (!this.notifier) return
+    void this.notifier(text)
   }
 }
