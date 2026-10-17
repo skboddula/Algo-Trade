@@ -7,12 +7,14 @@ import type {
   VrdData,
   AllSignalData,
 } from '../types'
-import { UNDERLYING_INSTRUMENT_KEYS } from '../types'
 import { computeAllIndicators } from './indicators'
 import { getFinalSignal } from './strategyEngine'
 import { DEFAULT_STRATEGY_CONFIG } from '../constants'
 import { getIndiaTime } from '../utils/timeUtils'
 import type { Notifier } from './notifier'
+import type { MarketDataSource } from './marketDataSource'
+import { MockMarketDataSource } from './marketDataSources/mockMarketDataSource'
+import { RestMarketDataSource } from './marketDataSources/restMarketDataSource'
 
 export interface MasterIngestorConfig {
   pollingIntervalMs: number
@@ -33,6 +35,8 @@ export class MasterIngestionEngine extends EventEmitter {
   private consecutiveFailedTicks = 0
   private feedDownAlerted = false
   private lastFeedError = ''
+  private readonly mockSource: MockMarketDataSource
+  private readonly restSource: RestMarketDataSource
 
   constructor(config?: Partial<MasterIngestorConfig>) {
     super()
@@ -44,6 +48,14 @@ export class MasterIngestionEngine extends EventEmitter {
       mockMode: config?.mockMode ?? false,
       notifier: config?.notifier,
     }
+
+    // Pluggable transport sources (mock synthesis / Upstox REST polling today;
+    // a WebSocket feed adapter plugs in behind the same interface)
+    this.mockSource = new MockMarketDataSource()
+    this.restSource = new RestMarketDataSource({
+      upstoxApiBaseUrl: this.config.upstoxApiBaseUrl,
+      getToken: () => this.config.primaryUpstoxToken,
+    })
 
     // Seed initial candle buffer
     for (const sym of ['NIFTY 50', 'BANKNIFTY', 'FINNIFTY'] as UnderlyingSymbol[]) {
@@ -112,66 +124,24 @@ export class MasterIngestionEngine extends EventEmitter {
     let liveFetchFailures = 0
 
     for (const symbol of symbols) {
-      let spotPrice = 24000
-      let candles = this.candleBuffer.get(symbol) || []
-      let optionChain: OptionData[] = this.latestOptionChains.get(symbol) || []
+      // Acquire this symbol's data through the pluggable transport seam
+      const source = this.resolveSource()
+      const acquired = await source.acquire({
+        symbol,
+        timestamp,
+        candles: this.candleBuffer.get(symbol) || [],
+        optionChain: this.latestOptionChains.get(symbol) || [],
+      })
 
-      if (this.config.mockMode || !this.config.primaryUpstoxToken) {
-        // Mock generation for testing / non-market hours
-        const lastClose = candles.length ? candles[candles.length - 1][4] : (symbol === 'NIFTY 50' ? 24500 : 51500)
-        const delta = (Math.random() - 0.49) * (symbol === 'NIFTY 50' ? 10 : 25)
-        const newClose = Math.round((lastClose + delta) * 100) / 100
-        spotPrice = newClose
+      const spotPrice = acquired.spotPrice
+      const candles = acquired.candles
+      const optionChain = acquired.optionChain
+      this.candleBuffer.set(symbol, candles)
+      this.latestOptionChains.set(symbol, optionChain)
 
-        const newCandle: Candle = [
-          timestamp,
-          lastClose,
-          Math.max(lastClose, newClose) + 2,
-          Math.min(lastClose, newClose) - 2,
-          newClose,
-          Math.floor(Math.random() * 5000) + 1000,
-        ]
-
-        candles = [...candles.slice(-99), newCandle]
-        this.candleBuffer.set(symbol, candles)
-
-        if (!optionChain.length) {
-          optionChain = this.generateMockOptionChain(spotPrice)
-          this.latestOptionChains.set(symbol, optionChain)
-        }
-      } else {
-        // Live Upstox fetch from primary token
-        try {
-          const instrumentKey = UNDERLYING_INSTRUMENT_KEYS[symbol]
-          const quoteRes = await fetch(
-            `${this.config.upstoxApiBaseUrl}/market-quote/quotes?instrument_key=${encodeURIComponent(instrumentKey)}`,
-            {
-              headers: {
-                Authorization: `Bearer ${this.config.primaryUpstoxToken}`,
-                Accept: 'application/json',
-              },
-            },
-          )
-
-          if (quoteRes.ok) {
-            const data = (await quoteRes.json()) as any
-            const quote = data?.data?.[instrumentKey.replace('|', ':')] || Object.values(data?.data || {})[0] as any
-            if (quote?.last_price) {
-              spotPrice = quote.last_price
-            } else {
-              liveFetchFailures++
-              this.lastFeedError = 'response missing last_price'
-            }
-          } else {
-            liveFetchFailures++
-            this.lastFeedError = `HTTP ${quoteRes.status}`
-          }
-        } catch (err) {
-          liveFetchFailures++
-          this.lastFeedError = (err as Error).message || 'network error'
-          // Fallback to previous price on network glitch
-          spotPrice = candles.length ? candles[candles.length - 1][4] : 24500
-        }
+      if (acquired.fetchFailed) {
+        liveFetchFailures++
+        this.lastFeedError = acquired.fetchError || 'unknown'
       }
 
       // Compute indicators and scoring ONCE
@@ -278,29 +248,8 @@ export class MasterIngestionEngine extends EventEmitter {
     return candles
   }
 
-  private generateMockOptionChain(spot: number): OptionData[] {
-    const roundedSpot = Math.round(spot / 50) * 50
-    const strikes = [-200, -150, -100, -50, 0, 50, 100, 150, 200].map((offset) => roundedSpot + offset)
-    const expiry = new Date(Date.now() + 5 * 86400000).toISOString().split('T')[0]
-
-    return strikes.map((strike) => {
-      const cePrice = Math.max(5, Math.round((spot - strike + 80) * 100) / 100)
-      const pePrice = Math.max(5, Math.round((strike - spot + 80) * 100) / 100)
-      return {
-        expiry,
-        strike_price: strike,
-        underlying_spot_price: spot,
-        call_options: {
-          instrument_key: `NSE_FO|OPT_NIFTY_${strike}_CE`,
-          trading_symbol: `NIFTY ${expiry} ${strike} CE`,
-          market_data: { ltp: cePrice, volume: 50000, oi: 120000 },
-        },
-        put_options: {
-          instrument_key: `NSE_FO|OPT_NIFTY_${strike}_PE`,
-          trading_symbol: `NIFTY ${expiry} ${strike} PE`,
-          market_data: { ltp: pePrice, volume: 45000, oi: 135000 },
-        },
-      }
-    })
+  /** Transport selection: mock synthesis unless a live master token is present. */
+  private resolveSource(): MarketDataSource {
+    return this.config.mockMode || !this.config.primaryUpstoxToken ? this.mockSource : this.restSource
   }
 }
