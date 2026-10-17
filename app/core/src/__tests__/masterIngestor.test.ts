@@ -56,4 +56,15 @@ describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
     expect((ingestor as any).isRunning).toBe(false)
     expect((ingestor as any).timer).toBeNull()
   })
+
+  it('passes WS feed tuning knobs through to the feed source (env → config)', () => {
+    const tuned = new MasterIngestionEngine({ optionChainRefreshMs: 0, atmWindowStrikes: 2 })
+    expect((tuned as any).wsSource.optionChainRefreshMs).toBe(0)
+    expect((tuned as any).wsSource.atmWindowStrikes).toBe(2)
+
+    // Unset knobs fall back to the source defaults (15000 ms / 5 strikes)
+    const defaults = new MasterIngestionEngine({})
+    expect((defaults as any).wsSource.optionChainRefreshMs).toBe(15000)
+    expect((defaults as any).wsSource.atmWindowStrikes).toBe(5)
+  })
 })

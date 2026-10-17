@@ -46,12 +46,23 @@ export function buildServer(opts?: { mockMode?: boolean; primaryToken?: string; 
   // Initialize Core Services
   const notifier = createTelegramNotifier()
 
+  // Optional non-negative integer env knob: undefined when unset/blank/invalid.
+  // 0 is meaningful for the WS tuning knobs below — it disables the feature.
+  const optionalCountEnv = (name: string): number | undefined => {
+    const raw = process.env[name]
+    if (raw === undefined || raw.trim() === '') return undefined
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : undefined
+  }
+
   const masterIngestor = new MasterIngestionEngine({
     pollingIntervalMs: parseInt(process.env.POLLING_INTERVAL_MS || '2000', 10),
     upstoxApiBaseUrl: process.env.UPSTOX_API_URL || 'https://api.upstox.com/v2',
     primaryUpstoxToken: opts?.primaryToken || process.env.PRIMARY_UPSTOX_TOKEN,
     mockMode: opts?.mockMode ?? (process.env.NODE_ENV === 'test' || !process.env.PRIMARY_UPSTOX_TOKEN),
     liveSource: process.env.MARKET_FEED_SOURCE === 'ws' ? 'ws' : 'rest',
+    optionChainRefreshMs: optionalCountEnv('OPTION_CHAIN_REFRESH_MS'),
+    atmWindowStrikes: optionalCountEnv('ATM_WINDOW_STRIKES'),
     notifier,
   })
 

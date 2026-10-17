@@ -24,6 +24,16 @@ export interface MasterIngestorConfig {
   mockMode?: boolean
   /** Live transport: 'rest' (LTP polling, default) or 'ws' (Upstox Feed V3 WebSocket). */
   liveSource?: 'rest' | 'ws'
+  /**
+   * WS mode: option-chain REST refresh cadence per symbol in ms
+   * (default 15000; 0 disables the chain refresh).
+   */
+  optionChainRefreshMs?: number
+  /**
+   * WS mode: nearest strikes per symbol streamed at tick level around spot
+   * (default 5; 0 disables the ATM window).
+   */
+  atmWindowStrikes?: number
   notifier?: Notifier
 }
 
@@ -51,6 +61,8 @@ export class MasterIngestionEngine extends EventEmitter {
       primaryUpstoxToken: config?.primaryUpstoxToken,
       mockMode: config?.mockMode ?? false,
       liveSource: config?.liveSource ?? 'rest',
+      optionChainRefreshMs: config?.optionChainRefreshMs,
+      atmWindowStrikes: config?.atmWindowStrikes,
       notifier: config?.notifier,
     }
 
@@ -64,6 +76,9 @@ export class MasterIngestionEngine extends EventEmitter {
     this.wsSource = new UpstoxFeedV3Source({
       restApiBaseUrl: this.config.upstoxApiBaseUrl,
       getToken: () => this.config.primaryUpstoxToken,
+      // undefined falls back to the source defaults (15000 ms / 5 strikes)
+      optionChainRefreshMs: this.config.optionChainRefreshMs,
+      atmWindowStrikes: this.config.atmWindowStrikes,
     })
 
     // Seed initial candle buffer

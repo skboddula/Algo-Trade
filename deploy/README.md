@@ -53,6 +53,8 @@ cp app/core/.env.sample app/core/.env
 #      Optional: MARKET_FEED_SOURCE=ws enables the Upstox Market Data Feed V3
 #      WebSocket transport (live index ticks + 1-min candles, with a REST
 #      option-chain refresh) instead of the default REST LTP polling.
+#      WS tuning: OPTION_CHAIN_REFRESH_MS (default 15000 ms; 0 disables) and
+#      ATM_WINDOW_STRIKES (default 5; 0 disables the tick-level window).
 #      Default binding is 127.0.0.1 — keep it that way unless you add auth.
 
 # 2. Build + install the service
