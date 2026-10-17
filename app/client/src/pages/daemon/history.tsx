@@ -46,9 +46,7 @@ export function DaemonHistoryPage({ daemon }: { daemon: DaemonController }) {
           icon={<Wallet size={14} className="text-primary" />}
           label="Paper balance"
           value={formatPaise(user?.paperBalance)}
-          sub={`start ${formatPaise(
-            user ? user.paperBalance - realizedTotalPaise : undefined,
-          )} + realized`}
+          sub={`${trades.length} ledger records`}
         />
         <SummaryCard
           icon={<TrendingUp size={14} className="text-primary" />}

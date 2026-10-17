@@ -186,7 +186,7 @@ function FeedBadge({ daemon }: { daemon: DaemonController }) {
   const fresh = age !== null && age < 15_000
 
   let dotClass = 'bg-muted-foreground/40'
-  let label = 'feed —'
+  let label = feed?.source ? `feed ${feed.source}` : 'feed —'
   if (!daemon.connected) {
     dotClass = 'bg-destructive animate-pulse'
     label = 'daemon offline'
@@ -196,6 +196,9 @@ function FeedBadge({ daemon }: { daemon: DaemonController }) {
   } else if (wsOpen) {
     dotClass = 'bg-warning'
     label = `feed stale · ${formatAge(age)}`
+  } else if (feed?.source?.includes('ws')) {
+    dotClass = 'bg-warning'
+    label = `ws ${feed.ws?.state ?? 'starting'}`
   }
 
   return (
