@@ -27,8 +27,8 @@ import { formatPrice } from '@/pages/daemon/format'
 import { DaemonLiveTradesPage } from '@/pages/daemon/live-trades'
 import { DaemonStrategiesPage } from '@/pages/daemon/strategies'
 import { DaemonHistoryPage } from '@/pages/daemon/history'
-import { DaemonBrokerAccountsPage } from '@/pages/daemon/broker-accounts'
-import { DaemonProfilePage } from '@/pages/daemon/profile'
+import { BrokerAccountsPage } from '@/pages/broker-accounts'
+import { ProfilePage } from '@/pages/profile'
 
 export type DaemonPage =
   | 'live-trades'
@@ -147,10 +147,8 @@ export function DaemonApp() {
           )}
           {page === 'strategies' && <DaemonStrategiesPage daemon={daemon} />}
           {page === 'history' && <DaemonHistoryPage daemon={daemon} />}
-          {page === 'broker-accounts' && (
-            <DaemonBrokerAccountsPage daemon={daemon} />
-          )}
-          {page === 'profile' && <DaemonProfilePage daemon={daemon} />}
+          {page === 'broker-accounts' && <BrokerAccountsPage daemon={daemon} />}
+          {page === 'profile' && <ProfilePage daemon={daemon} />}
           {page === 'settings' && (
             <div className="flex items-center justify-center flex-1 text-muted-foreground text-sm p-6">
               Settings — coming soon
