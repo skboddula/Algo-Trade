@@ -108,6 +108,8 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
       paperTrades,
       // Boolean only — the master token itself never leaves the daemon.
       hasToken: Boolean(masterIngestor.getMasterToken()),
+      // Boolean only — whether this user has a per-user order-token override.
+      hasOrderTokenOverride: Boolean(userState.upstoxToken),
     })
   })
 

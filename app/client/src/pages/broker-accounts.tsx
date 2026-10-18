@@ -7,14 +7,12 @@ import {
   ChevronRight,
   Copy,
   FlaskConical,
-  KeyRound,
   Link2,
   Link2Off,
   Loader2,
   Pencil,
   Plus,
   RefreshCw,
-  ShieldCheck,
   ShoppingCart,
   Trash2,
   Zap,
@@ -253,15 +251,22 @@ interface ProfileData {
   broker?: string
 }
 
-function TestConnection({ account }: { account: BrokerAccount }) {
+function TestConnection({
+  account,
+  serverResolved,
+}: {
+  account?: BrokerAccount
+  /** Daemon mode: the token lives on the server, so post an empty one. */
+  serverResolved?: boolean
+}) {
   const [status, setStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>(
     'idle',
   )
   const [profile, setProfile] = useState<ProfileData | null>(null)
   const [errMsg, setErrMsg] = useState('')
 
-  const token = account.accessToken ?? account.analyticsToken
-  if (!token) return null
+  const token = account?.accessToken ?? account?.analyticsToken
+  if (!token && !serverResolved) return null
 
   const handleTest = () => {
     setStatus('loading')
@@ -270,7 +275,7 @@ function TestConnection({ account }: { account: BrokerAccount }) {
     fetch(API_UPSTOX_PROFILE, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token: token ?? '' }),
     })
       .then((r) => r.json())
       .then((json: unknown) => {
@@ -366,15 +371,103 @@ const PURPOSE_META = {
   orders: { label: 'Order Placing', Icon: ShoppingCart },
 } as const
 
-function AccountCard({
-  account,
-  onRemove,
-  onEdit,
-}: {
-  account: BrokerAccount
-  onRemove: (id: string) => void
-  onEdit: (account: BrokerAccount) => void
-}) {
+const TOKEN_BADGE_META = {
+  analytics: {
+    label: 'Analytics Token',
+    Icon: BarChart2,
+    className: 'bg-success/10 text-success',
+  },
+  trading: {
+    label: 'Trading Token',
+    Icon: Zap,
+    className: 'bg-primary/10 text-primary',
+  },
+} as const
+
+const STATUS_META = {
+  connected: { variant: 'success', label: 'connected' },
+  expired: { variant: 'destructive', label: 'expired' },
+  need_auth: { variant: 'warning', label: 'need auth' },
+} as const
+
+/**
+ * Chrome-only account card shared by the cloud account list and the daemon
+ * window. Cloud rows map a BrokerAccount into this shape; the daemon window
+ * describes its master token and order-token override.
+ */
+interface AccountCardData {
+  id: string
+  label: string
+  status: 'connected' | 'expired' | 'need_auth'
+  /** Mono line under the label (cloud: “Upstox · key…”; daemon: feed/override). */
+  subtitle?: string
+  badges?: (keyof typeof TOKEN_BADGE_META)[]
+  purposes: { purpose: BrokerPurpose; active: boolean }[]
+  connectedAt?: string
+  /** Top-right controls (edit/remove on cloud; clear override on daemon). */
+  actions?: React.ReactNode
+  /** Section under the divider: reauth/test (cloud) or token tools (daemon). */
+  children?: React.ReactNode
+}
+
+function accountCardData(
+  account: BrokerAccount,
+  handlers: {
+    onEdit: (account: BrokerAccount) => void
+    onRemove: (id: string) => void
+  },
+): AccountCardData {
+  return {
+    id: account.id,
+    label: account.label,
+    status: getAccountConnectionState(account),
+    subtitle: account.apiKey
+      ? `Upstox · ${account.apiKey.slice(0, 8)}…`
+      : undefined,
+    badges: [
+      ...(account.analyticsToken ? (['analytics'] as const) : []),
+      ...(account.accessToken ? (['trading'] as const) : []),
+    ],
+    purposes: account.purpose.map((p) => ({
+      purpose: p,
+      active:
+        p === 'analytics' ? !!account.analyticsToken : !!account.accessToken,
+    })),
+    connectedAt: account.connectedAt,
+    actions: (
+      <>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+          onClick={() => handlers.onEdit(account)}
+          title="Edit account"
+        >
+          <Pencil size={13} />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+          onClick={() => handlers.onRemove(account.id)}
+          title="Remove account"
+        >
+          <Trash2 size={14} />
+        </Button>
+      </>
+    ),
+    children: (
+      <>
+        <ReauthorizeInline account={account} />
+        <TestConnection account={account} />
+      </>
+    ),
+  }
+}
+
+function AccountCard({ data }: { data: AccountCardData }) {
+  const status = STATUS_META[data.status]
+
   return (
     <Card>
       <CardContent className="pt-5">
@@ -386,80 +479,47 @@ function AccountCard({
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-sm font-medium text-foreground">
-                  {account.label}
+                  {data.label}
                 </span>
-                <Badge
-                  variant={
-                    getAccountConnectionState(account) === 'connected'
-                      ? 'success'
-                      : getAccountConnectionState(account) === 'expired'
-                        ? 'destructive'
-                        : 'warning'
-                  }
-                >
-                  {getAccountConnectionState(account) === 'connected'
-                    ? 'connected'
-                    : getAccountConnectionState(account) === 'expired'
-                      ? 'expired'
-                      : 'need auth'}
-                </Badge>
+                <Badge variant={status.variant}>{status.label}</Badge>
               </div>
-              {account.apiKey && (
+              {data.subtitle && (
                 <p className="text-xs text-muted-foreground mt-0.5 font-mono">
-                  Upstox · {account.apiKey.slice(0, 8)}…
+                  {data.subtitle}
                 </p>
               )}
             </div>
           </div>
-          <div className="flex items-center gap-1 shrink-0">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-foreground"
-              onClick={() => onEdit(account)}
-              title="Edit account"
-            >
-              <Pencil size={13} />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-              onClick={() => onRemove(account.id)}
-              title="Remove account"
-            >
-              <Trash2 size={14} />
-            </Button>
-          </div>
+          {data.actions && (
+            <div className="flex items-center gap-1 shrink-0">
+              {data.actions}
+            </div>
+          )}
         </div>
 
         {/* Token type badges */}
         <div className="flex items-center gap-2 mt-3 flex-wrap">
-          {account.analyticsToken && (
-            <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/10 text-success text-xs font-medium">
-              <BarChart2 size={10} />
-              Analytics Token
-            </div>
-          )}
-          {account.accessToken && (
-            <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-medium">
-              <Zap size={10} />
-              Trading Token
-            </div>
-          )}
+          {data.badges?.map((kind) => {
+            const { label, Icon, className } = TOKEN_BADGE_META[kind]
+            return (
+              <div
+                key={kind}
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${className}`}
+              >
+                <Icon size={10} />
+                {label}
+              </div>
+            )
+          })}
         </div>
 
         {/* Purpose tags */}
         <div className="flex items-center gap-2 mt-2 flex-wrap">
-          {account.purpose.map((p) => {
-            const { label, Icon } = PURPOSE_META[p]
-            const active =
-              p === 'analytics'
-                ? !!account.analyticsToken
-                : !!account.accessToken
+          {data.purposes.map(({ purpose, active }) => {
+            const { label, Icon } = PURPOSE_META[purpose]
             return (
               <div
-                key={p}
+                key={purpose}
                 className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
                   active
                     ? 'bg-success/10 text-success'
@@ -473,17 +533,16 @@ function AccountCard({
           })}
         </div>
 
-        {account.connectedAt && (
+        {data.connectedAt && (
           <p className="text-xs text-muted-foreground mt-2">
             Connected{' '}
-            {new Date(account.connectedAt).toLocaleDateString('en-IN', {
+            {new Date(data.connectedAt).toLocaleDateString('en-IN', {
               dateStyle: 'medium',
             })}
           </p>
         )}
 
-        <ReauthorizeInline account={account} />
-        <TestConnection account={account} />
+        {data.children}
       </CardContent>
     </Card>
   )
@@ -981,6 +1040,23 @@ function AddAccountPanel({
   )
 }
 
+// ─── Page header ─────────────────────────────────────────────────
+function BrokerAccountsHeader({ action }: { action?: React.ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight text-foreground">
+          Broker Accounts
+        </h1>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          Connect broker accounts to enable trading and market data access
+        </p>
+      </div>
+      {action}
+    </div>
+  )
+}
+
 // ─── Cloud variant ────────────────────────────────────────────────
 function CloudBrokerAccounts() {
   const [accounts, setAccounts] = useState<BrokerAccount[]>(() => getAccounts())
@@ -1042,26 +1118,20 @@ function CloudBrokerAccounts() {
 
   return (
     <div className="flex flex-col gap-5 p-6 min-w-0">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight text-foreground">
-            Broker Accounts
-          </h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Connect broker accounts to enable trading and market data access
-          </p>
-        </div>
-        {!showPanel && (
-          <Button
-            size="sm"
-            onClick={() => setShowAddPanel(true)}
-            className="shrink-0"
-          >
-            <Plus size={14} />
-            Add Account
-          </Button>
-        )}
-      </div>
+      <BrokerAccountsHeader
+        action={
+          !showPanel ? (
+            <Button
+              size="sm"
+              onClick={() => setShowAddPanel(true)}
+              className="shrink-0"
+            >
+              <Plus size={14} />
+              Add Account
+            </Button>
+          ) : undefined
+        }
+      />
 
       {showPanel && (
         <AddAccountPanel
@@ -1099,12 +1169,13 @@ function CloudBrokerAccounts() {
             {accounts.map((acc) => (
               <AccountCard
                 key={acc.id}
-                account={acc}
-                onRemove={handleRemove}
-                onEdit={(a) => {
-                  setShowAddPanel(false)
-                  setEditingAccount(a)
-                }}
+                data={accountCardData(acc, {
+                  onRemove: handleRemove,
+                  onEdit: (a) => {
+                    setShowAddPanel(false)
+                    setEditingAccount(a)
+                  },
+                })}
               />
             ))}
             <McpSection />
@@ -1116,21 +1187,30 @@ function CloudBrokerAccounts() {
 }
 
 // ─── Daemon variant ───────────────────────────────────────────────
-// The daemon owns the broker token, so this variant manages that session
-// (feed transport, OAuth refresh, order-token override) instead of
-// browser-stored accounts.
+// Same page as the cloud dashboard, one card per "account". The daemon owns
+// the Upstox token, so its rows are the master feed token and the optional
+// per-user order-token override instead of browser-stored accounts.
 function DaemonBrokerAccounts({ daemon }: { daemon: DaemonController }) {
   const [token, setToken] = useState('')
   const [saving, setSaving] = useState(false)
-  const [feedback, setFeedback] = useState<string | null>(null)
+  const [clearing, setClearing] = useState(false)
+  const [feedback, setFeedback] = useState<{
+    kind: 'ok' | 'error'
+    text: string
+  } | null>(null)
   const [alsoMaster, setAlsoMaster] = useState(false)
 
   const feed = daemon.health?.feed
   const liveFeed = Boolean(feed && feed.source !== 'mock')
+  const hasMaster = Boolean(daemon.status?.hasToken)
+  const hasOverride = Boolean(daemon.status?.hasOrderTokenOverride)
 
   const saveToken = async () => {
     if (!token.trim()) {
-      setFeedback('Paste an Upstox access token first.')
+      setFeedback({
+        kind: 'error',
+        text: 'Paste an Upstox access token first.',
+      })
       return
     }
     setSaving(true)
@@ -1138,178 +1218,156 @@ function DaemonBrokerAccounts({ daemon }: { daemon: DaemonController }) {
     try {
       await daemonApi.setToken(token.trim(), alsoMaster)
       setToken('')
-      setFeedback(
-        alsoMaster
+      setFeedback({
+        kind: 'ok',
+        text: alsoMaster
           ? 'Token saved — live orders and the market-data feed now use it.'
           : 'Order token saved — live orders now use it.',
-      )
+      })
       daemon.refresh()
     } catch (err) {
-      setFeedback(
-        err instanceof Error ? err.message : 'Failed to save the token.',
-      )
+      setFeedback({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Failed to save the token.',
+      })
     } finally {
       setSaving(false)
     }
   }
 
-  return (
-    <div className="flex flex-col gap-5 p-6 min-w-0 max-w-5xl">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight text-foreground">
-          Broker Accounts
-        </h1>
-        <p className="text-sm text-muted-foreground mt-0.5">
-          The Upstox account the daemon ingests data and places live orders with
+  const clearOverride = async () => {
+    setClearing(true)
+    setFeedback(null)
+    try {
+      await daemonApi.clearToken()
+      setFeedback({
+        kind: 'ok',
+        text: 'Override removed — live orders fall back to the master token.',
+      })
+      daemon.refresh()
+    } catch (err) {
+      setFeedback({
+        kind: 'error',
+        text:
+          err instanceof Error ? err.message : 'Failed to clear the override.',
+      })
+    } finally {
+      setClearing(false)
+    }
+  }
+
+  const masterCard: AccountCardData = {
+    id: 'master-token',
+    label: 'Master feed token',
+    status: hasMaster ? 'connected' : 'need_auth',
+    subtitle: `Upstox · ${feed?.source ?? '—'}`,
+    badges: hasMaster ? ['trading'] : [],
+    purposes: [
+      { purpose: 'market-data', active: liveFeed },
+      { purpose: 'orders', active: hasMaster },
+    ],
+    children: (
+      <>
+        <div className="mt-3 border-t border-border pt-3">
+          <a
+            href="/auth/upstox/start"
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors w-fit"
+          >
+            <RefreshCw size={11} />
+            Refresh token via Upstox login
+          </a>
+          <p className="text-[11px] text-muted-foreground mt-2">
+            Expires daily (~03:30 IST). One-time setup: set{' '}
+            <span className="font-mono">UPSTOX_API_KEY</span>,{' '}
+            <span className="font-mono">UPSTOX_API_SECRET</span> and{' '}
+            <span className="font-mono">UPSTOX_REDIRECT_URI</span> in{' '}
+            <span className="font-mono">app/core/.env</span>.
+          </p>
+        </div>
+        <TestConnection serverResolved />
+      </>
+    ),
+  }
+
+  const overrideCard: AccountCardData = {
+    id: 'order-override',
+    label: 'Order token override',
+    status: hasOverride ? 'connected' : 'need_auth',
+    subtitle: 'Upstox · per-user order token',
+    badges: hasOverride ? ['trading'] : [],
+    purposes: [{ purpose: 'orders', active: hasOverride }],
+    actions: hasOverride ? (
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+        onClick={() => void clearOverride()}
+        disabled={clearing}
+        title="Remove override"
+      >
+        <Link2Off size={14} />
+      </Button>
+    ) : undefined,
+    children: (
+      <div className="mt-3 border-t border-border pt-3 space-y-3">
+        <p className="text-xs text-muted-foreground">
+          By default live orders authenticate with the master token. Paste a
+          separate Upstox access token here to override it for this user — the
+          override takes precedence for every order.
         </p>
+        <div className="flex items-center gap-2">
+          <input
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder="Upstox access token"
+            autoComplete="off"
+            className="flex h-9 w-full rounded-md border border-border bg-transparent px-3 py-1 text-sm shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono"
+          />
+          <Button
+            size="sm"
+            className="h-9 shrink-0"
+            disabled={saving}
+            onClick={() => void saveToken()}
+          >
+            {saving ? 'Saving…' : 'Save token'}
+          </Button>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={alsoMaster}
+            onChange={(e) => setAlsoMaster(e.target.checked)}
+            className="h-3.5 w-3.5 rounded border-border accent-primary"
+          />
+          Also refresh the market-data feed with this token
+        </label>
+        {feedback && (
+          <p
+            className={`text-xs ${feedback.kind === 'ok' ? 'text-success' : 'text-destructive'}`}
+          >
+            {feedback.text}
+          </p>
+        )}
+        <p className="text-[11px] text-muted-foreground">
+          The token is stored in the daemon's SQLite state and never leaves this
+          machine.
+        </p>
+        <TestConnection serverResolved />
       </div>
+    ),
+  }
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <Link2 size={14} className="text-primary" />
-              Upstox — daemon token
-              <Badge
-                variant={liveFeed ? 'success' : 'secondary'}
-                className="ml-auto text-xs"
-              >
-                {liveFeed ? 'Connected' : 'Mock mode'}
-              </Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0 space-y-3">
-            <div className="flex items-center gap-2 text-sm">
-              <span
-                className={`w-2 h-2 rounded-full ${liveFeed ? 'bg-success animate-pulse' : 'bg-muted-foreground'}`}
-              />
-              <span>
-                {liveFeed
-                  ? 'Live market feed active on the master token.'
-                  : 'No live feed — the daemon runs on synthetic data.'}
-              </span>
-            </div>
-            <div className="text-xs text-muted-foreground space-y-1">
-              <p>
-                Transport:{' '}
-                <span className="font-mono text-foreground">
-                  {feed?.source ?? '—'}
-                </span>{' '}
-                · WS:{' '}
-                <span className="font-mono text-foreground">
-                  {feed?.ws?.state ?? '—'}
-                </span>
-              </p>
-              <p>
-                The token expires daily (~03:30 IST). Refresh it with the Upstox
-                login flow — the daemon swaps it into the live feed instantly.
-              </p>
-            </div>
-            <a
-              href="/auth/upstox/start"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1.5 h-9 px-4 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity w-fit"
-            >
-              <RefreshCw size={14} />
-              Refresh Upstox token (browser login)
-            </a>
-            <p className="text-[11px] text-muted-foreground">
-              One-time setup: set{' '}
-              <span className="font-mono">UPSTOX_API_KEY</span>,{' '}
-              <span className="font-mono">UPSTOX_API_SECRET</span> and{' '}
-              <span className="font-mono">UPSTOX_REDIRECT_URI</span> in{' '}
-              <span className="font-mono">app/core/.env</span>, and register the
-              redirect URL in your Upstox app.
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <KeyRound size={14} className="text-primary" />
-              Order token (live orders)
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0 space-y-3">
-            <p className="text-xs text-muted-foreground">
-              By default live orders authenticate with the master token above.
-              Paste a separate Upstox access token here to override it for this
-              user (the token takes precedence for every order).
-            </p>
-            <div className="flex items-center gap-2">
-              <input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder="Upstox access token"
-                autoComplete="off"
-                className="flex h-9 w-full rounded-md border border-border bg-transparent px-3 py-1 text-sm shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono"
-              />
-              <Button
-                size="sm"
-                className="h-9 shrink-0"
-                disabled={saving}
-                onClick={() => void saveToken()}
-              >
-                {saving ? 'Saving…' : 'Save token'}
-              </Button>
-            </div>
-            <label className="flex items-center gap-2 text-xs text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={alsoMaster}
-                onChange={(e) => setAlsoMaster(e.target.checked)}
-                className="h-3.5 w-3.5 rounded border-border accent-primary"
-              />
-              Also refresh the market-data feed with this token
-            </label>
-            {feedback && (
-              <p
-                className={`text-xs ${feedback.includes('saved') ? 'text-success' : 'text-destructive'}`}
-              >
-                {feedback}
-              </p>
-            )}
-            <p className="text-[11px] text-muted-foreground">
-              The token is stored in the daemon's SQLite state and never leaves
-              this machine.
-            </p>
-          </CardContent>
-        </Card>
+  return (
+    <div className="flex flex-col gap-5 p-6 min-w-0">
+      <BrokerAccountsHeader />
+      <div className="flex flex-col gap-3 max-w-2xl">
+        <AccountCard data={masterCard} />
+        <AccountCard data={overrideCard} />
+        <McpSection />
       </div>
-
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm flex items-center gap-2">
-            <ShieldCheck size={14} className="text-primary" />
-            Security
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="pt-0">
-          <ul className="text-xs text-muted-foreground space-y-1.5 list-disc pl-4">
-            <li>
-              The window is served on{' '}
-              <span className="font-mono">127.0.0.1:3000</span> only — loopback,
-              no network exposure.
-            </li>
-            <li>
-              Browser requests from any non-localhost origin are rejected (403);
-              CLI tools and OAuth redirects are unaffected.
-            </li>
-            <li>
-              API secrets live in{' '}
-              <span className="font-mono">app/core/.env</span> (0600) and are
-              only sent from this machine to Upstox.
-            </li>
-            <li>
-              Never run a second daemon against the same Upstox account — both
-              would place live orders.
-            </li>
-          </ul>
-        </CardContent>
-      </Card>
     </div>
   )
 }

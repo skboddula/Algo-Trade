@@ -65,6 +65,8 @@ export interface DaemonStatus {
   paperTrades: PaperTradeRecord[]
   /** Whether the daemon holds a working master token (boolean only). */
   hasToken?: boolean
+  /** Whether this user has a per-user order-token override (boolean only). */
+  hasOrderTokenOverride?: boolean
 }
 
 async function parseJson<T>(res: Response): Promise<T> {
@@ -118,6 +120,10 @@ export const daemonApi = {
    */
   setToken: (token: string, alsoMaster = false): Promise<unknown> =>
     post('/api/bot/token', { userId: DAEMON_USER_ID, token, alsoMaster }),
+
+  /** Drop the per-user order-token override (falls back to the master token). */
+  clearToken: (): Promise<unknown> =>
+    post('/api/bot/token', { userId: DAEMON_USER_ID, clear: true }),
 
   saveConfig: (config: StrategyConfig): Promise<unknown> =>
     post('/api/bot/config', { userId: DAEMON_USER_ID, config }),

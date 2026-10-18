@@ -162,6 +162,13 @@ describe('Cloud-API parity routes (daemon window)', () => {
     server.tenantManager.setToken('parity_user', 'user-token')
     expect((await call()).headers.Authorization).toBe('Bearer user-token')
 
+    // Status exposes only a boolean for the override
+    const withOverride = await server.app.inject({
+      method: 'GET',
+      url: '/api/bot/status?userId=parity_user',
+    })
+    expect(JSON.parse(withOverride.body).hasOrderTokenOverride).toBe(true)
+
     const cleared = await server.app.inject({
       method: 'POST',
       url: '/api/bot/token',
@@ -169,6 +176,12 @@ describe('Cloud-API parity routes (daemon window)', () => {
     })
     expect(cleared.statusCode).toBe(200)
     expect((await call()).headers.Authorization).toBe('Bearer master-token')
+
+    const withoutOverride = await server.app.inject({
+      method: 'GET',
+      url: '/api/bot/status?userId=parity_user',
+    })
+    expect(JSON.parse(withoutOverride.body).hasOrderTokenOverride).toBe(false)
   })
 
   // ── Paper ledger parity ───────────────────────────────────────────────────
