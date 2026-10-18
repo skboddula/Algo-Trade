@@ -95,6 +95,40 @@ export class OrderGateway {
     return account
   }
 
+  /**
+   * Manual paper-credit adjustment, mirroring the worker's admin adjust:
+   * mode 'set' replaces the balance, mode 'adjust' adds a delta — both in
+   * paise. Throws user-facing errors for invalid amounts (routes map these
+   * to 400s).
+   */
+  public adjustPaperAccount(
+    userId: string,
+    mode: 'set' | 'adjust',
+    amountPaise: number,
+  ): PaperAccount {
+    if (!Number.isFinite(amountPaise)) {
+      throw new Error('Amount must be a valid number')
+    }
+    if (mode !== 'set' && mode !== 'adjust') {
+      throw new Error('Mode must be set or adjust')
+    }
+    const account = this.getOrCreatePaperAccount(userId)
+    if (mode === 'set') {
+      if (amountPaise < 0) {
+        throw new Error('Paper credit cannot go below zero')
+      }
+      account.balance = amountPaise
+    } else {
+      if (account.balance + amountPaise < 0) {
+        throw new Error('Paper credit cannot go below zero')
+      }
+      account.balance += amountPaise
+    }
+    account.updatedAt = new Date().toISOString()
+    this.store?.savePaperAccount(account)
+    return account
+  }
+
   public getPaperTrades(userId: string): PaperTradeRecord[] {
     const account = this.getOrCreatePaperAccount(userId)
     return Array.from(this.paperTrades.values()).filter((t) => t.accountId === account.id)

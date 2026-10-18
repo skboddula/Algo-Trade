@@ -13,6 +13,7 @@ import { StateStore } from './services/stateStore'
 import { createTelegramNotifier } from './services/notifier'
 import { botRoutes } from './routes/botRoutes'
 import { upstoxAuthRoutes, type UpstoxAuthRoutesOptions } from './routes/upstoxAuth'
+import { parityRoutes } from './routes/parityRoutes'
 
 dotenv.config()
 
@@ -153,6 +154,14 @@ export function buildServer(opts?: {
   // Register Bot Routes
   app.register(botRoutes, {
     masterIngestor,
+    tenantManager,
+    orderGateway,
+  })
+
+  // Same-origin parity routes for the cloud client API paths
+  // (/api/broker/upstox/*, /api/paper/*) so the shared dashboard pages run
+  // unchanged in the daemon window.
+  app.register(parityRoutes, {
     tenantManager,
     orderGateway,
   })

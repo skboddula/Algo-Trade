@@ -178,6 +178,7 @@ async function fetchAccountSummary(
   account: PaperAccountRow
   recentEntries: PaperStatementRow[]
   openTradeCount: number
+  startingBalance: number
 }> {
   const recentEntries = await env.PAPER_TRADING_DB.prepare(
     'SELECT id, entry_type, amount, balance_before, balance_after, note, metadata_json, created_at FROM paper_statement_entries WHERE account_id = ? ORDER BY created_at DESC LIMIT 20',
@@ -194,6 +195,9 @@ async function fetchAccountSummary(
     account,
     recentEntries: recentEntries.results ?? [],
     openTradeCount: Number(openTradeCountRow?.count ?? 0),
+    // The reset target, in rupees — lets the window label the reset button
+    // with the runtime's actual seed (worker ₹15,000 / daemon ₹1,00,000).
+    startingBalance: PAPER_STARTING_CREDIT / 100,
   }
 }
 
@@ -204,6 +208,7 @@ export async function getPaperAccountSummary(
   account: PaperAccountRow
   recentEntries: PaperStatementRow[]
   openTradeCount: number
+  startingBalance: number
 }> {
   const account = await ensurePaperAccount(env, userId)
   return fetchAccountSummary(env, account)

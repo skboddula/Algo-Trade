@@ -152,10 +152,19 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
   fastify.post('/api/bot/token', async (request, reply) => {
     const body = request.body as {
       userId?: string
-      token: string
+      token?: string
       alsoMaster?: boolean
+      clear?: boolean
     } | null
     const userId = body?.userId || 'default_user'
+
+    // Explicitly drop the per-user order-token override (falls back to the
+    // master ingestion token). Used by the Broker Accounts window.
+    if (body?.clear) {
+      const userState = tenantManager.clearToken(userId)
+      return reply.send({ success: true, userState: sanitizeUserState(userState) })
+    }
+
     if (!body?.token) {
       return reply.status(400).send({ error: 'Missing token' })
     }

@@ -129,6 +129,35 @@ export class TenantManager extends EventEmitter {
     return user
   }
 
+  /** Remove the per-user order-token override (falls back to the master token). */
+  public clearToken(userId: string): UserBotState {
+    const user = this.getOrCreateUser(userId)
+    user.upstoxToken = undefined
+    user.updatedAt = new Date().toISOString()
+    this.emitUserUpdate(user)
+    this.persistUser(user, true)
+    return user
+  }
+
+  /** Effective token used for this user's orders / REST calls (override → master). */
+  public getEffectiveOrderToken(userId: string): string | undefined {
+    return this.resolveOrderToken(this.getOrCreateUser(userId))
+  }
+
+  /**
+   * Re-read the paper ledger balance into user state. Called after manual
+   * credit adjustments so `/api/bot/status` reflects them immediately
+   * (otherwise the cached value only moves on the next market tick).
+   */
+  public syncPaperBalance(userId: string): UserBotState {
+    const user = this.getOrCreateUser(userId)
+    user.paperBalance = this.orderGateway.getOrCreatePaperAccount(userId).balance
+    user.updatedAt = new Date().toISOString()
+    this.emitUserUpdate(user)
+    this.persistUser(user, true)
+    return user
+  }
+
   public startBot(userId: string, executionMode?: 'paper' | 'live'): UserBotState {
     const user = this.getOrCreateUser(userId)
 

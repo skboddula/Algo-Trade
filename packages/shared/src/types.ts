@@ -302,6 +302,11 @@ export interface PaperAccountSummary {
   account: PaperAccount
   recentEntries: PaperStatementEntry[]
   openTradeCount: number
+  /**
+   * Credit restored by a reset, in rupees. Runtime-specific seed:
+   * worker/browser paper account ₹15,000; daemon ledger ₹1,00,000.
+   */
+  startingBalance?: number
   trades?: PaperTrade[]
   openTrades?: PaperTrade[]
 }

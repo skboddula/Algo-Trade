@@ -1,4 +1,9 @@
 import type { UpstoxTokenRequest } from './types'
+import {
+  fetchUpstoxFunds,
+  fetchUpstoxProfile,
+  UpstoxRestError,
+} from '../../../packages/shared/src/upstoxRest'
 
 const DEFAULT_TIMEOUT_MS = 8000
 
@@ -133,33 +138,20 @@ export async function handleUpstoxProfile(request: Request): Promise<Response> {
   if (!body.token) {
     return Response.json({ error: 'Missing token' }, { status: 400 })
   }
-  let upstream: Response
   try {
-    upstream = await fetchWithTimeout(
-      'https://api.upstox.com/v2/user/profile',
+    const { status, data } = await fetchUpstoxProfile(body.token)
+    return Response.json(data, { status })
+  } catch (err) {
+    return Response.json(
       {
-        headers: {
-          Authorization: `Bearer ${body.token}`,
-          Accept: 'application/json',
-        },
+        error:
+          err instanceof UpstoxRestError
+            ? err.message
+            : 'Failed to reach Upstox API',
       },
-    )
-  } catch {
-    return Response.json(
-      { error: 'Failed to reach Upstox API' },
       { status: 502 },
     )
   }
-  let data: unknown
-  try {
-    data = await upstream.json()
-  } catch {
-    return Response.json(
-      { error: 'Invalid response from Upstox API' },
-      { status: 502 },
-    )
-  }
-  return Response.json(data, { status: upstream.status })
 }
 
 const INSTRUMENT_KEYS = [
@@ -217,34 +209,20 @@ export async function handleUpstoxFunds(request: Request): Promise<Response> {
   }
   if (!body.token)
     return Response.json({ error: 'Missing token' }, { status: 400 })
-  let upstream: Response
   try {
-    upstream = await fetchWithTimeout(
-      'https://api.upstox.com/v3/user/get-funds-and-margin',
+    const { status, data } = await fetchUpstoxFunds(body.token)
+    return Response.json(data, { status })
+  } catch (err) {
+    return Response.json(
       {
-        headers: {
-          Authorization: `Bearer ${body.token}`,
-          Accept: 'application/json',
-          'Api-Version': '3.0',
-        },
+        error:
+          err instanceof UpstoxRestError
+            ? err.message
+            : 'Failed to reach Upstox API',
       },
-    )
-  } catch {
-    return Response.json(
-      { error: 'Failed to reach Upstox API' },
       { status: 502 },
     )
   }
-  let data: unknown
-  try {
-    data = await upstream.json()
-  } catch {
-    return Response.json(
-      { error: 'Invalid response from Upstox API' },
-      { status: 502 },
-    )
-  }
-  return Response.json(data, { status: upstream.status })
 }
 
 export async function handleIntraday(request: Request): Promise<Response> {
