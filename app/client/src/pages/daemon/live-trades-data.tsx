@@ -1,73 +1,21 @@
+// Daemon-side builder for the shared Live Trades view (`trades-view.tsx`).
+// Converts the daemon ledger (paise) into the display-ready dataset.
 import type {
   ActivePosition,
-  ExecutionMode,
   PaperTradeRecord,
   TradeRowStatus,
   UserBotState,
 } from '@/lib/types'
 import { BarChart2, TrendingUp, Wallet, Zap } from 'lucide-react'
+import {
+  fmtCurrency,
+  fmtPct,
+  type LiveTradesDataset,
+  type StatCard,
+  type TradeMode,
+  type TradeRow,
+} from '@/components/dashboard/trades/trades-model'
 import { isToday } from './format'
-
-// ─── Types (mirror the cloud Live Trades page) ────────────────────────────────
-
-export type TradeMode = ExecutionMode
-
-export interface DaemonTradeRow {
-  id: string
-  /** Underlying symbol for daemon actions (exit), the raw key otherwise. */
-  symbol: string
-  displaySymbol?: string
-  metaInfo?: string
-  type: 'CE' | 'PE' | 'EQ' | 'FUT'
-  side: 'BUY' | 'SELL'
-  qty: number
-  entryPrice: number | null
-  ltp: number | null
-  pnl: number | null
-  pnlPct: number | null
-  status: TradeRowStatus
-  entryTime: string
-  tradingSymbol?: string
-  underlyingSymbol?: string
-  isPaper?: boolean
-}
-
-export interface StatCard {
-  title: string
-  value: string
-  subValue?: string
-  change?: string
-  changeUp?: boolean
-  icon: React.ReactNode
-  iconClassName: string
-}
-
-export interface DaemonDataset {
-  mode: TradeMode
-  stats: StatCard[]
-  openRows: DaemonTradeRow[]
-  closedRows: DaemonTradeRow[]
-  pnlTotal: number
-  tradesTodayLabel: string
-  sourceNote: string
-}
-
-// ─── Formatting helpers ───────────────────────────────────────────────────────
-
-export function fmtCurrency(value: number, signed = false) {
-  const absolute = Math.abs(value).toLocaleString('en-IN', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })
-  if (!signed) return `₹${absolute}`
-  if (value > 0) return `+₹${absolute}`
-  if (value < 0) return `-₹${absolute}`
-  return `₹${absolute}`
-}
-
-export function fmtPct(value: number) {
-  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
-}
 
 function timeLabel(isoLike: string | null | undefined) {
   if (!isoLike) return '—'
@@ -83,34 +31,6 @@ function timeLabel(isoLike: string | null | undefined) {
 function metaString(meta: Record<string, unknown> | undefined, key: string) {
   const value = meta?.[key]
   return typeof value === 'string' ? value : undefined
-}
-
-export const typeVariant: Record<
-  DaemonTradeRow['type'],
-  'default' | 'destructive' | 'secondary' | 'warning'
-> = { CE: 'default', PE: 'destructive', EQ: 'secondary', FUT: 'warning' }
-
-export const statusVariant: Record<
-  TradeRowStatus,
-  'default' | 'destructive' | 'secondary' | 'success' | 'warning'
-> = {
-  ACTIVE: 'default',
-  CLOSED: 'secondary',
-  SL_HIT: 'destructive',
-  TARGET_HIT: 'success',
-  COMPLETED: 'success',
-  CANCELLED: 'secondary',
-  REJECTED: 'destructive',
-}
-
-export const statusLabel: Record<TradeRowStatus, string> = {
-  ACTIVE: 'Active',
-  CLOSED: 'Closed',
-  SL_HIT: 'SL Hit',
-  TARGET_HIT: 'Target',
-  COMPLETED: 'Completed',
-  CANCELLED: 'Cancelled',
-  REJECTED: 'Rejected',
 }
 
 // ─── Dataset builders ─────────────────────────────────────────────────────────
@@ -166,7 +86,7 @@ export function buildDaemonDataset({
   paperTrades: PaperTradeRecord[]
   /** True when the daemon runs a real (non-mock) market feed. */
   liveFeed: boolean
-}): DaemonDataset {
+}): LiveTradesDataset {
   const positionEntries = Object.entries(userState?.positions ?? {}).filter(
     (entry): entry is [string, ActivePosition] => entry[1] !== null,
   )
@@ -175,7 +95,7 @@ export function buildDaemonDataset({
   let unrealized = 0
   let openDirections: Record<string, number> = {}
 
-  const openRows: DaemonTradeRow[] = positionEntries.map(([symbol, pos]) => {
+  const openRows: TradeRow[] = positionEntries.map(([symbol, pos]) => {
     const { ltp, pnl, pnlPct } = positionPnl(pos)
     const entryValue = pos.entryPrice * pos.quantity
     committed += entryValue
@@ -207,7 +127,7 @@ export function buildDaemonDataset({
       entryTime: timeLabel(pos.entryTime),
       underlyingSymbol: symbol,
       isPaper: mode === 'paper',
-    } satisfies DaemonTradeRow
+    } satisfies TradeRow
   })
 
   const closedTrades = paperTrades.filter(
@@ -218,7 +138,7 @@ export function buildDaemonDataset({
   const realizedToday =
     closedTrades.reduce((sum, t) => sum + (t.realizedPnl ?? 0), 0) / 100
 
-  const closedRows: DaemonTradeRow[] = closedTrades
+  const closedRows: TradeRow[] = closedTrades
     .map((trade) => {
       const meta = trade.metadata
       const underlying = metaString(meta, 'underlyingSymbol') ?? 'NIFTY'
@@ -255,7 +175,7 @@ export function buildDaemonDataset({
         status,
         entryTime: timeLabel(trade.openedAt),
         underlyingSymbol: underlying,
-      } satisfies DaemonTradeRow
+      } satisfies TradeRow
     })
     .sort((a, b) => (b.entryTime > a.entryTime ? 1 : -1))
 

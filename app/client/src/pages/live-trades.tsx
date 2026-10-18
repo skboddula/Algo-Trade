@@ -1,8 +1,4 @@
-import type {
-  ExecutionMode,
-  PaperAccountSummary,
-  TradeRowStatus,
-} from '@/lib/types'
+import type { PaperAccountSummary, TradeRowStatus } from '@/lib/types'
 import { useEffect, useState } from 'react'
 import {
   ArrowDownRight,
@@ -17,18 +13,19 @@ import {
   Power,
   ExternalLink,
 } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+  StatCards,
+  TradesPanel,
+} from '@/components/dashboard/trades/trades-view'
+import {
+  fmtCurrency,
+  fmtPct,
+  type LiveTradesDataset,
+  type TradeMode,
+  type TradeRow,
+} from '@/components/dashboard/trades/trades-model'
 import { getAccounts } from '@/lib/accounts'
 import { fetchPaperHistory } from '@/lib/paperTrading'
 import { getStrategyConfig } from '@/lib/strategyConfig'
@@ -36,11 +33,9 @@ import {
   cn,
   isToday,
   normalizeLiveStatus,
-  getSensibullUrl,
   getSensibullOptionChainUrl,
   extractCleanTradingSymbol,
 } from '@/lib/utils'
-import { getLotSizeForSymbol } from '@/utils/tradeUtils'
 import {
   STORAGE_KEY_LIVE_TRADES_PAGE_MODE,
   STORAGE_KEY_BOT_POSITION,
@@ -52,8 +47,6 @@ import {
 } from '@/lib/constants'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-type TradeMode = ExecutionMode
 
 interface LiveOrder {
   order_id?: string
@@ -86,47 +79,6 @@ interface UpstoxFundsV3 {
   }
 }
 
-interface TradeRow {
-  id: string
-  symbol: string
-  displaySymbol?: string
-  metaInfo?: string
-  type: 'CE' | 'PE' | 'EQ' | 'FUT'
-  side: 'BUY' | 'SELL'
-  qty: number
-  entryPrice: number | null
-  ltp: number | null
-  pnl: number | null
-  pnlPct: number | null
-  status: TradeRowStatus
-  entryTime: string
-  tradingSymbol?: string
-  underlyingSymbol?: string
-  isPaper?: boolean
-}
-
-interface StatCard {
-  title: string
-  value: string
-  subValue?: string
-  change?: string
-  changeUp?: boolean
-  icon: React.ReactNode
-  iconClassName: string
-}
-
-interface Dataset {
-  mode: TradeMode
-  stats: StatCard[]
-  openRows: TradeRow[]
-  closedRows: TradeRow[]
-  pnlTotal: number
-  tradesTodayLabel: string
-  sourceNote: string
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 const MODE_STORAGE_KEY = STORAGE_KEY_LIVE_TRADES_PAGE_MODE
 
 function activeModeDefault(): TradeMode {
@@ -137,21 +89,6 @@ function activeModeDefault(): TradeMode {
     // ignore
   }
   return getStrategyConfig().executionMode
-}
-
-function fmtCurrency(value: number, signed = false) {
-  const absolute = Math.abs(value).toLocaleString('en-IN', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })
-  if (!signed) return `₹${absolute}`
-  if (value > 0) return `+₹${absolute}`
-  if (value < 0) return `-₹${absolute}`
-  return `₹${absolute}`
-}
-
-function fmtPct(value: number) {
-  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
 }
 
 function timeLabel(isoLike: string | null | undefined) {
@@ -181,36 +118,6 @@ function inferType(symbol: string): TradeRow['type'] {
   if (u.includes(' FUT')) return 'FUT'
   return 'EQ'
 }
-
-const typeVariant: Record<
-  TradeRow['type'],
-  'default' | 'destructive' | 'secondary' | 'warning'
-> = { CE: 'default', PE: 'destructive', EQ: 'secondary', FUT: 'warning' }
-
-const statusVariant: Record<
-  TradeRowStatus,
-  'default' | 'destructive' | 'secondary' | 'success' | 'warning'
-> = {
-  ACTIVE: 'default',
-  CLOSED: 'secondary',
-  SL_HIT: 'destructive',
-  TARGET_HIT: 'success',
-  COMPLETED: 'success',
-  CANCELLED: 'secondary',
-  REJECTED: 'destructive',
-}
-
-const statusLabel: Record<TradeRowStatus, string> = {
-  ACTIVE: 'Active',
-  CLOSED: 'Closed',
-  SL_HIT: 'SL Hit',
-  TARGET_HIT: 'Target',
-  COMPLETED: 'Completed',
-  CANCELLED: 'Cancelled',
-  REJECTED: 'Rejected',
-}
-
-// ─── API calls ────────────────────────────────────────────────────────────────
 
 interface UpstoxFundsResponse {
   status?: string
@@ -337,7 +244,7 @@ function resolveQuoteLtp(
 function buildPaperDataset(
   summary: PaperAccountSummary,
   quotes?: Record<string, { last_price?: number; instrument_token?: string }>,
-): Dataset {
+): LiveTradesDataset {
   const trades = summary.trades ?? []
   const openTrades =
     summary.openTrades ?? trades.filter((t) => t.status === 'OPEN')
@@ -623,7 +530,10 @@ function buildPaperDataset(
   }
 }
 
-function buildLiveDataset(funds: UpstoxFundsV3, orders: LiveOrder[]): Dataset {
+function buildLiveDataset(
+  funds: UpstoxFundsV3,
+  orders: LiveOrder[],
+): LiveTradesDataset {
   const cash = funds.available_to_trade.cash_available_to_trade
   const pledge = funds.available_to_trade.pledge_available_to_trade
   const losses = cash.margin_used.loss
@@ -779,270 +689,9 @@ function buildLiveDataset(funds: UpstoxFundsV3, orders: LiveOrder[]): Dataset {
   }
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
-
-function StatCards({ stats }: { stats: StatCard[] }) {
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-      {stats.map((stat) => (
-        <Card key={stat.title} className="relative overflow-hidden">
-          <CardHeader>
-            <CardTitle>{stat.title}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-end justify-between gap-3">
-              <div>
-                <p
-                  className={cn(
-                    'text-2xl font-bold tracking-tight',
-                    stat.title === 'Day P&L'
-                      ? stat.changeUp
-                        ? 'text-success'
-                        : 'text-destructive'
-                      : 'text-foreground',
-                  )}
-                >
-                  {stat.value}
-                </p>
-                {stat.subValue && (
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {stat.subValue}
-                  </p>
-                )}
-                {stat.change && (
-                  <div
-                    className={cn(
-                      'flex items-center gap-0.5 mt-2 text-xs font-medium',
-                      stat.changeUp ? 'text-success' : 'text-destructive',
-                    )}
-                  >
-                    {stat.changeUp ? (
-                      <ArrowUpRight size={12} />
-                    ) : (
-                      <ArrowDownRight size={12} />
-                    )}
-                    {stat.change}
-                  </div>
-                )}
-              </div>
-              <div
-                className={cn(
-                  'flex items-center justify-center w-10 h-10 rounded-lg shrink-0',
-                  stat.iconClassName,
-                )}
-              >
-                {stat.icon}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      ))}
-    </div>
-  )
-}
-
-function TradesTable({
-  rows,
-  onExit,
-}: {
-  rows: TradeRow[]
-  onExit?: (id: string, ltp: number | null) => void | Promise<void>
-}) {
-  if (rows.length === 0) return null
-  return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Symbol</TableHead>
-          <TableHead>Type</TableHead>
-          <TableHead className="text-right">Qty</TableHead>
-          <TableHead className="text-right">Entry</TableHead>
-          <TableHead className="text-right">LTP</TableHead>
-          <TableHead className="text-right">P&amp;L</TableHead>
-          <TableHead className="text-right">Status</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.map((row) => {
-          const sensibullUrl = getSensibullUrl(
-            row.displaySymbol ?? row.tradingSymbol,
-            row.underlyingSymbol,
-          )
-          return (
-            <TableRow key={row.id}>
-              <TableCell>
-                <div className="font-medium text-sm">
-                  {sensibullUrl ? (
-                    <a
-                      href={sensibullUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="hover:underline text-primary cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
-                      title="Open in Sensibull"
-                    >
-                      {row.displaySymbol ?? row.symbol}
-                    </a>
-                  ) : (
-                    <p>{row.displaySymbol ?? row.symbol}</p>
-                  )}
-                </div>
-                <p className="text-xs text-muted-foreground font-mono">
-                  {row.metaInfo ?? `${row.side} · ${row.entryTime}`}
-                  {row.displaySymbol && row.displaySymbol !== row.symbol && (
-                    <span className="ml-1.5 opacity-70">({row.symbol})</span>
-                  )}
-                </p>
-              </TableCell>
-              <TableCell>
-                <Badge variant={typeVariant[row.type]}>{row.type}</Badge>
-              </TableCell>
-              <TableCell className="text-right font-mono text-sm">
-                <div>
-                  <span>{row.qty}</span>
-                  {(() => {
-                    const lotSize = getLotSizeForSymbol(row.symbol)
-                    if (lotSize > 1 && row.type !== 'EQ') {
-                      const lots = Math.round(row.qty / lotSize)
-                      return (
-                        <span className="text-[10px] text-muted-foreground ml-1.5 font-normal">
-                          ({lots} {lots > 1 ? 'lots' : 'lot'})
-                        </span>
-                      )
-                    }
-                    return null
-                  })()}
-                </div>
-              </TableCell>
-              <TableCell className="text-right font-mono text-sm">
-                {row.entryPrice === null ? '—' : fmtCurrency(row.entryPrice)}
-              </TableCell>
-              <TableCell className="text-right font-mono text-sm">
-                {row.ltp === null ? '—' : fmtCurrency(row.ltp)}
-              </TableCell>
-              <TableCell className="text-right">
-                {row.pnl === null ? (
-                  <span className="text-xs text-muted-foreground">
-                    {row.status === 'ACTIVE' ? 'MTM pending' : '—'}
-                  </span>
-                ) : (
-                  <div>
-                    <p
-                      className={cn(
-                        'font-mono text-sm font-medium',
-                        row.pnl >= 0 ? 'text-success' : 'text-destructive',
-                      )}
-                    >
-                      {fmtCurrency(row.pnl, true)}
-                    </p>
-                    {row.pnlPct !== null && (
-                      <p
-                        className={cn(
-                          'text-xs',
-                          row.pnl >= 0
-                            ? 'text-success/70'
-                            : 'text-destructive/70',
-                        )}
-                      >
-                        {fmtPct(row.pnlPct)}
-                      </p>
-                    )}
-                  </div>
-                )}
-              </TableCell>
-              <TableCell className="text-right">
-                <div className="flex flex-col items-end gap-2">
-                  <Badge variant={statusVariant[row.status]}>
-                    {statusLabel[row.status]}
-                  </Badge>
-                  {row.status === 'ACTIVE' && row.isPaper && onExit && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-6 text-[10px] px-2 text-destructive border-destructive/20 hover:bg-destructive/10 hover:text-destructive"
-                      onClick={() => {
-                        void onExit(row.id, row.ltp)
-                      }}
-                    >
-                      Force Exit
-                    </Button>
-                  )}
-                </div>
-              </TableCell>
-            </TableRow>
-          )
-        })}
-      </TableBody>
-    </Table>
-  )
-}
-
-function TradesPanel({
-  dataset,
-  onExit,
-}: {
-  dataset: Dataset
-  onExit?: (id: string, ltp: number | null) => void | Promise<void>
-}) {
-  const label = dataset.mode === 'paper' ? 'paper trades' : 'live orders'
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <CardTitle>
-            {dataset.mode === 'paper' ? 'Paper Trades' : 'Live Orders'}
-          </CardTitle>
-          <span className="text-xs text-muted-foreground">
-            {dataset.tradesTodayLabel} today
-          </span>
-        </div>
-      </CardHeader>
-      <CardContent className="pt-0 px-0">
-        <Tabs defaultValue="open">
-          <div className="px-5 mb-2">
-            <TabsList>
-              <TabsTrigger value="open">
-                Open
-                <span className="ml-1.5 rounded-full bg-primary/20 px-1.5 py-0.5 text-xs text-primary">
-                  {dataset.openRows.length}
-                </span>
-              </TabsTrigger>
-              <TabsTrigger value="closed">
-                Closed
-                <span className="ml-1.5 rounded-full bg-secondary px-1.5 py-0.5 text-xs text-muted-foreground">
-                  {dataset.closedRows.length}
-                </span>
-              </TabsTrigger>
-            </TabsList>
-          </div>
-          <TabsContent value="open" className="mt-0">
-            {dataset.openRows.length > 0 ? (
-              <TradesTable rows={dataset.openRows} onExit={onExit} />
-            ) : (
-              <p className="px-5 pb-5 text-sm text-muted-foreground">
-                No open {label} right now.
-              </p>
-            )}
-          </TabsContent>
-          <TabsContent value="closed" className="mt-0">
-            {dataset.closedRows.length > 0 ? (
-              <TradesTable rows={dataset.closedRows} />
-            ) : (
-              <p className="px-5 pb-5 text-sm text-muted-foreground">
-                No closed {label} today.
-              </p>
-            )}
-          </TabsContent>
-        </Tabs>
-      </CardContent>
-    </Card>
-  )
-}
-
-// ─── Page ─────────────────────────────────────────────────────────────────────
-
 export function LiveTradesPage() {
   const [mode, setMode] = useState<TradeMode>(activeModeDefault)
-  const [dataset, setDataset] = useState<Dataset | null>(null)
+  const [dataset, setDataset] = useState<LiveTradesDataset | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -1131,15 +780,15 @@ export function LiveTradesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode])
 
-  const handleForceExit = async (tradeId: string, ltp: number | null) => {
+  const handleForceExit = async (row: TradeRow) => {
     if (!confirm('Force exit this paper trade?')) return
     try {
       const res = await fetch(API_PAPER_TRADES_EXIT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          tradeId,
-          exitPrice: ltp,
+          tradeId: row.id,
+          exitPrice: row.ltp,
           metadata: { reason: 'Manual Force Exit' },
         }),
       })

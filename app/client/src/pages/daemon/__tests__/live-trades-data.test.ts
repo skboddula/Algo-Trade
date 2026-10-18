@@ -5,7 +5,8 @@ import type {
   UserBotState,
 } from '@/lib/types'
 import { DEFAULT_CONFIG } from '@/lib/types'
-import { buildDaemonDataset, fmtCurrency, fmtPct } from '../live-trades-data'
+import { buildDaemonDataset } from '../live-trades-data'
+import { fmtCurrency, fmtPct } from '@/components/dashboard/trades/trades-model'
 
 function makeUserState(overrides: Partial<UserBotState> = {}): UserBotState {
   return {
