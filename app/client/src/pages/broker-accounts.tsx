@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Copy,
   FlaskConical,
+  KeyRound,
   Link2,
   Link2Off,
   Loader2,
@@ -38,7 +39,7 @@ import {
   updateAccount,
 } from '@/lib/accounts'
 import type { DaemonController } from '@/hooks/useDaemon'
-import { daemonApi } from '@/lib/daemon'
+import { daemonApi, type DaemonUpstoxSettings } from '@/lib/daemon'
 
 function generateId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36)
@@ -1190,6 +1191,173 @@ function CloudBrokerAccounts() {
 // Same page as the cloud dashboard, one card per "account". The daemon owns
 // the Upstox token, so its rows are the master feed token and the optional
 // per-user order-token override instead of browser-stored accounts.
+// ─── Daemon: window-managed Upstox API credentials ──────────────────
+// The daemon owns the account secrets server-side (SQLite, 0600). This form
+// only ever sends them down; the daemon returns masked hints, never values.
+function DaemonCredentialsInline({
+  settings,
+  onSaved,
+}: {
+  settings: DaemonUpstoxSettings | null
+  onSaved: (next: DaemonUpstoxSettings) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [apiKey, setApiKey] = useState('')
+  const [apiSecret, setApiSecret] = useState('')
+  const [redirectUri, setRedirectUri] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [feedback, setFeedback] = useState<{
+    kind: 'ok' | 'error'
+    text: string
+  } | null>(null)
+
+  if (!settings) return null
+
+  const configured =
+    settings.hasApiKey && settings.hasApiSecret && Boolean(settings.redirectUri)
+
+  const openForm = () => {
+    setApiKey('')
+    setApiSecret('')
+    setRedirectUri(
+      settings.redirectUri ?? `${window.location.origin}/auth/upstox/callback`,
+    )
+    setFeedback(null)
+    setOpen(true)
+  }
+
+  const save = async () => {
+    const payload: {
+      apiKey?: string
+      apiSecret?: string
+      redirectUri?: string
+    } = {}
+    if (apiKey.trim()) payload.apiKey = apiKey.trim()
+    if (apiSecret.trim()) payload.apiSecret = apiSecret.trim()
+    if (redirectUri.trim()) payload.redirectUri = redirectUri.trim()
+
+    if (!settings.hasApiKey && !payload.apiKey) {
+      setFeedback({
+        kind: 'error',
+        text: 'Enter the Upstox API Key (client id).',
+      })
+      return
+    }
+    if (!settings.hasApiSecret && !payload.apiSecret) {
+      setFeedback({ kind: 'error', text: 'Enter the Upstox API Secret.' })
+      return
+    }
+    if (!payload.redirectUri && !settings.redirectUri) {
+      setFeedback({
+        kind: 'error',
+        text: 'Enter the redirect URI registered in your Upstox app.',
+      })
+      return
+    }
+
+    setSaving(true)
+    setFeedback(null)
+    try {
+      const res = await daemonApi.saveUpstoxSettings(payload)
+      onSaved(res.upstox)
+      setOpen(false)
+      setFeedback({
+        kind: 'ok',
+        text: 'Saved to the daemon — the refresh link above is ready.',
+      })
+    } catch (err) {
+      setFeedback({
+        kind: 'error',
+        text:
+          err instanceof Error ? err.message : 'Failed to save credentials.',
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="mt-3 border-t border-border pt-3">
+      {!open ? (
+        <button
+          onClick={openForm}
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <KeyRound size={11} />
+          {configured
+            ? `API credentials configured · ${settings.apiKeyHint ?? '•••'}`
+            : 'Set Upstox API credentials'}
+        </button>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-muted-foreground">
+            Used by the daily &ldquo;Refresh token via Upstox login&rdquo; flow.
+            Stored in the daemon&rsquo;s SQLite — never in the browser. The
+            redirect URI must match your Upstox developer app exactly.
+          </p>
+          <input
+            type="text"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder={
+              settings.hasApiKey
+                ? `API Key saved (${settings.apiKeyHint}) — type to replace`
+                : 'Upstox API Key (client id)'
+            }
+            autoComplete="off"
+            className="h-8 px-3 rounded-md border border-border bg-background text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+          />
+          <input
+            type="password"
+            value={apiSecret}
+            onChange={(e) => setApiSecret(e.target.value)}
+            placeholder={
+              settings.hasApiSecret
+                ? 'API Secret saved — type to replace'
+                : 'Upstox API Secret'
+            }
+            autoComplete="new-password"
+            className="h-8 px-3 rounded-md border border-border bg-background text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+          />
+          <input
+            type="text"
+            value={redirectUri}
+            onChange={(e) => setRedirectUri(e.target.value)}
+            placeholder="Redirect URI (e.g. http://127.0.0.1:3000/auth/upstox/callback)"
+            autoComplete="off"
+            className="h-8 px-3 rounded-md border border-border bg-background text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+          />
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              className="h-8 text-xs px-3"
+              onClick={() => void save()}
+              disabled={saving}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 text-xs px-3"
+              onClick={() => setOpen(false)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+      {feedback && (
+        <p
+          className={`text-xs mt-2 ${feedback.kind === 'ok' ? 'text-success' : 'text-destructive'}`}
+        >
+          {feedback.text}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function DaemonBrokerAccounts({ daemon }: { daemon: DaemonController }) {
   const [token, setToken] = useState('')
   const [saving, setSaving] = useState(false)
@@ -1199,6 +1367,23 @@ function DaemonBrokerAccounts({ daemon }: { daemon: DaemonController }) {
     text: string
   } | null>(null)
   const [alsoMaster, setAlsoMaster] = useState(false)
+  const [creds, setCreds] = useState<DaemonUpstoxSettings | null>(null)
+
+  // Window-managed Upstox credentials (masked view; secrets stay server-side).
+  useEffect(() => {
+    let cancelled = false
+    daemonApi
+      .settings()
+      .then((s) => {
+        if (!cancelled) setCreds(s.upstox)
+      })
+      .catch(() => {
+        if (!cancelled) setCreds(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const feed = daemon.health?.feed
   const liveFeed = Boolean(feed && feed.source !== 'mock')
@@ -1279,13 +1464,12 @@ function DaemonBrokerAccounts({ daemon }: { daemon: DaemonController }) {
             Refresh token via Upstox login
           </a>
           <p className="text-[11px] text-muted-foreground mt-2">
-            Expires daily (~03:30 IST). One-time setup: set{' '}
-            <span className="font-mono">UPSTOX_API_KEY</span>,{' '}
-            <span className="font-mono">UPSTOX_API_SECRET</span> and{' '}
-            <span className="font-mono">UPSTOX_REDIRECT_URI</span> in{' '}
-            <span className="font-mono">app/core/.env</span>.
+            Expires daily (~03:30 IST). Refreshing needs the Upstox API
+            credentials and the exact redirect URI registered in your Upstox
+            developer app.
           </p>
         </div>
+        <DaemonCredentialsInline settings={creds} onSaved={setCreds} />
         <TestConnection serverResolved />
       </>
     ),

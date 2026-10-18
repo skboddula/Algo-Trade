@@ -92,6 +92,41 @@ describe('daemon API client', () => {
     )
   })
 
+  it('reads masked daemon settings and saves Upstox credentials', async () => {
+    const masked = {
+      upstox: {
+        hasApiKey: true,
+        apiKeyHint: 'abcd1234…',
+        hasApiSecret: true,
+        redirectUri: 'http://127.0.0.1:3000/auth/upstox/callback',
+        hasMasterToken: false,
+      },
+    }
+    okJson(masked)
+    okJson({ success: true, ...masked })
+
+    const view = await daemonApi.settings()
+    expect(view.upstox.apiKeyHint).toBe('abcd1234…')
+
+    await daemonApi.saveUpstoxSettings({
+      apiKey: 'abcd1234efgh',
+      apiSecret: 'shh',
+      redirectUri: 'http://127.0.0.1:3000/auth/upstox/callback',
+    })
+
+    const [getPath] = fetchMock.mock.calls[0] as [string]
+    expect(getPath).toBe('/api/daemon/settings')
+
+    const [postPath, init] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(postPath).toBe('/api/daemon/settings/upstox')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({
+      apiKey: 'abcd1234efgh',
+      apiSecret: 'shh',
+      redirectUri: 'http://127.0.0.1:3000/auth/upstox/callback',
+    })
+  })
+
   it('falls back to the HTTP status when the error body is not JSON', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: false,

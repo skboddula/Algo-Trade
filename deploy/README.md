@@ -87,15 +87,23 @@ then make sure the bot is armed.
 
 ### 1. Refresh the token — browser (recommended)
 
-Open (bookmark it):
-
-    http://127.0.0.1:3000/auth/upstox/start
+Open the daemon window (**Broker Accounts**) and click **Refresh token via Upstox login**
+(direct link: `http://127.0.0.1:3000/auth/upstox/start`).
 
 Log in to Upstox. The daemon exchanges the code, saves the new token to `app/core/.env`
-(timestamped backup kept), and hot-swaps the live feed — no restart, nothing to copy.
+(timestamped backup kept) **and** to its SQLite settings, and hot-swaps the live feed — no
+restart, nothing to copy. A token pasted in the window with “Also refresh the market-data feed”
+is likewise persisted, so it survives daemon restarts and reboots.
 
-One-time setup: set `UPSTOX_API_KEY`, `UPSTOX_API_SECRET`, and `UPSTOX_REDIRECT_URI` in
-`app/core/.env`, and register the same redirect URI in your Upstox app
+One-time setup (either path works):
+
+- **Daemon window**: Broker Accounts → *Master feed token* card → **Set Upstox API credentials**
+  (API key, API secret, redirect URI). Stored in the daemon's SQLite (`app/core/data`, 0600) and
+  never returned to the browser — only masked hints.
+- **`.env` (headless hosts / legacy)**: set `UPSTOX_API_KEY`, `UPSTOX_API_SECRET`, and
+  `UPSTOX_REDIRECT_URI` in `app/core/.env`.
+
+Either way, register the same redirect URI in your Upstox app
 (<https://account.upstox.com/developer/apps>). The API secret stays on this machine — it is only
 ever sent from the daemon process to Upstox during the exchange.
 
@@ -272,9 +280,9 @@ latency (`lastMessageAgeMs` doubles as a freshness probe). Use them to tune
 | Symptom | Check |
 | :--- | :--- |
 | Service not running | `systemctl --user status algo-trade-daemon-v2` + `journalctl --user -u algo-trade-daemon-v2 -n 50` |
-| `❌ Fatal: ... PRIMARY_UPSTOX_TOKEN` | Fill `app/core/.env`, then `systemctl --user restart algo-trade-daemon-v2` |
+| `❌ Fatal: ... PRIMARY_UPSTOX_TOKEN` | First boot has neither an env token nor a window-saved one — fill `app/core/.env`, then `systemctl --user restart algo-trade-daemon-v2`. (After the first run, tokens pasted in the window / refreshed via OAuth survive restarts without touching `.env`.) |
 | Feed down alert / 401s from Upstox | Token expired → browser refresh (`/auth/upstox/start`) or `./scripts/refresh-token.sh "<NEW_TOKEN>"` |
-| Browser refresh says "not configured" | Set `UPSTOX_API_KEY`/`UPSTOX_API_SECRET`/`UPSTOX_REDIRECT_URI` in `app/core/.env`, register that redirect URI in your Upstox app, restart `algo-trade-daemon-v2` |
+| Browser refresh says "not configured" | Save `UPSTOX_API_KEY`/`UPSTOX_API_SECRET`/`UPSTOX_REDIRECT_URI` on the daemon Broker Accounts page (or in `app/core/.env`), register that redirect URI in your Upstox app — window-saved credentials apply without a restart |
 | Before enabling `MARKET_FEED_SOURCE=ws`, or odd feed behavior | `cd app/core && yarn feed-check` (see above) |
 | Bot armed but no trades | Check `./scripts/bot.sh status` → state must be `RUNNING`; entries pause after `lastEntryTime` (default 15:15) and per-symbol daily trade caps |
 | Service stops when you log out | `sudo loginctl enable-linger $USER` |

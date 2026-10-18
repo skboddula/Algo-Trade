@@ -69,6 +69,20 @@ export interface DaemonStatus {
   hasOrderTokenOverride?: boolean
 }
 
+/** Masked view of the daemon's Upstox account settings (secrets never returned). */
+export interface DaemonUpstoxSettings {
+  hasApiKey: boolean
+  /** Masked prefix of the saved API key (client id), or null when unset. */
+  apiKeyHint: string | null
+  hasApiSecret: boolean
+  redirectUri: string | null
+  hasMasterToken: boolean
+}
+
+export interface DaemonSettings {
+  upstox: DaemonUpstoxSettings
+}
+
 async function parseJson<T>(res: Response): Promise<T> {
   let data: T | { error?: string } | null = null
   try {
@@ -124,6 +138,25 @@ export const daemonApi = {
   /** Drop the per-user order-token override (falls back to the master token). */
   clearToken: (): Promise<unknown> =>
     post('/api/bot/token', { userId: DAEMON_USER_ID, clear: true }),
+
+  /**
+   * Window-managed daemon settings (Upstox OAuth credentials + master token
+   * presence). Secrets come back masked — the full values stay server-side.
+   */
+  settings: (): Promise<DaemonSettings> =>
+    request<DaemonSettings>('/api/daemon/settings'),
+
+  /**
+   * Save Upstox API credentials into the daemon's SQLite (used by the daily
+   * "Refresh token via Upstox login" flow). Omitted fields keep their value.
+   */
+  saveUpstoxSettings: (payload: {
+    apiKey?: string
+    apiSecret?: string
+    redirectUri?: string
+    clearApiSecret?: boolean
+  }): Promise<DaemonSettings & { success?: boolean }> =>
+    post('/api/daemon/settings/upstox', payload),
 
   saveConfig: (config: StrategyConfig): Promise<unknown> =>
     post('/api/bot/config', { userId: DAEMON_USER_ID, config }),

@@ -17,9 +17,10 @@ const { DatabaseSync } = nodeRequire('node:sqlite') as typeof import('node:sqlit
  *
  * Persists the state that must survive daemon restarts and machine reboots
  * so open positions keep being supervised where they stopped:
- *   - bot_state      : per-user UserBotState (positions, trailing-SL peak, counters)
- *   - paper_accounts : paper ledger balances
- *   - paper_trades   : paper ledger trade history
+ *   - bot_state        : per-user UserBotState (positions, trailing-SL peak, counters)
+ *   - paper_accounts   : paper ledger balances
+ *   - paper_trades     : paper ledger trade history
+ *   - daemon_settings  : window-managed settings (Upstox OAuth credentials, master token)
  *
  * The database file lives in DATA_DIR (default: ./data) and is created with
  * 0600 permissions. It contains broker tokens, so treat it as a secret.
@@ -33,6 +34,9 @@ export class StateStore {
   private loadAccountsStmt: StatementSync
   private saveTradeStmt: StatementSync
   private loadTradesStmt: StatementSync
+  private getSettingStmt: StatementSync
+  private saveSettingStmt: StatementSync
+  private deleteSettingStmt: StatementSync
 
   constructor(dataDir: string) {
     fs.mkdirSync(dataDir, { recursive: true })
@@ -91,6 +95,15 @@ export class StateStore {
               opened_at, closed_at, metadata_json
        FROM paper_trades ORDER BY opened_at`,
     )
+    this.getSettingStmt = this.db.prepare('SELECT value FROM daemon_settings WHERE key = ?')
+    this.saveSettingStmt = this.db.prepare(
+      `INSERT INTO daemon_settings (key, value, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+    )
+    this.deleteSettingStmt = this.db.prepare('DELETE FROM daemon_settings WHERE key = ?')
   }
 
   private migrate(): void {
@@ -126,6 +139,11 @@ export class StateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_paper_trades_account
         ON paper_trades(account_id, status);
+      CREATE TABLE IF NOT EXISTS daemon_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `)
   }
 
@@ -242,6 +260,26 @@ export class StateStore {
         metadata,
       }
     })
+  }
+
+  /**
+   * Read a window-managed setting (see DAEMON_SETTING_KEYS). Returns undefined
+   * when unset. Values may be secrets (Upstox credentials) — never expose them
+   * to the browser verbatim.
+   */
+  public getSetting(key: string): string | undefined {
+    const row = this.getSettingStmt.get(key) as { value: string } | undefined
+    return row?.value
+  }
+
+  /** Persist a window-managed setting (upsert). */
+  public setSetting(key: string, value: string): void {
+    this.saveSettingStmt.run(key, value, new Date().toISOString())
+  }
+
+  /** Remove a window-managed setting. */
+  public deleteSetting(key: string): void {
+    this.deleteSettingStmt.run(key)
   }
 
   public close(): void {

@@ -5,6 +5,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { upstoxAuthRoutes, persistPrimaryToken, type UpstoxAuthRoutesOptions } from '../routes/upstoxAuth'
 import type { MasterIngestionEngine } from '../services/masterIngestor'
+import { StateStore } from '../services/stateStore'
+import { DAEMON_SETTING_KEYS } from '../services/daemonSettings'
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -217,6 +219,57 @@ describe('Upstox OAuth routes', () => {
     expect(res.statusCode).toBe(400)
     expect(res.body).toContain('access_denied')
     expect(harness.setToken).not.toHaveBeenCalled()
+  })
+
+  it('uses credentials saved in the daemon settings and picks them up without a restart', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'upstox-auth-settings-'))
+    const store = new StateStore(dir)
+    const harness = await startApp({
+      apiKey: undefined,
+      apiSecret: undefined,
+      redirectUri: undefined,
+      settingsStore: store,
+    })
+
+    // Nothing configured yet → actionable 400 (env has no OAuth keys here).
+    const before = await harness.app.inject({
+      method: 'GET',
+      url: '/auth/upstox/start',
+      headers: { accept: 'application/json' },
+    })
+    expect(before.statusCode).toBe(400)
+    expect(before.json().missing).toContain('UPSTOX_API_KEY')
+
+    // The window saves credentials into the daemon's SQLite.
+    store.setSetting(DAEMON_SETTING_KEYS.upstoxApiKey, 'window-key')
+    store.setSetting(DAEMON_SETTING_KEYS.upstoxApiSecret, 'window-secret')
+    store.setSetting(DAEMON_SETTING_KEYS.upstoxRedirectUri, 'http://127.0.0.1:3000/auth/upstox/callback')
+
+    // No daemon restart needed — the next /start resolves the saved values.
+    const start = await harness.app.inject({
+      method: 'GET',
+      url: '/auth/upstox/start',
+      headers: { accept: 'application/json' },
+    })
+    expect(start.statusCode).toBe(200)
+    const authUrl = new URL((start.json() as { authorizationUrl: string }).authorizationUrl)
+    expect(authUrl.searchParams.get('client_id')).toBe('window-key')
+    expect(authUrl.searchParams.get('redirect_uri')).toBe('http://127.0.0.1:3000/auth/upstox/callback')
+
+    // The callback exchange uses the same resolved credentials.
+    const state = authUrl.searchParams.get('state')
+    const cb = await harness.app.inject({
+      method: 'GET',
+      url: `/auth/upstox/callback?code=abc123&state=${state}`,
+    })
+    expect(cb.statusCode).toBe(200)
+    expect(harness.setToken).toHaveBeenCalledWith('fresh-token')
+    const form = new URLSearchParams(harness.fetchImpl.mock.calls[0]![1].body as string)
+    expect(form.get('client_id')).toBe('window-key')
+    expect(form.get('client_secret')).toBe('window-secret')
+
+    store.close()
+    rmSync(dir, { recursive: true, force: true })
   })
 
   it('reports upstream exchange failures without touching the env file or feed', async () => {

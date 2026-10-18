@@ -1,31 +1,35 @@
 // Upstox OAuth routes — daily access-token refresh from the browser.
 //
 // Upstox access tokens expire daily (~03:30 IST; no refresh tokens by design).
-// Instead of copy-pasting a token into .env, open:
-//
-//     http://127.0.0.1:3000/auth/upstox/start
+// Open the "Refresh token via Upstox login" link on the daemon's Broker
+// Accounts page (or /auth/upstox/start directly).
 //
 // Flow: /auth/upstox/start → Upstox login dialog → /auth/upstox/callback.
 // The callback exchanges the code server-side (the API secret never reaches
 // the browser), writes PRIMARY_UPSTOX_TOKEN into .env (timestamped backup
-// kept), and hot-swaps the running feed via masterIngestor.setToken() — no
-// daemon restart required.
+// kept), persists it to the daemon settings store, and hot-swaps the running
+// feed via masterIngestor.setToken() — no daemon restart required.
 //
-// One-time setup (app/core/.env): UPSTOX_API_KEY, UPSTOX_API_SECRET and
-// UPSTOX_REDIRECT_URI; the same redirect URI must be registered in the
-// Upstox developer app (https://account.upstox.com/developer/apps).
+// The API credentials are resolved per request: explicit options (tests) →
+// daemon settings saved from the window → environment. Headless deployments
+// can keep using UPSTOX_API_KEY / UPSTOX_API_SECRET / UPSTOX_REDIRECT_URI in
+// app/core/.env; the same redirect URI must be registered in the Upstox
+// developer app (https://account.upstox.com/developer/apps).
 
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { MasterIngestionEngine } from '../services/masterIngestor'
+import { DAEMON_SETTING_KEYS, type SettingsStore } from '../services/daemonSettings'
 
 export interface UpstoxAuthRoutesOptions {
   masterIngestor: MasterIngestionEngine
   apiKey?: string
   apiSecret?: string
   redirectUri?: string
+  /** Window-managed credentials (SQLite); takes precedence over the environment. */
+  settingsStore?: SettingsStore | null
   /** File whose PRIMARY_UPSTOX_TOKEN line is updated (default: ./.env). */
   envFilePath?: string
   /** Upstox API base for the dialog + token endpoints (default https://api.upstox.com/v2). */
@@ -36,18 +40,23 @@ export interface UpstoxAuthRoutesOptions {
   stateTtlMs?: number
 }
 
+/** Credentials resolved for a single request (window settings win over env). */
+interface UpstoxCredentials {
+  apiKey?: string
+  apiSecret?: string
+  redirectUri?: string
+}
+
 const DEFAULT_STATE_TTL_MS = 10 * 60_000
 const TOKEN_EXCHANGE_TIMEOUT_MS = 10_000
 
 export const upstoxAuthRoutes: FastifyPluginAsync<UpstoxAuthRoutesOptions> = async (fastify, opts) => {
   const {
     masterIngestor,
-    apiKey = process.env.UPSTOX_API_KEY,
-    apiSecret = process.env.UPSTOX_API_SECRET,
-    redirectUri = process.env.UPSTOX_REDIRECT_URI,
     envFilePath = path.resolve(process.env.DOTENV_CONFIG_PATH || '.env'),
     upstoxApiBaseUrl = process.env.UPSTOX_API_URL || 'https://api.upstox.com/v2',
   } = opts
+  const settingsStore = opts.settingsStore ?? null
   const fetchImpl = opts.fetchImpl ?? ((url, init) => fetch(url, init))
   const stateTtlMs = opts.stateTtlMs ?? DEFAULT_STATE_TTL_MS
 
@@ -58,20 +67,42 @@ export const upstoxAuthRoutes: FastifyPluginAsync<UpstoxAuthRoutesOptions> = asy
   const wantsJson = (request: FastifyRequest): boolean =>
     (request.headers.accept ?? '').includes('application/json')
 
-  const missingConfig = (): string[] => {
+  /**
+   * Resolve credentials fresh per request so credentials saved in the window
+   * apply immediately — no daemon restart. Explicit options (tests) win over
+   * settings, settings win over the environment.
+   */
+  const resolveCredentials = (): UpstoxCredentials => ({
+    apiKey:
+      opts.apiKey ??
+      settingsStore?.getSetting(DAEMON_SETTING_KEYS.upstoxApiKey) ??
+      process.env.UPSTOX_API_KEY,
+    apiSecret:
+      opts.apiSecret ??
+      settingsStore?.getSetting(DAEMON_SETTING_KEYS.upstoxApiSecret) ??
+      process.env.UPSTOX_API_SECRET,
+    redirectUri:
+      opts.redirectUri ??
+      settingsStore?.getSetting(DAEMON_SETTING_KEYS.upstoxRedirectUri) ??
+      process.env.UPSTOX_REDIRECT_URI,
+  })
+
+  const missingConfig = (creds: UpstoxCredentials): string[] => {
     const missing: string[] = []
-    if (!apiKey) missing.push('UPSTOX_API_KEY')
-    if (!apiSecret) missing.push('UPSTOX_API_SECRET')
-    if (!redirectUri) missing.push('UPSTOX_REDIRECT_URI')
+    if (!creds.apiKey) missing.push('UPSTOX_API_KEY')
+    if (!creds.apiSecret) missing.push('UPSTOX_API_SECRET')
+    if (!creds.redirectUri) missing.push('UPSTOX_REDIRECT_URI')
     return missing
   }
 
   fastify.get('/auth/upstox/start', async (request, reply) => {
-    const missing = missingConfig()
+    const creds = resolveCredentials()
+    const missing = missingConfig(creds)
     if (missing.length > 0) {
       const message =
-        `Upstox OAuth is not configured. Add ${missing.join(', ')} to app/core/.env ` +
-        `and restart, then register ${redirectUri || 'the redirect URI'} in your Upstox app ` +
+        `Upstox OAuth is not configured. Add ${missing.join(', ')} on the Broker Accounts page ` +
+        `in the daemon window (stored in the daemon's SQLite) or in app/core/.env, then register ` +
+        `${creds.redirectUri || 'the redirect URI'} in your Upstox app ` +
         `(account.upstox.com/developer/apps).`
       if (wantsJson(request)) return reply.status(400).send({ error: message, missing })
       return reply.status(400).type('text/html').send(renderPage('Upstox OAuth not configured', message, false))
@@ -86,11 +117,11 @@ export const upstoxAuthRoutes: FastifyPluginAsync<UpstoxAuthRoutesOptions> = asy
 
     const url = new URL(`${upstoxApiBaseUrl}/login/authorization/dialog`)
     url.searchParams.set('response_type', 'code')
-    url.searchParams.set('client_id', apiKey!)
-    url.searchParams.set('redirect_uri', redirectUri!)
+    url.searchParams.set('client_id', creds.apiKey!)
+    url.searchParams.set('redirect_uri', creds.redirectUri!)
     url.searchParams.set('state', state)
 
-    if (wantsJson(request)) return reply.send({ authorizationUrl: url.toString(), redirectUri })
+    if (wantsJson(request)) return reply.send({ authorizationUrl: url.toString(), redirectUri: creds.redirectUri })
     return reply.redirect(url.toString())
   })
 
@@ -109,7 +140,8 @@ export const upstoxAuthRoutes: FastifyPluginAsync<UpstoxAuthRoutesOptions> = asy
       return reply.status(400).type('text/html').send(renderPage('Upstox login failed', message, false))
     }
 
-    const missing = missingConfig()
+    const creds = resolveCredentials()
+    const missing = missingConfig(creds)
     if (missing.length > 0) {
       const message = `Upstox OAuth is not configured (missing ${missing.join(', ')}). See deploy/README.md.`
       return reply.status(400).type('text/html').send(renderPage('Upstox OAuth not configured', message, false))
@@ -130,9 +162,9 @@ export const upstoxAuthRoutes: FastifyPluginAsync<UpstoxAuthRoutesOptions> = asy
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
         body: new URLSearchParams({
           code: query.code,
-          client_id: apiKey!,
-          client_secret: apiSecret!,
-          redirect_uri: redirectUri!,
+          client_id: creds.apiKey!,
+          client_secret: creds.apiSecret!,
+          redirect_uri: creds.redirectUri!,
           grant_type: 'authorization_code',
         }).toString(),
         signal: AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS),

@@ -16,6 +16,7 @@ import type { MarketDataSource } from './marketDataSource'
 import { MockMarketDataSource } from './marketDataSources/mockMarketDataSource'
 import { RestMarketDataSource } from './marketDataSources/restMarketDataSource'
 import { UpstoxFeedV3Source, type UpstoxFeedStats } from './marketDataSources/upstoxFeedV3Source'
+import { DAEMON_SETTING_KEYS, type SettingsStore } from './daemonSettings'
 
 export interface MasterIngestorConfig {
   pollingIntervalMs: number
@@ -35,6 +36,12 @@ export interface MasterIngestorConfig {
    */
   atmWindowStrikes?: number
   notifier?: Notifier
+  /**
+   * When provided, every setToken() persists the master token into the
+   * daemon's settings store so a token entered in the window (or refreshed
+   * via OAuth) survives daemon restarts and reboots.
+   */
+  settingsStore?: SettingsStore | null
 }
 
 export class MasterIngestionEngine extends EventEmitter {
@@ -64,6 +71,7 @@ export class MasterIngestionEngine extends EventEmitter {
       optionChainRefreshMs: config?.optionChainRefreshMs,
       atmWindowStrikes: config?.atmWindowStrikes,
       notifier: config?.notifier,
+      settingsStore: config?.settingsStore ?? null,
     }
 
     // Pluggable transport sources (mock synthesis / Upstox REST polling today;
@@ -90,6 +98,19 @@ export class MasterIngestionEngine extends EventEmitter {
   public setToken(token: string) {
     this.config.primaryUpstoxToken = token
     this.wsSource.setToken(token) // drop the WS connection so it reconnects with the new token
+
+    // Persist the master token so window-entered / OAuth-refreshed tokens
+    // survive daemon restarts (best effort — a settings write failure must
+    // never break the feed swap).
+    try {
+      if (token) {
+        this.config.settingsStore?.setSetting(DAEMON_SETTING_KEYS.upstoxMasterToken, token)
+      } else {
+        this.config.settingsStore?.deleteSetting(DAEMON_SETTING_KEYS.upstoxMasterToken)
+      }
+    } catch {
+      // Ignore — settings persistence is a convenience, not the source of truth.
+    }
   }
 
   /** Current master ingestion token (undefined when unset). */

@@ -14,6 +14,8 @@ import { createTelegramNotifier } from './services/notifier'
 import { botRoutes } from './routes/botRoutes'
 import { upstoxAuthRoutes, type UpstoxAuthRoutesOptions } from './routes/upstoxAuth'
 import { parityRoutes } from './routes/parityRoutes'
+import { settingsRoutes } from './routes/settingsRoutes'
+import { DAEMON_SETTING_KEYS } from './services/daemonSettings'
 
 dotenv.config()
 
@@ -114,6 +116,20 @@ export function buildServer(opts?: {
   // Initialize Core Services
   const notifier = createTelegramNotifier()
 
+  // Window-managed settings (Upstox credentials + master token). Null in
+  // API-only/test compositions — every consumer treats it as optional.
+  const settingsStore = opts?.store ?? null
+
+  // Token precedence: explicit option (tests) → daemon settings (token saved
+  // from the window or refreshed via OAuth) → environment. Settings win over
+  // env so a window-pasted token is never masked by a stale .env value.
+  // Resolved once so the mock-mode decision below matches what the ingestor
+  // actually receives.
+  const primaryToken =
+    opts?.primaryToken ||
+    settingsStore?.getSetting(DAEMON_SETTING_KEYS.upstoxMasterToken) ||
+    process.env.PRIMARY_UPSTOX_TOKEN
+
   // Optional non-negative integer env knob: undefined when unset/blank/invalid.
   // 0 is meaningful for the WS tuning knobs below — it disables the feature.
   const optionalCountEnv = (name: string): number | undefined => {
@@ -126,12 +142,13 @@ export function buildServer(opts?: {
   const masterIngestor = new MasterIngestionEngine({
     pollingIntervalMs: parseInt(process.env.POLLING_INTERVAL_MS || '2000', 10),
     upstoxApiBaseUrl: process.env.UPSTOX_API_URL || 'https://api.upstox.com/v2',
-    primaryUpstoxToken: opts?.primaryToken || process.env.PRIMARY_UPSTOX_TOKEN,
-    mockMode: opts?.mockMode ?? (process.env.NODE_ENV === 'test' || !process.env.PRIMARY_UPSTOX_TOKEN),
+    primaryUpstoxToken: primaryToken,
+    mockMode: opts?.mockMode ?? (process.env.NODE_ENV === 'test' || !primaryToken),
     liveSource: process.env.MARKET_FEED_SOURCE === 'ws' ? 'ws' : 'rest',
     optionChainRefreshMs: optionalCountEnv('OPTION_CHAIN_REFRESH_MS'),
     atmWindowStrikes: optionalCountEnv('ATM_WINDOW_STRIKES'),
     notifier,
+    settingsStore,
   })
 
   masterIngestor.on('error', (err) => {
@@ -166,10 +183,16 @@ export function buildServer(opts?: {
     orderGateway,
   })
 
+  // Window-managed daemon settings (Upstox account details in SQLite)
+  app.register(settingsRoutes, {
+    store: settingsStore,
+  })
+
   // Register Upstox OAuth routes (browser-based daily token refresh)
   if (opts?.upstoxAuth !== null) {
     app.register(upstoxAuthRoutes, {
       masterIngestor,
+      settingsStore,
       ...(opts?.upstoxAuth ?? {}),
     })
   }
@@ -241,20 +264,29 @@ if (require.main === module) {
   // Safety default: bind loopback unless explicitly overridden (e.g. behind a firewall / reverse proxy)
   const HOST = process.env.HOST || '127.0.0.1'
 
+  const dataDir = path.resolve(process.env.DATA_DIR || 'data')
+  const store = new StateStore(dataDir)
+
   // ── Required env validation ──────────────────────────────────────────────
   const { valid, missing } = validateEnvironment()
 
   if (!valid) {
-    console.error(`\n❌ Fatal: Core service cannot start because required environment variable(s) are missing:\n`)
-    for (const key of missing) {
-      console.error(`   • ${key}`)
+    // The master token may live in the daemon's SQLite instead (saved from the
+    // window or refreshed via OAuth) — that counts as configured too.
+    const storedMasterToken = store.getSetting(DAEMON_SETTING_KEYS.upstoxMasterToken)
+    if (!storedMasterToken) {
+      console.error(`\n❌ Fatal: Core service cannot start because required environment variable(s) are missing:\n`)
+      for (const key of missing) {
+        console.error(`   • ${key}`)
+      }
+      console.error(`\n   Please configure them in your .env file or environment before starting.\n`)
+      process.exit(1)
     }
-    console.error(`\n   Please configure them in your .env file or environment before starting.\n`)
-    process.exit(1)
+    console.log(
+      'ℹ️  PRIMARY_UPSTOX_TOKEN is not set in the environment — using the master token saved by the daemon window.',
+    )
   }
 
-  const dataDir = path.resolve(process.env.DATA_DIR || 'data')
-  const store = new StateStore(dataDir)
   const dashboardDir = resolveDashboardDir()
   const { app, masterIngestor, notifier } = buildServer({
     store,
