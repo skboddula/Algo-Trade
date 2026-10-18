@@ -191,6 +191,15 @@ describe('deriveDaemonStrategyView', () => {
     expect(missing.position).toBeNull()
   })
 
+  it('trusts the daemon hasToken flag even while the feed is mock', () => {
+    const view = deriveDaemonStrategyView(
+      makeStatus({ hasToken: true }),
+      makeHealth('mock'),
+      'NIFTY 50',
+    )
+    expect(view.token).toBe('daemon-master-token')
+  })
+
   it('marks the feed live when the daemon source is not mock', () => {
     const view = deriveDaemonStrategyView(
       makeStatus(),

@@ -63,6 +63,8 @@ export interface DaemonStatus {
   snapshots: Partial<Record<UnderlyingSymbol, MarketSnapshot>>
   userState: UserBotState
   paperTrades: PaperTradeRecord[]
+  /** Whether the daemon holds a working master token (boolean only). */
+  hasToken?: boolean
 }
 
 async function parseJson<T>(res: Response): Promise<T> {
@@ -110,9 +112,12 @@ export const daemonApi = {
   stop: (): Promise<unknown> =>
     post('/api/bot/stop', { userId: DAEMON_USER_ID }),
 
-  /** Per-user live-order token (overrides the daemon's master token). */
-  setToken: (token: string): Promise<unknown> =>
-    post('/api/bot/token', { userId: DAEMON_USER_ID, token }),
+  /**
+   * Per-user live-order token (overrides the daemon's master token).
+   * `alsoMaster` additionally refreshes the token driving ALL market data.
+   */
+  setToken: (token: string, alsoMaster = false): Promise<unknown> =>
+    post('/api/bot/token', { userId: DAEMON_USER_ID, token, alsoMaster }),
 
   saveConfig: (config: StrategyConfig): Promise<unknown> =>
     post('/api/bot/config', { userId: DAEMON_USER_ID, config }),

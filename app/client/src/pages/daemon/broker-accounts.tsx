@@ -14,6 +14,7 @@ export function DaemonBrokerAccountsPage({
   const [token, setToken] = useState('')
   const [saving, setSaving] = useState(false)
   const [feedback, setFeedback] = useState<string | null>(null)
+  const [alsoMaster, setAlsoMaster] = useState(false)
 
   const feed = daemon.health?.feed
   const liveFeed = Boolean(feed && feed.source !== 'mock')
@@ -26,9 +27,13 @@ export function DaemonBrokerAccountsPage({
     setSaving(true)
     setFeedback(null)
     try {
-      await daemonApi.setToken(token.trim())
+      await daemonApi.setToken(token.trim(), alsoMaster)
       setToken('')
-      setFeedback('Order token saved — live orders now use it.')
+      setFeedback(
+        alsoMaster
+          ? 'Token saved — live orders and the market-data feed now use it.'
+          : 'Order token saved — live orders now use it.',
+      )
       daemon.refresh()
     } catch (err) {
       setFeedback(
@@ -142,6 +147,15 @@ export function DaemonBrokerAccountsPage({
                 {saving ? 'Saving…' : 'Save token'}
               </Button>
             </div>
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={alsoMaster}
+                onChange={(e) => setAlsoMaster(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-border accent-primary"
+              />
+              Also refresh the market-data feed with this token
+            </label>
             {feedback && (
               <p
                 className={`text-xs ${feedback.includes('saved') ? 'text-success' : 'text-destructive'}`}

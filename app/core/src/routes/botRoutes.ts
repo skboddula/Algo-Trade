@@ -106,6 +106,8 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
       snapshots,
       userState: sanitizeUserState(userState),
       paperTrades,
+      // Boolean only — the master token itself never leaves the daemon.
+      hasToken: Boolean(masterIngestor.getMasterToken()),
     })
   })
 
@@ -113,8 +115,13 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
   fastify.post('/api/bot/start', async (request, reply) => {
     const body = request.body as { userId?: string; executionMode?: 'paper' | 'live' } | null
     const userId = body?.userId || 'default_user'
-    const userState = tenantManager.startBot(userId, body?.executionMode)
-    return reply.send({ success: true, userState: sanitizeUserState(userState) })
+    try {
+      const userState = tenantManager.startBot(userId, body?.executionMode)
+      return reply.send({ success: true, userState: sanitizeUserState(userState) })
+    } catch (err) {
+      // Live-arming / single-active-trader rejections are 403s, not crashes.
+      return reply.code(403).send({ error: (err as Error).message })
+    }
   })
 
   // ── POST /api/bot/stop ─────────────────────────────────────────────────────
@@ -132,16 +139,48 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     if (!body?.config) {
       return reply.status(400).send({ error: 'Missing config payload' })
     }
-    const userState = tenantManager.updateConfig(userId, body.config)
-    return reply.send({ success: true, userState: sanitizeUserState(userState) })
+    try {
+      const userState = tenantManager.updateConfig(userId, body.config)
+      return reply.send({ success: true, userState: sanitizeUserState(userState) })
+    } catch (err) {
+      // Live-arming / mid-session mode-switch rejections are 403s.
+      return reply.code(403).send({ error: (err as Error).message })
+    }
   })
 
   // ── POST /api/bot/token ────────────────────────────────────────────────────
   fastify.post('/api/bot/token', async (request, reply) => {
-    const body = request.body as { userId?: string; token: string } | null
+    const body = request.body as {
+      userId?: string
+      token: string
+      alsoMaster?: boolean
+    } | null
     const userId = body?.userId || 'default_user'
     if (!body?.token) {
       return reply.status(400).send({ error: 'Missing token' })
+    }
+
+    // Expired-token guard (Oct 14 incident: a stale token replaced a working
+    // one and the daemon went blind all day). A JWT with a past exp is
+    // rejected so a stale paste can never evict a usable token.
+    try {
+      const payload = JSON.parse(
+        Buffer.from(body.token.split('.')[1], 'base64url').toString('utf-8'),
+      ) as { exp?: number }
+      if (typeof payload.exp === 'number' && payload.exp * 1000 < Date.now()) {
+        return reply.status(400).send({
+          error: `Token EXPIRED at ${new Date(payload.exp * 1000).toISOString()} — run a fresh Upstox OAuth and paste the new token`,
+        })
+      }
+    } catch {
+      // Not a decodable JWT — accept (defensive; Upstox tokens are JWTs).
+    }
+
+    // Optional: also refresh the master token driving ALL market data
+    // (quotes, candles, chains, VIX). Off by default because this field is
+    // documented as a per-user order-token override.
+    if (body.alsoMaster) {
+      masterIngestor.setToken(body.token)
     }
     const userState = tenantManager.setToken(userId, body.token)
     return reply.send({ success: true, userState: sanitizeUserState(userState) })

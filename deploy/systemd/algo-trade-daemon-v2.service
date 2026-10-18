@@ -26,6 +26,10 @@ ExecStart=__NODE_BIN__ __APP_CORE_DIR__/dist/app/core/src/server.js
 Environment=NODE_ENV=production
 EnvironmentFile=__APP_CORE_DIR__/.env
 
+# Live trading is server-side gated. Uncomment ONLY for a supervised live
+# session — paper/mock starts are unaffected. (Or set it in .env.)
+# Environment=DAEMON_LIVE_ARMED=true
+
 # Restart automatically if the daemon crashes
 Restart=on-failure
 RestartSec=5

@@ -15,7 +15,11 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { InfoTooltip } from '@/components/ui/tooltip'
-import { useDaemon, type DaemonController } from '@/hooks/useDaemon'
+import {
+  useDaemon,
+  type DaemonController,
+  type StopAction,
+} from '@/hooks/useDaemon'
 import { DAEMON_USER_ID } from '@/lib/daemon'
 import { cn, getUpcomingIndexExpiry } from '@/lib/utils'
 import type { MarketSnapshot, UnderlyingSymbol } from '@/lib/types'
@@ -63,6 +67,53 @@ function pageFromLocation(): DaemonPage {
 }
 
 /**
+ * Stop confirm: with open positions a plain stop would leave them
+ * unsupervised, so the window asks before proceeding.
+ */
+function StopConfirmDialog({
+  symbols,
+  onResolve,
+}: {
+  symbols: UnderlyingSymbol[]
+  onResolve: (action: StopAction) => void
+}) {
+  const count = symbols.length
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="stop-confirm-title"
+    >
+      <div className="w-full max-w-md rounded-lg border border-border bg-card p-5 shadow-xl">
+        <h2
+          id="stop-confirm-title"
+          className="text-base font-semibold text-foreground"
+        >
+          Stop the bot?
+        </h2>
+        <p className="mt-2 text-sm text-muted-foreground">
+          {count} open position{count === 1 ? '' : 's'} on the daemon (
+          {symbols.join(', ')}). Squaring off sells at current prices before
+          stopping.
+        </p>
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button variant="ghost" onClick={() => onResolve('cancel')}>
+            Cancel
+          </Button>
+          <Button variant="outline" onClick={() => onResolve('stop-only')}>
+            Stop only
+          </Button>
+          <Button variant="destructive" onClick={() => onResolve('square-off')}>
+            Square off &amp; stop
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
  * The daemon's own window: the same shell as the cloud dashboard
  * (sidebar + ticker header + pages), but every panel reads live state from
  * the daemon on this origin (`/ws`, `/api/bot/*`, `/health`).
@@ -107,6 +158,13 @@ export function DaemonApp() {
           )}
         </main>
       </div>
+
+      {daemon.stopPrompt && (
+        <StopConfirmDialog
+          symbols={daemon.stopPrompt.symbols}
+          onResolve={(action) => void daemon.resolveStop(action)}
+        />
+      )}
     </div>
   )
 }

@@ -64,7 +64,9 @@ export function deriveDaemonStrategyView(
     lastUpdated: userState ? formatClock(userState.updatedAt) : null,
     error: userState?.error ?? null,
     paperBalance: (userState?.paperBalance ?? 0) / 100,
-    token: liveFeed ? 'daemon-master-token' : null,
+    // The daemon's own hasToken flag is authoritative; the live-feed check is
+    // a fallback for older daemon builds that predate it.
+    token: status?.hasToken === true || liveFeed ? 'daemon-master-token' : null,
     sourceStatus: deriveSourceStatus(health, vrdData),
     allSignalData,
     finalSignal: snapshot?.signal ?? null,

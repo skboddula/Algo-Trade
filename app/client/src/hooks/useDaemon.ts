@@ -14,6 +14,12 @@ const STATUS_POLL_MS = 5000
 const HEALTH_POLL_MS = 5000
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000]
 
+export type StopAction = 'square-off' | 'stop-only' | 'cancel'
+
+export interface StopPromptState {
+  symbols: UnderlyingSymbol[]
+}
+
 export interface DaemonController {
   /** WebSocket link to the daemon is up. */
   connected: boolean
@@ -26,8 +32,15 @@ export interface DaemonController {
   clearLogs: () => void
   /** Force an immediate status + health refresh (header refresh button). */
   refresh: () => void
-  start: (mode: 'paper' | 'live') => Promise<void>
-  stop: () => Promise<void>
+  start: (mode: 'paper' | 'live') => void
+  /**
+   * Stops the bot. When positions are open this opens `stopPrompt` instead —
+   * the window asks whether to square off first.
+   */
+  stop: () => void
+  /** Set after Stop with open positions — resolveStop proceeds from here. */
+  stopPrompt: StopPromptState | null
+  resolveStop: (action: StopAction) => Promise<void>
   exitPosition: (symbol: UnderlyingSymbol, reason?: string) => Promise<void>
   resetPaper: () => Promise<void>
   saveConfig: (config: StrategyConfig) => Promise<void>
@@ -45,6 +58,7 @@ export function useDaemon(): DaemonController {
   const [logs, setLogs] = useState<BotLog[]>([])
   const [busy, setBusy] = useState(false)
   const [lastTickAt, setLastTickAt] = useState<string | null>(null)
+  const [stopPrompt, setStopPrompt] = useState<StopPromptState | null>(null)
 
   const mountedRef = useRef(true)
   const logSeqRef = useRef(0)
@@ -253,14 +267,60 @@ export function useDaemon(): DaemonController {
   )
 
   const start = useCallback(
-    (mode: 'paper' | 'live') =>
-      runAction(`Start (${mode})`, () => daemonApi.start(mode)),
+    (mode: 'paper' | 'live') => {
+      // Client-side confirmation only — the real gate is server-side
+      // (DAEMON_LIVE_ARMED) in the daemon's startBot.
+      if (mode === 'live') {
+        const confirmed = window.confirm(
+          'Arm LIVE trading on the daemon? New strategy signals can place real Upstox orders until you stop the bot.',
+        )
+        if (!confirmed) return
+      }
+      void runAction(`Start (${mode})`, () => daemonApi.start(mode))
+    },
     [runAction],
   )
 
-  const stop = useCallback(
+  const stopNow = useCallback(
     () => runAction('Stop', () => daemonApi.stop()),
     [runAction],
+  )
+
+  const stop = useCallback(() => {
+    // Event handlers always see the latest render's status state — unlike the
+    // long-lived socket callbacks, no ref indirection is needed here.
+    const positions = status?.userState?.positions ?? {}
+    const symbols = (Object.entries(positions) as [UnderlyingSymbol, unknown][])
+      .filter(([, position]) => position !== null && position !== undefined)
+      .map(([symbol]) => symbol)
+    if (symbols.length === 0) {
+      void stopNow()
+      return
+    }
+    setStopPrompt({ symbols })
+  }, [status, stopNow])
+
+  const resolveStop = useCallback(
+    async (action: StopAction) => {
+      const symbols = stopPrompt?.symbols ?? []
+      setStopPrompt(null)
+      if (action === 'cancel') return
+      if (action === 'square-off' && symbols.length > 0) {
+        await runAction('Stop & square-off', async () => {
+          await Promise.all(
+            symbols.map((symbol) =>
+              daemonApi
+                .exitPosition(symbol, 'Stop & Square-off')
+                .catch(() => null),
+            ),
+          )
+          await daemonApi.stop()
+        })
+        return
+      }
+      await stopNow()
+    },
+    [runAction, stopNow, stopPrompt],
   )
 
   const exitPosition = useCallback(
@@ -291,6 +351,8 @@ export function useDaemon(): DaemonController {
     refresh,
     start,
     stop,
+    stopPrompt,
+    resolveStop,
     exitPosition,
     resetPaper,
     saveConfig,

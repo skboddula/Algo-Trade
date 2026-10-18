@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { buildServer } from '../server'
+import { TenantManager } from '../services/tenantManager'
 
 describe('Fastify Bot Routes & API Suite', () => {
   let server: ReturnType<typeof buildServer>
@@ -93,6 +94,131 @@ describe('Fastify Bot Routes & API Suite', () => {
     const json = JSON.parse(res.body)
     expect(json.success).toBe(true)
     expect(json.balance).toBe(10000000)
+  })
+
+  it('GET /api/bot/status exposes hasToken as a boolean', async () => {
+    const res = await server.app.inject({
+      method: 'GET',
+      url: '/api/bot/status?userId=test_trader',
+    })
+    expect(res.statusCode).toBe(200)
+    const json = JSON.parse(res.body)
+    expect(typeof json.hasToken).toBe('boolean')
+  })
+
+  it('POST /api/bot/start rejects live mode unless DAEMON_LIVE_ARMED=true', async () => {
+    delete process.env[TenantManager.LIVE_ARM_ENV]
+    const res = await server.app.inject({
+      method: 'POST',
+      url: '/api/bot/start',
+      payload: { userId: 'live_trader', executionMode: 'live' },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(JSON.parse(res.body).error).toContain(
+      TenantManager.LIVE_ARM_ENV,
+    )
+  })
+
+  it('POST /api/bot/start arms live mode when the env gate is set', async () => {
+    process.env[TenantManager.LIVE_ARM_ENV] = 'true'
+    try {
+      const res = await server.app.inject({
+        method: 'POST',
+        url: '/api/bot/start',
+        payload: { userId: 'live_trader', executionMode: 'live' },
+      })
+      expect(res.statusCode).toBe(200)
+      const json = JSON.parse(res.body)
+      expect(json.userState.executionMode).toBe('live')
+      expect(json.userState.state).toBe('RUNNING')
+    } finally {
+      delete process.env[TenantManager.LIVE_ARM_ENV]
+      await server.app.inject({
+        method: 'POST',
+        url: '/api/bot/stop',
+        payload: { userId: 'live_trader' },
+      })
+    }
+  })
+
+  it('POST /api/bot/config rejects switching to live mid-session', async () => {
+    process.env[TenantManager.LIVE_ARM_ENV] = 'true'
+    try {
+      await server.app.inject({
+        method: 'POST',
+        url: '/api/bot/start',
+        payload: { userId: 'switch_trader', executionMode: 'paper' },
+      })
+      const res = await server.app.inject({
+        method: 'POST',
+        url: '/api/bot/config',
+        payload: { userId: 'switch_trader', config: { executionMode: 'live' } },
+      })
+      expect(res.statusCode).toBe(403)
+      expect(JSON.parse(res.body).error).toContain('Stop the bot')
+    } finally {
+      delete process.env[TenantManager.LIVE_ARM_ENV]
+      await server.app.inject({
+        method: 'POST',
+        url: '/api/bot/stop',
+        payload: { userId: 'switch_trader' },
+      })
+    }
+  })
+
+  it('POST /api/bot/start refuses a second active trader (shared broker token)', async () => {
+    await server.app.inject({
+      method: 'POST',
+      url: '/api/bot/start',
+      payload: { userId: 'primary_trader', executionMode: 'paper' },
+    })
+    try {
+      const res = await server.app.inject({
+        method: 'POST',
+        url: '/api/bot/start',
+        payload: { userId: 'second_trader', executionMode: 'paper' },
+      })
+      expect(res.statusCode).toBe(403)
+      expect(JSON.parse(res.body).error).toContain('already active')
+    } finally {
+      await server.app.inject({
+        method: 'POST',
+        url: '/api/bot/stop',
+        payload: { userId: 'primary_trader' },
+      })
+    }
+  })
+
+  it('POST /api/bot/token rejects an expired JWT', async () => {
+    const expired = [
+      'eyJhbGciOiJIUzI1NiJ9',
+      Buffer.from(JSON.stringify({ exp: 1 })).toString('base64url'),
+      'sig',
+    ].join('.')
+    const res = await server.app.inject({
+      method: 'POST',
+      url: '/api/bot/token',
+      payload: { userId: 'test_trader', token: expired },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(JSON.parse(res.body).error).toContain('EXPIRED')
+  })
+
+  it('POST /api/bot/token accepts a fresh JWT and can refresh the master token', async () => {
+    const fresh = [
+      'eyJhbGciOiJIUzI1NiJ9',
+      Buffer.from(
+        JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+      ).toString('base64url'),
+      'sig',
+    ].join('.')
+    const res = await server.app.inject({
+      method: 'POST',
+      url: '/api/bot/token',
+      payload: { userId: 'test_trader', token: fresh, alsoMaster: true },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(server.masterIngestor.getMasterToken()).toBe(fresh)
   })
 
   describe('Environment Validation', () => {

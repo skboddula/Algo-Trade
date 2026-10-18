@@ -17,6 +17,9 @@ import type { StateStore } from './stateStore'
 import type { Notifier } from './notifier'
 
 export class TenantManager extends EventEmitter {
+  /** Env var that arms live trading server-side (client confirms are only UX). */
+  static readonly LIVE_ARM_ENV = 'DAEMON_LIVE_ARMED'
+
   private users: Map<string, UserBotState> = new Map()
   private masterIngestor: MasterIngestionEngine
   private orderGateway: OrderGateway
@@ -95,6 +98,20 @@ export class TenantManager extends EventEmitter {
 
   public updateConfig(userId: string, config: Partial<StrategyConfig>): UserBotState {
     const user = this.getOrCreateUser(userId)
+    const requestedMode = config.executionMode ?? user.executionMode
+    if (requestedMode === 'live') {
+      this.requireLiveArmed()
+    }
+    // A running paper bot must not flip live mid-session — that would bypass
+    // the arming check Start performs. Require an explicit stop first.
+    if (
+      requestedMode !== user.executionMode &&
+      (user.state === 'RUNNING' || user.state === 'ORDERED')
+    ) {
+      throw new Error(
+        'Stop the bot before switching between paper and live execution',
+      )
+    }
     user.config = { ...user.config, ...config }
     user.executionMode = user.config.executionMode
     user.updatedAt = new Date().toISOString()
@@ -114,6 +131,29 @@ export class TenantManager extends EventEmitter {
 
   public startBot(userId: string, executionMode?: 'paper' | 'live'): UserBotState {
     const user = this.getOrCreateUser(userId)
+
+    // Server-side arming gate: a client flipping executionMode:"live" can
+    // never place real orders unless the operator set DAEMON_LIVE_ARMED=true
+    // in the daemon's environment.
+    const requestedMode = executionMode ?? user.executionMode
+    if (requestedMode === 'live') {
+      this.requireLiveArmed()
+    }
+
+    // Every user shares ONE broker token: two active users would place
+    // competing orders on the same account. Never double-trade silently.
+    const activeOther = Array.from(this.users.values()).find(
+      (u) =>
+        u.userId !== userId &&
+        (u.state === 'RUNNING' || u.state === 'ORDERED'),
+    )
+    if (activeOther) {
+      throw new Error(
+        `Cannot start ${userId}: user ${activeOther.userId} is already active (${activeOther.state}). ` +
+          `Stop it first — the daemon enforces a single active trader.`,
+      )
+    }
+
     if (executionMode) {
       user.executionMode = executionMode
       user.config.executionMode = executionMode
@@ -125,6 +165,15 @@ export class TenantManager extends EventEmitter {
     this.emitUserUpdate(user)
     this.persistUser(user, true)
     return user
+  }
+
+  /** Throws unless live trading is explicitly armed on the daemon. */
+  private requireLiveArmed(): void {
+    if (process.env[TenantManager.LIVE_ARM_ENV] !== 'true') {
+      throw new Error(
+        `Live trading is not armed: set ${TenantManager.LIVE_ARM_ENV}=true in the daemon environment to enable live orders`,
+      )
+    }
   }
 
   public stopBot(userId: string): UserBotState {

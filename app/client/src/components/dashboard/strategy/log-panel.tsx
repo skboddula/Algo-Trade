@@ -44,9 +44,18 @@ export function LogPanel({
   const errorCount = logs.filter((l) => l.level === 'error').length
   const warnCount = logs.filter((l) => l.level === 'warn').length
 
+  // Newest-first list: only follow new entries while the user is already
+  // viewing the top. Never yank the viewport mid-read.
+  const atTopRef = useRef(true)
+  const handleScroll = () => {
+    if (scrollRef.current) {
+      atTopRef.current = scrollRef.current.scrollTop < 24
+    }
+  }
+
   useEffect(() => {
-    if (!collapsed && scrollRef.current) {
-      scrollRef.current.scrollTo({ top: 0, behavior: 'smooth' })
+    if (!collapsed && atTopRef.current && scrollRef.current) {
+      scrollRef.current.scrollTo({ top: 0 })
     }
   }, [logs.length, collapsed])
 
@@ -101,6 +110,7 @@ export function LogPanel({
         <CardContent className="pt-0">
           <div
             ref={scrollRef}
+            onScroll={handleScroll}
             className="app-scrollbar h-48 overflow-y-auto rounded-md border border-border/40 bg-muted/30 p-2 font-mono text-xs space-y-0.5"
           >
             {visible.length === 0 ? (

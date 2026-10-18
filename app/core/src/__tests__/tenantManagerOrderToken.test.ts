@@ -1,8 +1,17 @@
-import { describe, it, expect, vi } from 'vitest'
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest'
 import { TenantManager } from '../services/tenantManager'
 import { MasterIngestionEngine } from '../services/masterIngestor'
 import { OrderGateway } from '../services/orderGateway'
 import type { MarketSnapshot, UnderlyingSymbol } from '../types'
+
+// These tests exercise live-order token resolution, which the server-side
+// arming gate (DAEMON_LIVE_ARMED) now guards. Arm the gate for this file.
+beforeAll(() => {
+  process.env[TenantManager.LIVE_ARM_ENV] = 'true'
+})
+afterAll(() => {
+  delete process.env[TenantManager.LIVE_ARM_ENV]
+})
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 // Deterministic harness for the daemon-only live-order token resolution:

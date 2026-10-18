@@ -195,29 +195,115 @@ describe('useDaemon', () => {
     daemonMocks.start.mockResolvedValue({ success: true })
     const { result } = renderHook(() => useDaemon())
 
-    await act(async () => {
-      await result.current.start('paper')
+    act(() => {
+      result.current.start('paper')
     })
 
+    await waitFor(() =>
+      expect(
+        result.current.logs.some((entry) =>
+          entry.msg.includes('Start (paper)'),
+        ),
+      ).toBe(true),
+    )
     expect(daemonMocks.start).toHaveBeenCalledWith('paper')
-    expect(
-      result.current.logs.some((entry) => entry.msg.includes('Start (paper)')),
-    ).toBe(true)
   })
 
   it('logs action failures without throwing', async () => {
     daemonMocks.stop.mockRejectedValue(new Error('daemon offline'))
     const { result } = renderHook(() => useDaemon())
 
-    await act(async () => {
-      await result.current.stop()
+    act(() => {
+      result.current.stop()
     })
 
-    expect(
-      result.current.logs.some(
-        (entry) =>
-          entry.level === 'error' && entry.msg.includes('daemon offline'),
-      ),
-    ).toBe(true)
+    await waitFor(() =>
+      expect(
+        result.current.logs.some(
+          (entry) =>
+            entry.level === 'error' && entry.msg.includes('daemon offline'),
+        ),
+      ).toBe(true),
+    )
+  })
+
+  it('confirms before starting live and aborts when declined', async () => {
+    daemonMocks.start.mockResolvedValue({ success: true })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { result } = renderHook(() => useDaemon())
+
+    act(() => {
+      result.current.start('live')
+    })
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(daemonMocks.start).not.toHaveBeenCalled()
+
+    confirmSpy.mockReturnValue(true)
+    act(() => {
+      result.current.start('live')
+    })
+    await waitFor(() => expect(daemonMocks.start).toHaveBeenCalledWith('live'))
+    confirmSpy.mockRestore()
+  })
+
+  it('asks about open positions before stopping, and can square off first', async () => {
+    daemonMocks.status.mockResolvedValue(
+      makeStatus({
+        userState: makeUserState({
+          state: 'ORDERED',
+          positions: {
+            'NIFTY 50': {
+              instrumentKey: 'NSE_FO|CE_25000',
+              direction: 'CE',
+              entryPrice: 150,
+              quantity: 75,
+              entryTime: '2026-10-17T04:00:00.000Z',
+              tradeId: 1,
+            },
+            BANKNIFTY: null,
+            FINNIFTY: null,
+          },
+        }),
+      }),
+    )
+    daemonMocks.exitPosition.mockResolvedValue({ success: true })
+    daemonMocks.stop.mockResolvedValue({ success: true })
+    const { result } = renderHook(() => useDaemon())
+
+    await waitFor(() => expect(result.current.status).not.toBeNull())
+    await waitFor(() =>
+      expect(
+        result.current.status?.userState.positions['NIFTY 50'],
+      ).toBeTruthy(),
+    )
+
+    // Stop with an open position opens the prompt instead of stopping.
+    act(() => {
+      result.current.stop()
+    })
+    await waitFor(() => expect(result.current.stopPrompt).not.toBeNull())
+    expect(daemonMocks.stop).not.toHaveBeenCalled()
+
+    // Cancel leaves everything untouched.
+    await act(async () => {
+      await result.current.resolveStop('cancel')
+    })
+    expect(result.current.stopPrompt).toBeNull()
+    expect(daemonMocks.stop).not.toHaveBeenCalled()
+    expect(daemonMocks.exitPosition).not.toHaveBeenCalled()
+
+    // Square off sells the position, then stops.
+    act(() => {
+      result.current.stop()
+    })
+    await waitFor(() => expect(result.current.stopPrompt).not.toBeNull())
+    await act(async () => {
+      await result.current.resolveStop('square-off')
+    })
+    await waitFor(() => expect(daemonMocks.stop).toHaveBeenCalled())
+    expect(daemonMocks.exitPosition).toHaveBeenCalledWith(
+      'NIFTY 50',
+      'Stop & Square-off',
+    )
   })
 })
