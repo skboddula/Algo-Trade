@@ -362,6 +362,10 @@ export class TenantManager extends EventEmitter {
 
         // ── 2. Evaluate New Entry (If no position and before cutoff) ──────────
         if (!position && user.state === 'RUNNING' && !afterCutoff) {
+          // CR-11 (candles arm): never enter while the candle buffer is still
+          // the boot-time synthetic seeds (or stale) — require a recent
+          // successful real-candle backfill. No-op in mock mode.
+          if (this.masterIngestor.getEntryBlockers(symbol).length > 0) continue
           const tradesCount = user.tradesCountPerSymbol[symbol] || 0
           if (tradesCount >= user.config.maxTradesPerDay) continue
 

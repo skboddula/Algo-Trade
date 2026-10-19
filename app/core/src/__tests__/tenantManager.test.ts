@@ -70,6 +70,65 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
     }
   })
 
+  it('gates new entries on candle freshness (CR-11 candles arm)', async () => {
+    const ingestor = new MasterIngestionEngine({ mockMode: true })
+    const gateway = new OrderGateway()
+    const manager = new TenantManager(ingestor, gateway)
+    const placeSpy = vi.spyOn(gateway, 'placeOrder')
+
+    manager.startBot('gated', 'paper')
+    manager.updateConfig('gated', {
+      underlyingMode: 'NIFTY 50',
+      lastEntryTime: '23:59', // deterministic: never past cutoff during tests
+      strongThreshold: 1,
+      moderateThreshold: 1,
+      minConfidence: 'moderate',
+    })
+
+    const chainRow = {
+      expiry: '2099-01-07',
+      strike_price: 25000,
+      underlying_spot_price: 25000,
+      call_options: { instrument_key: 'NSE_FO|CE1', trading_symbol: 'CE1', market_data: { ltp: 100, volume: 1, oi: 1 } },
+      put_options: { instrument_key: 'NSE_FO|PE1', trading_symbol: 'PE1', market_data: { ltp: 200, volume: 1, oi: 1 } },
+    }
+    const snapshot = {
+      timestamp: new Date().toISOString(),
+      underlyingSymbol: 'NIFTY 50',
+      spotPrice: 25000,
+      candles: [],
+      optionChain: [chainRow],
+      indicators: {
+        ema: 'Buy',
+        adx: 'Buy',
+        rsi: { value: 60, signal: 'Neutral' },
+        stochastic: { k: 50, d: 50, signal: 'Hold' },
+        bollinger: { upper: 25100, middle: 25000, lower: 24900, signal: 'Hold', trend: 'Up' },
+        atr: { value: 30, level: 'Medium' },
+        pcr: 'Hold',
+        pcrValue: 1,
+      },
+      signal: { signal: 'BUY_CE', confidence: 'strong', positionSize: 'full' },
+    }
+    const tick = { timestamp: new Date().toISOString(), snapshots: { 'NIFTY 50': snapshot } }
+
+    // No successful candle backfill yet → entry blocked, no order placed.
+    const blockers = vi
+      .spyOn(ingestor, 'getEntryBlockers')
+      .mockReturnValue(['candles/indicators stale or missing'])
+    await (manager as any).handleMarketTick(tick)
+    const gated = manager.getOrCreateUser('gated')
+    expect(placeSpy).not.toHaveBeenCalled()
+    expect(gated.positions['NIFTY 50']).toBeNull()
+
+    // Fresh real candles → gate opens, the same tick enters normally.
+    blockers.mockReturnValue([])
+    await (manager as any).handleMarketTick(tick)
+    expect(placeSpy).toHaveBeenCalledTimes(1)
+    expect(gated.positions['NIFTY 50']).not.toBeNull()
+    placeSpy.mockRestore()
+  })
+
   it('allows manual position exit and updates state', async () => {
     const ingestor = new MasterIngestionEngine({ mockMode: true })
     const gateway = new OrderGateway()

@@ -157,4 +157,34 @@ describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('exposes CR-11 candles-arm entry blockers until a real backfill lands', async () => {
+    const live = new MasterIngestionEngine({ primaryUpstoxToken: 'test-token' })
+    expect(live.getEntryBlockers('BANKNIFTY')).toEqual(['candles/indicators stale or missing'])
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ data: { candles: [['2026-10-19T09:15:00+05:30', 1, 1, 1, 55000, 0]] } }),
+          { status: 200 },
+        ),
+      ),
+    )
+    try {
+      await (live as any).fetchLiveCandles('BANKNIFTY', [])
+      expect(live.getEntryBlockers('BANKNIFTY')).toEqual([])
+
+      // A backfill older than CANDLES_MAX_AGE_MS gates entries again.
+      ;(live as any).lastCandlesAtMs.set('BANKNIFTY', Date.now() - 200_000)
+      expect(live.getEntryBlockers('BANKNIFTY')).toEqual(['candles/indicators stale or missing'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+
+    // Mock mode — and live mode without a token (mock fallback semantics) —
+    // is never gated.
+    expect(new MasterIngestionEngine({ mockMode: true }).getEntryBlockers('BANKNIFTY')).toEqual([])
+    expect(new MasterIngestionEngine({}).getEntryBlockers('BANKNIFTY')).toEqual([])
+  })
 })

@@ -57,6 +57,8 @@ export function normalizeCandleOrder(rows: Candle[]): Candle[] {
 
 export class MasterIngestionEngine extends EventEmitter {
   private static readonly CANDLE_REFRESH_MS = 30_000
+  /** CR-11: entries are blocked when the candle backfill is older than this. */
+  private static readonly CANDLES_MAX_AGE_MS = 120_000
   private isRunning = false
   private timer: NodeJS.Timeout | null = null
   private candleBuffer: Map<UnderlyingSymbol, Candle[]> = new Map()
@@ -364,6 +366,21 @@ export class MasterIngestionEngine extends EventEmitter {
   public getCandlesAgeMs(symbol: UnderlyingSymbol): number | null {
     const at = this.lastCandlesAtMs.get(symbol)
     return at === undefined ? null : Date.now() - at
+  }
+
+  /**
+   * CR-11 (candles arm): entry blockers for a symbol. In live mode, entries
+   * are gated until a recent real-candle backfill has succeeded — the
+   * boot-time synthetic seeds must never drive an order (mirrors the
+   * always-on-daemon's stale-data gate). No-op in mock mode / without a token.
+   */
+  public getEntryBlockers(symbol: UnderlyingSymbol): string[] {
+    if (this.config.mockMode || !this.config.primaryUpstoxToken) return []
+    const at = this.lastCandlesAtMs.get(symbol)
+    if (at === undefined || Date.now() - at > MasterIngestionEngine.CANDLES_MAX_AGE_MS) {
+      return ['candles/indicators stale or missing']
+    }
+    return []
   }
 
   private generateSeedCandles(symbol: UnderlyingSymbol): Candle[] {
