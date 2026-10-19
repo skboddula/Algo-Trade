@@ -283,6 +283,7 @@ export function calcPCR(optionChain: OptionData[]): {
 export function computeAllIndicators(
   candles: Candle[],
   optionChain?: OptionData[],
+  htfCandles?: Candle[],
 ): IndicatorsResult {
   const ema = calcEMACrossover(candles)
   const adx = calcADX(candles)
@@ -301,6 +302,8 @@ export function computeAllIndicators(
     atr,
     pcr: pcrRes.signal,
     pcrValue: pcrRes.pcr,
-    higherTimeframeTrend: calcHigherTimeframeTrend(candles),
+    // Multi-timeframe input: previous-session + today's candles when provided
+    // (pre-seeds the 5-minute EMA warm-up); falls back to today's series.
+    higherTimeframeTrend: calcHigherTimeframeTrend(htfCandles ?? candles),
   }
 }

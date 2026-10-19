@@ -104,6 +104,47 @@ export function isMarketOpen(date: Date = new Date()): boolean {
   return getIndiaTime(date).isMarketHours
 }
 
+/**
+ * The most recent NSE trading session strictly before the given instant's IST
+ * calendar day, as `YYYY-MM-DD` (weekends and the holiday calendar skipped).
+ *
+ * Used by both runtimes to pre-seed the multi-timeframe trend with the
+ * previous session's 1-minute candles, so the 5-minute EMA 10/42 filter is
+ * warm from the open instead of abstaining until ~12:45 IST.
+ */
+export function getPreviousTradingSessionDate(
+  date: Date = new Date(),
+): string {
+  // Start at the IST calendar day before `date`. `getIndiaTime().date` carries
+  // IST wall-clock fields in its UTC components, so UTC math on it stays in IST.
+  const istToday = getIndiaTime(date)
+  let cursorMs =
+    Date.UTC(
+      istToday.date.getUTCFullYear(),
+      istToday.date.getUTCMonth(),
+      istToday.date.getUTCDate(),
+    ) - 86_400_000
+
+  for (let i = 0; i < 30; i++) {
+    const cursor = new Date(cursorMs)
+    const dateString = `${cursor.getUTCFullYear()}-${String(
+      cursor.getUTCMonth() + 1,
+    ).padStart(2, '0')}-${String(cursor.getUTCDate()).padStart(2, '0')}`
+    const dayOfWeek = cursor.getUTCDay()
+    if (
+      dayOfWeek >= 1 &&
+      dayOfWeek <= 5 &&
+      !NSE_TRADING_HOLIDAYS[dateString]
+    ) {
+      return dateString
+    }
+    cursorMs -= 86_400_000
+  }
+
+  // Unreachable with a sane calendar (< 30 consecutive non-trading days).
+  return new Date(cursorMs).toISOString().slice(0, 10)
+}
+
 /** Name of the NSE trading holiday on this date (IST), or null if none. */
 export function getNseHolidayName(date: Date = new Date()): string | null {
   return NSE_TRADING_HOLIDAYS[getIndiaTime(date).dateString] ?? null

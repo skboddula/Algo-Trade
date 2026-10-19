@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { MasterIngestionEngine, normalizeCandleOrder } from '../services/masterIngestor'
+import { computeAllIndicators } from '../services/indicators'
 import type { Candle } from '../types'
 
 describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
@@ -240,5 +241,83 @@ describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
     expect(sources).toBeDefined()
     expect(sources?.entryBlockedReasons).toEqual([])
     expect(sources?.quoteAgeMs).toBeNull()
+  })
+
+  it('pre-seeds the multi-timeframe trend with the previous session (warm from the open)', async () => {
+    const mkRow = (baseMs: number, i: number, close: number): Candle => [
+      new Date(baseMs + i * 60_000).toISOString(),
+      close - 1,
+      close + 1,
+      close - 2,
+      close,
+      100,
+    ]
+    // Previous session: 217 ascending minutes, ending far above the open.
+    const prevRows: Candle[] = Array.from({ length: 217 }, (_, i) =>
+      mkRow(Date.UTC(2026, 9, 19, 3, 45), i, 24000 + i),
+    )
+    // Today: the first three minutes after the open.
+    const todayRows: Candle[] = Array.from({ length: 3 }, (_, i) =>
+      mkRow(Date.UTC(2026, 9, 21, 3, 45), i, 24400 + i),
+    )
+    const json = (body: unknown): Response =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes('/historical-candle/intraday/'))
+        return json({ data: { candles: todayRows } })
+      if (url.includes('/historical-candle/'))
+        return json({ data: { candles: prevRows } })
+      return new Response('not found', { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const ingestor = new MasterIngestionEngine({ primaryUpstoxToken: 'test-token' })
+
+      // Without a successful backfill (synthetic seeds), history is NOT mixed in.
+      const fresh = new MasterIngestionEngine({ primaryUpstoxToken: 'test-token' })
+      const seedOnly = await (fresh as any).getHtfCandles('NIFTY 50', todayRows)
+      expect(seedOnly).toBe(todayRows)
+      expect(
+        fetchMock.mock.calls.filter(([u]) => String(u).includes('/historical-candle/') && !String(u).includes('/intraday/')),
+      ).toHaveLength(0)
+
+      const todayCandles = await (ingestor as any).fetchLiveCandles('NIFTY 50', [])
+      expect(todayCandles).toHaveLength(3)
+
+      const htfCandles = await (ingestor as any).getHtfCandles('NIFTY 50', todayCandles)
+      // 217 previous candles → trimmed to 215 (43 whole 5-bar groups) + 3 today.
+      expect(htfCandles).toHaveLength(215 + 3)
+      expect(htfCandles[0][0]).toBe(prevRows[0][0])
+      expect(htfCandles[214][0]).toBe(prevRows[214][0])
+      expect(htfCandles[215][0]).toBe(todayCandles[0][0])
+
+      const histCalls = fetchMock.mock.calls.filter(
+        ([u]) => String(u).includes('/historical-candle/') && !String(u).includes('/intraday/'),
+      )
+      expect(histCalls).toHaveLength(1)
+      expect(String(histCalls[0][0])).toMatch(
+        /\/historical-candle\/[^/]+\/1minute\/\d{4}-\d{2}-\d{2}\/\d{4}-\d{2}-\d{2}$/,
+      )
+
+      // The 5-minute EMA filter is active from the open: Hold on today alone,
+      // directional once the previous session seeds the warm-up.
+      expect(computeAllIndicators(todayCandles, [], todayCandles).higherTimeframeTrend).toBe('Hold')
+      expect(computeAllIndicators(todayCandles, [], htfCandles).higherTimeframeTrend).toBe('Buy')
+
+      // One fetch per session: the second cycle is a cache hit.
+      const again = await (ingestor as any).getHtfCandles('NIFTY 50', todayCandles)
+      expect(again).toHaveLength(215 + 3)
+      expect(
+        fetchMock.mock.calls.filter(
+          ([u]) => String(u).includes('/historical-candle/') && !String(u).includes('/intraday/'),
+        ),
+      ).toHaveLength(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

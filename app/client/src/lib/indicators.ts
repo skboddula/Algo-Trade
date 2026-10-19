@@ -319,6 +319,7 @@ export function calcADXRaw(
 export function computeAllIndicators(
   candles: Candle[],
   optionChain: OptionData[] = [],
+  htfCandles?: Candle[],
 ): IndicatorsResult {
   const pcrResult = optionChain.length
     ? calcOiPCR(optionChain)
@@ -332,6 +333,8 @@ export function computeAllIndicators(
     atr: calcATR(candles),
     pcr: pcrResult.signal,
     pcrValue: pcrResult.value,
-    higherTimeframeTrend: calcHigherTimeframeTrend(candles),
+    // Multi-timeframe input: previous-session + today's candles when provided
+    // (pre-seeds the 5-minute EMA warm-up); falls back to today's series.
+    higherTimeframeTrend: calcHigherTimeframeTrend(htfCandles ?? candles),
   }
 }

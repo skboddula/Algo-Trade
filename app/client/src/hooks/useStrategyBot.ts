@@ -333,6 +333,7 @@ export function useStrategyBot(token: string | null) {
           const symIndicators = computeAllIndicators(
             symMarket.candles,
             symMarket.optionChain,
+            symMarket.htfCandles,
           )
           const targetInstrumentKey =
             UNDERLYING_INSTRUMENT_KEYS[sym] ?? 'NSE_INDEX|Nifty 50'
@@ -392,7 +393,11 @@ export function useStrategyBot(token: string | null) {
 
       const indicators =
         symbolIndicators[primaryMarket.underlyingSymbol] ??
-        computeAllIndicators(primaryMarket.candles, primaryMarket.optionChain)
+        computeAllIndicators(
+          primaryMarket.candles,
+          primaryMarket.optionChain,
+          primaryMarket.htfCandles,
+        )
 
       const allSignalData: AllSignalData = {
         v3: primaryMarket.v3,

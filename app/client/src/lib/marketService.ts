@@ -34,11 +34,14 @@ import {
   API_MARKET_PCR,
   API_MARKET_MAX_PAIN,
   API_MARKET_CANDLES_INTRADAY,
+  API_MARKET_CANDLES_HISTORICAL,
   API_MARKET_BREADTH,
   API_MARKET_OPTION_CONTRACTS,
   API_MARKET_GLOBAL_INDICES,
   API_MARKET_OPTION_CHAIN,
 } from './constants'
+import { getPreviousTradingSessionDate } from '../../../../packages/shared/src/timeUtils'
+import { buildHtfCandleHistory } from '../../../../packages/shared/src/candleHistory'
 
 export type SourceStatus = 'ok' | 'error' | 'stale' | 'pending' | 'unknown'
 
@@ -640,6 +643,105 @@ export async function fetchSymbolSentiment(
   }
 }
 
+// ─── Previous-session candle pre-seed (multi-timeframe warm-up) ─────────────
+/**
+ * Previous trading session's 1-minute candles, cached per symbol and session
+ * date. The Upstox historical endpoint is hit at most once per session per
+ * symbol; failed attempts back off for PREV_SESSION_RETRY_MS. Both the
+ * browser bot and the daemon pre-seed the same way (`buildHtfCandleHistory`)
+ * so the multi-timeframe verdicts stay in parity.
+ */
+const previousSessionCandleCache = new Map<
+  string,
+  { date: string; candles: Candle[] }
+>()
+const previousSessionFetchState = new Map<string, Promise<Candle[]>>()
+const previousSessionRetryAfterMs = new Map<string, number>()
+const PREV_SESSION_RETRY_MS = 5 * 60_000
+
+/** Test seam: clears the per-session previous-candle caches. */
+export function resetPreviousSessionCandleCache(): void {
+  previousSessionCandleCache.clear()
+  previousSessionFetchState.clear()
+  previousSessionRetryAfterMs.clear()
+}
+
+async function fetchPreviousSessionCandles(
+  token: string,
+  underlyingSymbol: UnderlyingSymbol,
+  addLog: (l: BotLog) => void,
+  abortSignal?: AbortSignal,
+): Promise<Candle[]> {
+  if (abortSignal?.aborted) return []
+
+  const prevDate = getPreviousTradingSessionDate()
+  const cached = previousSessionCandleCache.get(underlyingSymbol)
+  if (cached?.date === prevDate) return cached.candles
+
+  const retryAfter = previousSessionRetryAfterMs.get(underlyingSymbol) ?? 0
+  if (Date.now() < retryAfter) return []
+
+  const inflight = previousSessionFetchState.get(underlyingSymbol)
+  if (inflight) return inflight
+
+  const instrumentKey =
+    UNDERLYING_INSTRUMENT_KEYS[underlyingSymbol] ?? 'NSE_INDEX|Nifty 50'
+
+  const promise = (async () => {
+    try {
+      const [data, err] = await safeFetch<{ data?: { candles?: Candle[] } }>(
+        API_MARKET_CANDLES_HISTORICAL,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token,
+            instrumentKey,
+            fromDate: prevDate,
+            toDate: prevDate,
+          }),
+          signal: abortSignal,
+        },
+      )
+      const candles = data?.data?.candles ?? []
+      if (err || !candles.length) {
+        if (abortSignal?.aborted) return []
+        previousSessionRetryAfterMs.set(
+          underlyingSymbol,
+          Date.now() + PREV_SESSION_RETRY_MS,
+        )
+        addLog(
+          mkLog(
+            'warn',
+            'candles',
+            `${underlyingSymbol}: previous-session history (${prevDate}) unavailable (${err ?? 'empty'}) — multi-timeframe filter warms up from today's candles only`,
+          ),
+        )
+        return []
+      }
+      previousSessionCandleCache.set(underlyingSymbol, {
+        date: prevDate,
+        candles,
+      })
+      addLog(
+        mkLog(
+          'info',
+          'candles',
+          `${underlyingSymbol}: previous-session history ${prevDate} loaded (${candles.length} candles) for the multi-timeframe filter`,
+        ),
+      )
+      return candles
+    } catch {
+      return []
+    } finally {
+      previousSessionFetchState.delete(underlyingSymbol)
+    }
+  })()
+
+  previousSessionFetchState.set(underlyingSymbol, promise)
+  return promise
+}
+
 // ─── Market fetch ─────────────────────────────────────────────────────────────
 type BreadthFetchResult = [
   { advances: number; declines: number; ratio: number; total: number } | null,
@@ -665,6 +767,8 @@ export async function fetchMarket(
 ): Promise<{
   underlyingSymbol: UnderlyingSymbol
   candles: Candle[]
+  /** Previous session + today, for the multi-timeframe trend only. */
+  htfCandles: Candle[]
   optionChain: OptionData[]
   lotSize: number | null
   expiry: string | null
@@ -693,6 +797,16 @@ export async function fetchMarket(
   sourceUpdate('breadth', 'pending')
   sourceUpdate('option-chain', 'pending')
   sourceUpdate('global-sentiment', 'pending')
+
+  // Kick off the previous-session history fetch in parallel with the main
+  // market calls. Static per session and cached; failures never block the tick
+  // (the multi-timeframe filter then runs on today's candles only).
+  const previousCandlesPromise = fetchPreviousSessionCandles(
+    token,
+    underlyingSymbol,
+    addLog,
+    abortSignal,
+  )
 
   const [candleRes, breadthRes, contractsRes, globalRes] =
     await Promise.allSettled([
@@ -952,9 +1066,19 @@ export async function fetchMarket(
     addLog(mkLog('error', 'v3', 'compute failed: ' + (e as Error).message))
   }
 
+  // Multi-timeframe history: previous session + today (deduplicated and
+  // group-aligned), pre-seeding the 5-minute EMA warm-up. Today's `candles`
+  // and all 1-minute indicators stay reference-identical.
+  const previousCandles = await previousCandlesPromise
+  const htfCandles =
+    previousCandles.length > 0
+      ? buildHtfCandleHistory(previousCandles, candles)
+      : candles
+
   return {
     underlyingSymbol,
     candles,
+    htfCandles,
     optionChain,
     lotSize: resolveContractLotSize(contracts, selectedExpiry),
     expiry: selectedExpiry,

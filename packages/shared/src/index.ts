@@ -1,5 +1,6 @@
 export * from './types'
 export * from './constants'
 export * from './timeUtils'
+export * from './candleHistory'
 export * from './upstoxRest'
 export * from './telegram'

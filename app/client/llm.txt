@@ -86,6 +86,15 @@ supervision; the persistent strategy header warns until Resume.
             └─► [Live Orders: /api/order/place] ──► [Upstox Live API]
 ```
 
+**Multi-timeframe warm-up (browser ⇄ daemon parity):** before scoring, `fetchMarket` also
+pulls the previous trading session's 1-minute candles (`/api/market/candles/historical`,
+cached once per session per symbol) and composes `htfCandles = previous + today` via the
+shared `buildHtfCandleHistory` (`packages/shared/src/candleHistory.ts`, trimmed to whole
+5-bar groups). Only `higherTimeframeTrend` consumes this series; `candles` and every
+1-minute indicator stay reference-identical. The daemon's `masterIngestor` fetches and
+composes the same series, so the 5-minute EMA 10/42 filter is warm from the open in both
+runtimes instead of abstaining until ~12:45 IST.
+
 ---
 
 ## 4. Key API Endpoints (Cloudflare Worker)
@@ -94,6 +103,8 @@ supervision; the persistent strategy header warns until Resume.
 | :--- | :---: | :---: | :--- |
 | `/api/broker/upstox/token` | POST | No | Exchanges OAuth code for Upstox access token |
 | `/api/market/quotes` | POST | No | Fetches live market quotes for instruments |
+| `/api/market/candles/intraday` | POST | No | Fetches today's 1-minute candles for a symbol |
+| `/api/market/candles/historical` | POST | No | Fetches a past trading day's 1-minute candles (multi-timeframe pre-seed) |
 | `/api/market/option-chain` | POST | No | Fetches complete option chain with greeks & PCR |
 | `/api/market/vix` | POST | No | Fetches India VIX volatility metric |
 | `/api/market/breadth` | POST | No | Fetches market advance/decline breadth |

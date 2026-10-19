@@ -15,7 +15,8 @@ import { SentimentIngestor } from './sentimentIngestor'
 import { computeV3Signal } from './v3Sentiment'
 import { DEFAULT_STRATEGY_CONFIG, VIX_FRESHNESS_WINDOW_MS } from '../constants'
 import { fetchWithRetry } from '../utils/http/fetchRetry'
-import { getIndiaTime } from '../utils/timeUtils'
+import { getIndiaTime, getPreviousTradingSessionDate } from '../utils/timeUtils'
+import { buildHtfCandleHistory } from '../../../../packages/shared/src/candleHistory'
 import type { Notifier } from './notifier'
 import type { MarketDataSource } from './marketDataSource'
 import { MockMarketDataSource } from './marketDataSources/mockMarketDataSource'
@@ -73,6 +74,8 @@ export class MasterIngestionEngine extends EventEmitter {
   private static readonly CANDLES_MAX_AGE_MS = 120_000
   private static readonly CHAIN_MAX_AGE_MS = 60_000
   private static readonly VIX_REFRESH_MS = 60_000
+  /** Retry cadence for the previous-session HTF pre-seed fetch after a failure. */
+  private static readonly PREV_SESSION_RETRY_MS = 5 * 60_000
   private isRunning = false
   private timer: NodeJS.Timeout | null = null
   private candleBuffer: Map<UnderlyingSymbol, Candle[]> = new Map()
@@ -80,6 +83,9 @@ export class MasterIngestionEngine extends EventEmitter {
   private latestOptionChains: Map<UnderlyingSymbol, OptionData[]> = new Map()
   private lastCandleFetchMs: Map<UnderlyingSymbol, number> = new Map()
   private lastCandlesAtMs: Map<UnderlyingSymbol, number> = new Map()
+  /** Previous trading session's 1-minute candles per symbol (HTF pre-seed). */
+  private previousSessionCandles: Map<UnderlyingSymbol, { date: string; candles: Candle[] }> = new Map()
+  private previousSessionFetchMs: Map<UnderlyingSymbol, number> = new Map()
   /** REST-mode stamp: last successful per-symbol quote acquire (CR-11). */
   private lastQuoteAtMs: Map<UnderlyingSymbol, number> = new Map()
   private readonly sentimentIngestor: SentimentIngestor
@@ -274,8 +280,13 @@ export class MasterIngestionEngine extends EventEmitter {
         this.lastFeedError = acquired.fetchError || 'unknown'
       }
 
+      // Multi-timeframe history: previous session + today (pre-seeded so the
+      // 5-minute EMA trend is warm from the open). Today's buffer and all
+      // 1-minute indicators stay reference-identical.
+      const htfCandles = await this.getHtfCandles(symbol, candles)
+
       // Compute indicators and scoring ONCE
-      const indicators = computeAllIndicators(candles, optionChain)
+      const indicators = computeAllIndicators(candles, optionChain, htfCandles)
 
       let vrdData: VrdData
       let vrdSource: 'live' | 'fallback' = 'fallback'
@@ -397,6 +408,24 @@ export class MasterIngestionEngine extends EventEmitter {
   }
 
   /**
+   * Validates + canonicalizes Upstox candle rows. Timestamps are normalized
+   * to the same ISO form the WS feed and seeds use so the per-minute in-place
+   * update in mergeOhlcIntoCandles keeps matching.
+   */
+  private static parseCandleRows(rows: unknown[]): Candle[] {
+    return rows
+      .filter(
+        (row): row is Candle =>
+          Array.isArray(row) &&
+          row.length >= 6 &&
+          typeof row[0] === 'string' &&
+          Number.isFinite(Date.parse(row[0])) &&
+          Number.isFinite(row[4]),
+      )
+      .map((row) => [new Date(row[0]).toISOString(), row[1], row[2], row[3], row[4], row[5]] as Candle)
+  }
+
+  /**
    * Warm/refresh the candle buffer from Upstox's intraday 1-minute endpoint.
    *
    * Without this, the buffer runs on synthetic boot seeds (fixed base prices
@@ -427,24 +456,85 @@ export class MasterIngestionEngine extends EventEmitter {
       )
       if (!res.ok) return fallback
       const data = (await res.json()) as { data?: { candles?: unknown[] } }
-      const rows = (data?.data?.candles ?? [])
-        .filter(
-          (row): row is Candle =>
-            Array.isArray(row) &&
-            row.length >= 6 &&
-            typeof row[0] === 'string' &&
-            Number.isFinite(Date.parse(row[0])) &&
-            Number.isFinite(row[4]),
-        )
-        // Canonicalize to the same ISO form the WS feed and seeds use so the
-        // per-minute in-place update in mergeOhlcIntoCandles keeps matching.
-        .map((row) => [new Date(row[0]).toISOString(), row[1], row[2], row[3], row[4], row[5]] as Candle)
+      const rows = MasterIngestionEngine.parseCandleRows(data?.data?.candles ?? [])
       if (!rows.length) return fallback
       this.lastCandlesAtMs.set(symbol, Date.now())
       return normalizeCandleOrder(rows)
     } catch {
       return fallback
     }
+  }
+
+  /**
+   * Fetches one trading day's 1-minute candles (the previous session, for the
+   * multi-timeframe pre-seed). Best-effort: [] on any failure, so callers fall
+   * back to today-only history (reference behavior).
+   */
+  private async fetchPreviousSessionCandles(
+    symbol: UnderlyingSymbol,
+    date: string,
+  ): Promise<Candle[]> {
+    try {
+      const instrumentKey = UNDERLYING_INSTRUMENT_KEYS[symbol]
+      const res = await fetch(
+        `${this.config.upstoxApiBaseUrl}/historical-candle/${encodeURIComponent(instrumentKey)}/1minute/${date}/${date}`,
+        {
+          headers: {
+            Authorization: `Bearer ${this.config.primaryUpstoxToken}`,
+            Accept: 'application/json',
+          },
+        },
+      )
+      if (!res.ok) return []
+      const data = (await res.json()) as { data?: { candles?: unknown[] } }
+      return normalizeCandleOrder(
+        MasterIngestionEngine.parseCandleRows(data?.data?.candles ?? []),
+      )
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Multi-timeframe trend input for this cycle: the previous trading session's
+   * candles prepended to today's (deduplicated, group-aligned by
+   * `buildHtfCandleHistory`), so the 5-minute EMA 10/42 filter is warm from
+   * the open instead of abstaining until ~12:45 IST.
+   *
+   * Cached once per session per symbol; failed fetches retry after
+   * PREV_SESSION_RETRY_MS. Only real intraday buffers are extended — synthetic
+   * boot seeds stay today-only so the filter never mixes fake history.
+   */
+  private async getHtfCandles(
+    symbol: UnderlyingSymbol,
+    todayCandles: Candle[],
+  ): Promise<Candle[]> {
+    if (
+      this.config.mockMode ||
+      !this.config.primaryUpstoxToken ||
+      !todayCandles.length ||
+      !this.lastCandlesAtMs.has(symbol)
+    ) {
+      return todayCandles
+    }
+
+    const prevDate = getPreviousTradingSessionDate()
+    let entry = this.previousSessionCandles.get(symbol)
+    if (!entry || entry.date !== prevDate || !entry.candles.length) {
+      const nowMs = Date.now()
+      const lastAttempt = this.previousSessionFetchMs.get(symbol) ?? 0
+      if (nowMs - lastAttempt >= MasterIngestionEngine.PREV_SESSION_RETRY_MS) {
+        this.previousSessionFetchMs.set(symbol, nowMs)
+        const fetched = await this.fetchPreviousSessionCandles(symbol, prevDate)
+        if (fetched.length) {
+          entry = { date: prevDate, candles: fetched }
+          this.previousSessionCandles.set(symbol, entry)
+        }
+      }
+    }
+
+    if (!entry?.candles.length) return todayCandles
+    return buildHtfCandleHistory(entry.candles, todayCandles)
   }
 
   /**

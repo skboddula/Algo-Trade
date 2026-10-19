@@ -12,6 +12,7 @@ Designed to run 24/7 on a laptop, a home server, or a **GCP Always Free `e2-micr
    - Polls/ingests market quotes, candles, and option chains **once every 2 seconds** for all symbols.
    - Computes technical indicators (EMA, VWAP, Supertrend, RSI, BB) and V5 scoring matrix **once in shared memory**.
    - **Zero broker rate limits**: 1 master fetch serves 10, 50, or 100 connected user dashboards simultaneously.
+   - **Multi-timeframe warm-up**: the 5-minute EMA 10/42 filter is pre-seeded with the previous trading session's 1-minute candles (shared `buildHtfCandleHistory`, fetched once per session per symbol), so counter-trend vetoes are active from the open — identical composition in the daemon and the browser bot.
 2. **Multi-Tenant Headless Bot Execution**:
    - Manages independent user bot states (`IDLE` ➔ `RUNNING` ➔ `ORDERED` ➔ `STOPPED`).
    - Evaluates each user's unique strategy configuration, lot size, and risk rules.

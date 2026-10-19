@@ -94,6 +94,27 @@ describe('indicators', () => {
       expect(result.stochastic).toHaveProperty('d')
       expect(['Buy', 'Sell', 'Hold']).includes(result.stochastic.signal)
     })
+
+    it('uses the provided multi-timeframe series only for higherTimeframeTrend', () => {
+      const today = generateCandles(5)
+      const todayOnly = computeAllIndicators(today, [])
+      expect(todayOnly.higherTimeframeTrend).toBe('Hold')
+
+      // 220 one-minute candles → 44 resampled 5-minute groups → EMA 10/42 warm.
+      const htfHistory = generateCandles(220)
+      const withHistory = computeAllIndicators(today, [], htfHistory)
+      expect(withHistory.higherTimeframeTrend).toBe('Buy')
+
+      // Every 1-minute indicator still runs on today's candles only.
+      expect(withHistory.ema).toBe(todayOnly.ema)
+      expect(withHistory.adx).toBe(todayOnly.adx)
+      expect(withHistory.rsi).toEqual(todayOnly.rsi)
+      expect(withHistory.stochastic).toEqual(todayOnly.stochastic)
+      expect(withHistory.bollinger).toEqual(todayOnly.bollinger)
+      expect(withHistory.atr).toEqual(todayOnly.atr)
+      expect(withHistory.pcr).toBe(todayOnly.pcr)
+      expect(withHistory.pcrValue).toBe(todayOnly.pcrValue)
+    })
   })
 
   describe('getOtmStrike', () => {
