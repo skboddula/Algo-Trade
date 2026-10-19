@@ -332,7 +332,7 @@ function buildTicker(snapshots: DaemonController['status']): TickerItem[] {
   })
 }
 
-// NSE: 9:15–15:30 IST on weekdays
+// NSE: 9:15–15:40 IST on weekdays (extended derivatives close)
 function getMarketInfo() {
   const now = new Date()
   const day = now.getDay() // 0=Sun, 6=Sat

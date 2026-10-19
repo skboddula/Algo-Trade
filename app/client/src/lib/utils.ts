@@ -1,6 +1,7 @@
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import type { TradeRowStatus } from './types'
+import { isMarketOpen } from '../../../../packages/shared/src/timeUtils'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -8,21 +9,12 @@ export function cn(...inputs: ClassValue[]) {
 
 /**
  * Returns true only if the current wall-clock time (in IST) falls within
- * NSE regular trading hours: Monday–Friday, 09:15–15:30 IST.
+ * NSE regular trading hours: Mon–Fri, 09:15–15:40 IST, excluding NSE trading
+ * holidays. Delegates to the shared time utils so the window, the daemon and
+ * the cloud edge agree on a single calendar.
  */
 export function isNseMarketOpen(): boolean {
-  // IST = UTC+5:30
-  const nowUtc = Date.now()
-  const istOffsetMs = 5.5 * 60 * 60 * 1000
-  const nowIst = new Date(nowUtc + istOffsetMs)
-  const dayOfWeek = nowIst.getUTCDay() // 0=Sun, 6=Sat
-  if (dayOfWeek === 0 || dayOfWeek === 6) return false
-  const hh = nowIst.getUTCHours()
-  const mm = nowIst.getUTCMinutes()
-  const totalMinutes = hh * 60 + mm
-  const marketOpen = 9 * 60 + 15 // 09:15
-  const marketClose = 15 * 60 + 30 // 15:30
-  return totalMinutes >= marketOpen && totalMinutes < marketClose
+  return isMarketOpen()
 }
 
 /**

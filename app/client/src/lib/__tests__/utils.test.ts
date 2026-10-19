@@ -56,8 +56,18 @@ describe('isNseMarketOpen', () => {
     expect(isNseMarketOpen()).toBe(false)
   })
 
-  it('returns false after 15:30 IST', () => {
+  it('returns false after 15:40 IST (derivatives close)', () => {
     vi.setSystemTime(new Date('2026-07-24T16:00:00+05:30'))
+    expect(isNseMarketOpen()).toBe(false)
+  })
+
+  it('returns true at 15:30 IST (inside the extended derivatives session)', () => {
+    vi.setSystemTime(new Date('2026-07-24T15:30:00+05:30'))
+    expect(isNseMarketOpen()).toBe(true)
+  })
+
+  it('returns false on an NSE trading holiday (weekday)', () => {
+    vi.setSystemTime(new Date('2026-10-20T12:00:00+05:30')) // Dussehra (Tuesday)
     expect(isNseMarketOpen()).toBe(false)
   })
 
@@ -71,9 +81,9 @@ describe('isNseMarketOpen', () => {
     expect(isNseMarketOpen()).toBe(true)
   })
 
-  it('returns false at exactly 15:30 IST', () => {
-    vi.setSystemTime(new Date('2026-07-24T15:30:00+05:30'))
-    expect(isNseMarketOpen()).toBe(false)
+  it('returns true at exactly 15:40 IST (inclusive derivatives close)', () => {
+    vi.setSystemTime(new Date('2026-07-24T15:40:00+05:30'))
+    expect(isNseMarketOpen()).toBe(true)
   })
 })
 
