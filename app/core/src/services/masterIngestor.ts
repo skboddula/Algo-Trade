@@ -7,6 +7,7 @@ import type {
   VrdData,
   AllSignalData,
 } from '../types'
+import { UNDERLYING_INSTRUMENT_KEYS } from '../types'
 import { computeAllIndicators } from './indicators'
 import { getFinalSignal } from './strategyEngine'
 import { DEFAULT_STRATEGY_CONFIG } from '../constants'
@@ -44,12 +45,25 @@ export interface MasterIngestorConfig {
   settingsStore?: SettingsStore | null
 }
 
+/**
+ * Upstox's intraday candle endpoint returns candles newest-first; the core
+ * indicator engine expects chronological (oldest→newest) order. Reverse only
+ * when needed so the WS merge (`append when newer`) stays consistent.
+ */
+export function normalizeCandleOrder(rows: Candle[]): Candle[] {
+  if (rows.length < 2) return rows
+  return rows[0][0] > rows[rows.length - 1][0] ? [...rows].reverse() : rows
+}
+
 export class MasterIngestionEngine extends EventEmitter {
+  private static readonly CANDLE_REFRESH_MS = 30_000
   private isRunning = false
   private timer: NodeJS.Timeout | null = null
   private candleBuffer: Map<UnderlyingSymbol, Candle[]> = new Map()
   private latestSnapshots: Map<UnderlyingSymbol, MarketSnapshot> = new Map()
   private latestOptionChains: Map<UnderlyingSymbol, OptionData[]> = new Map()
+  private lastCandleFetchMs: Map<UnderlyingSymbol, number> = new Map()
+  private lastCandlesAtMs: Map<UnderlyingSymbol, number> = new Map()
   private latestVrd: VrdData | null = null
   private config: MasterIngestorConfig
   private consecutiveFailedTicks = 0
@@ -199,8 +213,10 @@ export class MasterIngestionEngine extends EventEmitter {
       })
 
       const spotPrice = acquired.spotPrice
-      const candles = acquired.candles
       const optionChain = acquired.optionChain
+      // Real-candle backfill: replaces boot-time synthetic seeds with the
+      // day's actual 1-minute candles (throttled; keeps fallback on failure).
+      const candles = await this.fetchLiveCandles(symbol, acquired.candles)
       this.candleBuffer.set(symbol, candles)
       this.latestOptionChains.set(symbol, optionChain)
 
@@ -291,6 +307,63 @@ export class MasterIngestionEngine extends EventEmitter {
   private fireAlert(text: string): void {
     if (!this.config.notifier) return
     void this.config.notifier(text)
+  }
+
+  /**
+   * Warm/refresh the candle buffer from Upstox's intraday 1-minute endpoint.
+   *
+   * Without this, the buffer runs on synthetic boot seeds (fixed base prices
+   * far from live levels) until enough live minutes accumulate — the
+   * seed→real transition reads as a spurious breakout, producing bogus
+   * signals after every daemon restart. Throttled per symbol; on any failure
+   * the previous buffer is kept.
+   */
+  private async fetchLiveCandles(
+    symbol: UnderlyingSymbol,
+    fallback: Candle[],
+  ): Promise<Candle[]> {
+    if (this.config.mockMode || !this.config.primaryUpstoxToken) return fallback
+    const nowMs = Date.now()
+    const lastFetch = this.lastCandleFetchMs.get(symbol) ?? 0
+    if (nowMs - lastFetch < MasterIngestionEngine.CANDLE_REFRESH_MS) return fallback
+    this.lastCandleFetchMs.set(symbol, nowMs)
+    try {
+      const instrumentKey = UNDERLYING_INSTRUMENT_KEYS[symbol]
+      const res = await fetch(
+        `${this.config.upstoxApiBaseUrl}/historical-candle/intraday/${encodeURIComponent(instrumentKey)}/1minute`,
+        {
+          headers: {
+            Authorization: `Bearer ${this.config.primaryUpstoxToken}`,
+            Accept: 'application/json',
+          },
+        },
+      )
+      if (!res.ok) return fallback
+      const data = (await res.json()) as { data?: { candles?: unknown[] } }
+      const rows = (data?.data?.candles ?? [])
+        .filter(
+          (row): row is Candle =>
+            Array.isArray(row) &&
+            row.length >= 6 &&
+            typeof row[0] === 'string' &&
+            Number.isFinite(Date.parse(row[0])) &&
+            Number.isFinite(row[4]),
+        )
+        // Canonicalize to the same ISO form the WS feed and seeds use so the
+        // per-minute in-place update in mergeOhlcIntoCandles keeps matching.
+        .map((row) => [new Date(row[0]).toISOString(), row[1], row[2], row[3], row[4], row[5]] as Candle)
+      if (!rows.length) return fallback
+      this.lastCandlesAtMs.set(symbol, Date.now())
+      return normalizeCandleOrder(rows)
+    } catch {
+      return fallback
+    }
+  }
+
+  /** Age (ms) of the last successful live candle backfill, or null if none. */
+  public getCandlesAgeMs(symbol: UnderlyingSymbol): number | null {
+    const at = this.lastCandlesAtMs.get(symbol)
+    return at === undefined ? null : Date.now() - at
   }
 
   private generateSeedCandles(symbol: UnderlyingSymbol): Candle[] {

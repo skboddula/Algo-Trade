@@ -242,6 +242,43 @@ describe('UpstoxFeedV3Source', () => {
     expect(second.candles[2][5]).toBe(150)
   })
 
+  it('appends live I1 candles to a full-day buffer without truncating it (cap 1500)', async () => {
+    const h = await startHarness()
+    activeHarness = h
+    const now = Date.now()
+    const candles: Candle[] = Array.from({ length: 300 }, (_, i) => {
+      const ts = new Date(now - (300 - i) * 60_000).toISOString()
+      return [ts, 25000 + i, 25010 + i, 24990 + i, 25000 + i, 1000] as Candle
+    })
+
+    // A REST-warmed full-day series (≥300 candles) must survive WS merges.
+    await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't0', candles, optionChain: [] })
+    await waitFor(() => h.source.getConnectionState() === 'open', 3000, 'ws open')
+
+    sendToLatest(
+      h,
+      indexFeedFrame('NSE_INDEX|Nifty 50', 25350, {
+        open: 25340,
+        high: 25360,
+        low: 25330,
+        close: 25350,
+        vol: 500,
+        ts: now,
+      }),
+    )
+
+    const res = await waitFor(
+      async () => {
+        const snapshot = await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't1', candles, optionChain: [] })
+        return snapshot.candles.length === 301 ? snapshot : null
+      },
+      3000,
+      'full buffer kept + appended',
+    )
+    expect(res.candles[0][0]).toBe(candles[0][0])
+    expect(res.candles[300][4]).toBe(25350)
+  })
+
   it('flags a silent feed during market hours and recovers on the next frame', async () => {
     const h = await startHarness({ source: { staleMs: 40 } })
     activeHarness = h

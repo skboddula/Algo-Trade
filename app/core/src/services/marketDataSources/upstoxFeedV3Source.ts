@@ -89,6 +89,12 @@ const DEFAULT_STATS_INTERVAL_MS = 60_000
 const MAX_OPTION_SUBSCRIPTIONS = 90
 const EXPIRY_RETRY_MS = 60_000
 const I1_INTERVAL = 'I1'
+/**
+ * Generous candle-buffer cap: the REST backfill installs a full day of
+ * 1-minute candles (~375), so the old 100-candle cap would truncate it on
+ * the first WS merge. 1500 ≈ four sessions of headroom.
+ */
+const MAX_CANDLE_BUFFER = 1500
 
 const INSTRUMENT_KEY_TO_SYMBOL: Record<string, UnderlyingSymbol> = Object.fromEntries(
   (Object.entries(UNDERLYING_INSTRUMENT_KEYS) as [UnderlyingSymbol, string][]).map(([symbol, key]) => [key, symbol]),
@@ -608,7 +614,7 @@ function extractIndexTick(feed: DecodedFeed): IndexTick | null {
 /**
  * Merge one live I1 OHLC entry into the candle series:
  * same timestamp updates the open candle in place, newer timestamps append
- * (capped at 100), older ones are ignored.
+ * (capped at MAX_CANDLE_BUFFER), older ones are ignored.
  */
 function mergeOhlcIntoCandles(candles: Candle[], ohlc: DecodedOhlc): Candle[] {
   const ts = ohlc.ts
@@ -621,7 +627,7 @@ function mergeOhlcIntoCandles(candles: Candle[], ohlc: DecodedOhlc): Candle[] {
   const last = candles[candles.length - 1]
   if (!last) return [candle]
   if (timestamp === last[0]) return [...candles.slice(0, -1), candle]
-  if (ts > Date.parse(last[0])) return [...candles.slice(-99), candle]
+  if (ts > Date.parse(last[0])) return [...candles.slice(-(MAX_CANDLE_BUFFER - 1)), candle]
   return candles
 }
 

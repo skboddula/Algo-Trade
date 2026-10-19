@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { MasterIngestionEngine } from '../services/masterIngestor'
+import { MasterIngestionEngine, normalizeCandleOrder } from '../services/masterIngestor'
+import type { Candle } from '../types'
 
 describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
   it('initializes and computes snapshots for all tracked underlying symbols in mock mode', async () => {
@@ -82,5 +83,78 @@ describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
     expect(wsStats.ws.optionKeys).toEqual({ current: 0, peak: 0 })
     expect(wsStats.ws.chain.calls).toBe(0)
     expect(wsStats.ws.lastMessageAgeMs).toBeNull()
+  })
+
+  it('normalizes Upstox newest-first candles to chronological order', () => {
+    const newestFirst: Candle[] = [
+      ['2026-10-19T04:17:00.000Z', 3, 3, 3, 55200, 0],
+      ['2026-10-19T04:16:00.000Z', 2, 2, 2, 55100, 0],
+      ['2026-10-19T04:15:00.000Z', 1, 1, 1, 55000, 0],
+    ]
+    const ascending = normalizeCandleOrder(newestFirst)
+    expect(ascending[0][4]).toBe(55000)
+    expect(ascending[2][4]).toBe(55200)
+
+    // Already-chronological input is returned untouched (no copy churn).
+    expect(normalizeCandleOrder(ascending)).toBe(ascending)
+    // Degenerate inputs pass through.
+    const empty: Candle[] = []
+    expect(normalizeCandleOrder(empty)).toBe(empty)
+    const single: Candle[] = [ascending[0]]
+    expect(normalizeCandleOrder(single)).toBe(single)
+  })
+
+  it('backfills the candle buffer from the live intraday endpoint and throttles refetch', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: 'success',
+          data: {
+            candles: [
+              ['2026-10-19T09:17:00+05:30', 3, 3, 3, 55200, 0],
+              ['2026-10-19T09:16:00+05:30', 2, 2, 2, 55100, 0],
+              ['2026-10-19T09:15:00+05:30', 1, 1, 1, 55000, 0],
+            ],
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const ingestor = new MasterIngestionEngine({ primaryUpstoxToken: 'test-token' })
+      const seed: Candle[] = [['2026-10-19T09:14:00+05:30', 1, 1, 1, 51500, 0]]
+
+      const first = await (ingestor as any).fetchLiveCandles('BANKNIFTY', seed)
+      expect(first).toHaveLength(3)
+      // Chronological order restored, timestamps canonicalized to ISO-Z.
+      expect(first[0][4]).toBe(55000)
+      expect(first[2][4]).toBe(55200)
+      expect(first[0][0]).toBe('2026-10-19T03:45:00.000Z')
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(String(fetchMock.mock.calls[0][0])).toContain(
+        '/historical-candle/intraday/NSE_INDEX%7CNifty%20Bank/1minute',
+      )
+      expect(ingestor.getCandlesAgeMs('BANKNIFTY')).not.toBeNull()
+
+      // Within the 30s throttle window: no extra request, fallback returned.
+      const second = await (ingestor as any).fetchLiveCandles('BANKNIFTY', first)
+      expect(second).toBe(first)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('keeps the previous buffer when the backfill fetch fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('nope', { status: 500 })))
+    try {
+      const ingestor = new MasterIngestionEngine({ primaryUpstoxToken: 'test-token' })
+      const seed: Candle[] = [['2026-10-19T09:14:00+05:30', 1, 1, 1, 51500, 0]]
+      const out = await (ingestor as any).fetchLiveCandles('NIFTY 50', seed)
+      expect(out).toBe(seed)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
