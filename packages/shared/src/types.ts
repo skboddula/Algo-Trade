@@ -249,6 +249,14 @@ export interface StrategyConfig {
   maxTradesPerDay: number
   /** Optional global cap across ALL symbols per IST day (CR-14). Unset = off. */
   maxTotalTradesPerDay?: number
+  /**
+   * Daily loss kill switch (IST day): when mark-to-market day P&L (realized
+   * exits + open-position unrealized) falls to −pct% of the day-start equity,
+   * new entries are blocked for the rest of the day. Unset or ≤0 = off.
+   * Sticky: once tripped it stays tripped until the next IST day, even if the
+   * value is later raised.
+   */
+  maxDailyLossPct?: number
   lastEntryTime: string
   /** EOD square-off time (IST HH:MM) — open positions are force-closed at
    *  this time; independent of lastEntryTime (entries close earlier than
@@ -492,6 +500,16 @@ export interface UserBotState {
   lastExitTimes: Record<string, number>
   totalRealizedPnl: number
   paperBalance: number
+  /** Realized P&L for the current IST day, in paise (reset at day rollover). */
+  realizedPnlToday?: number
+  /** Equity snapshot (paise) captured at the first market tick of the IST day. */
+  dayStartEquity?: number | null
+  /** Provenance of `dayStartEquity` (dashboard/ops telemetry). */
+  dayStartEquitySource?: 'paper-ledger' | 'upstox-funds' | 'paper-fallback' | null
+  /** True once the daily loss kill switch tripped (blocks entries until next IST day). */
+  dailyLossTripped?: boolean
+  /** ISO timestamp of the kill-switch trip. */
+  dailyLossTrippedAt?: string | null
   error?: string
   updatedAt: string
 }

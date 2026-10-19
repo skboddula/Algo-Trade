@@ -517,4 +517,189 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
       vi.useRealTimers()
     }
   })
+
+  it('trips the daily loss kill switch and blocks entries for the rest of the day', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const gateway = new OrderGateway()
+      const notifier = vi.fn()
+      const manager = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        gateway,
+        { notifier },
+      )
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+
+      manager.startBot('risk', 'paper')
+      manager.updateConfig('risk', {
+        underlyingMode: 'NIFTY 50',
+        lastEntryTime: '23:59',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+        maxDailyLossPct: 10,
+      })
+      const user = manager.getOrCreateUser('risk')
+      user.paperBalance = 10_000_000 // ₹1,00,000 in paise
+      user.realizedPnlToday = -10_00_001 // ₹10,000.01 — just past the 10% limit
+
+      const { tick } = buildEntryTick()
+      await (manager as any).handleMarketTick(tick)
+
+      expect(user.dayStartEquity).toBe(10_000_000)
+      expect(user.dayStartEquitySource).toBe('paper-ledger')
+      expect(user.dailyLossTripped).toBe(true)
+      expect(user.dailyLossTrippedAt).toBeTruthy()
+      expect(user.positions['NIFTY 50']).toBeNull()
+      expect(placeSpy).not.toHaveBeenCalled()
+      expect(notifier).toHaveBeenCalledTimes(1)
+      expect(String(notifier.mock.calls[0][0])).toContain('DAILY LOSS LIMIT')
+      placeSpy.mockRestore()
+    } finally {
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('allows entries while day P&L is inside the daily loss limit', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    try {
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(new MasterIngestionEngine({ mockMode: true }), gateway)
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+
+      manager.startBot('inside-limit', 'paper')
+      manager.updateConfig('inside-limit', {
+        underlyingMode: 'NIFTY 50',
+        lastEntryTime: '23:59',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+        maxDailyLossPct: 10,
+      })
+      const user = manager.getOrCreateUser('inside-limit')
+      user.paperBalance = 10_000_000
+      user.realizedPnlToday = -9_99_999 // −₹9,999.99 — inside the 10% limit
+
+      const { tick } = buildEntryTick()
+      await (manager as any).handleMarketTick(tick)
+
+      expect(user.dailyLossTripped).toBe(false)
+      expect(placeSpy).toHaveBeenCalledTimes(1)
+      expect(user.positions['NIFTY 50']).not.toBeNull()
+      placeSpy.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not trip when maxDailyLossPct is unset', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    try {
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(new MasterIngestionEngine({ mockMode: true }), gateway)
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+
+      manager.startBot('no-cap', 'paper')
+      manager.updateConfig('no-cap', {
+        underlyingMode: 'NIFTY 50',
+        lastEntryTime: '23:59',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+      })
+      const user = manager.getOrCreateUser('no-cap')
+      user.realizedPnlToday = -99_00_000 // a huge loss must not matter when off
+
+      const { tick } = buildEntryTick()
+      await (manager as any).handleMarketTick(tick)
+
+      expect(user.dailyLossTripped).toBeFalsy()
+      expect(user.dayStartEquity).toBeNull()
+      expect(placeSpy).toHaveBeenCalledTimes(1)
+      placeSpy.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('resets the daily loss kill switch on the next IST day', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    try {
+      const manager = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        new OrderGateway(),
+      )
+      const user = manager.getOrCreateUser('rollover')
+      user.dailyLossTripped = true
+      user.dailyLossTrippedAt = new Date().toISOString()
+      user.realizedPnlToday = -5_00_000
+      user.dayStartEquity = 10_000_000
+      user.tradesCountToday = 4
+      user.lastTradeDate = '2026-10-18' // previous IST day
+
+      const refreshed = manager.getOrCreateUser('rollover')
+      expect(refreshed.dailyLossTripped).toBe(false)
+      expect(refreshed.dailyLossTrippedAt).toBeNull()
+      expect(refreshed.realizedPnlToday).toBe(0)
+      expect(refreshed.dayStartEquity).toBeNull()
+      expect(refreshed.dayStartEquitySource).toBeNull()
+      expect(refreshed.tradesCountToday).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('books realized P&L into the daily loss basis on exit', async () => {
+    const gateway = new OrderGateway()
+    const manager = new TenantManager(new MasterIngestionEngine({ mockMode: true }), gateway)
+    manager.startBot('pnl', 'paper')
+
+    const user = manager.getOrCreateUser('pnl')
+    user.positions['NIFTY 50'] = {
+      instrumentKey: 'NSE_FO|OPT_24000_CE',
+      direction: 'CE',
+      entryPrice: 100,
+      quantity: 65,
+      entryTime: new Date().toISOString(),
+      tradeId: Date.now(),
+      executionMode: 'paper',
+      currentPrice: 110,
+      tradeType: 'buying',
+      underlyingSymbol: 'NIFTY 50',
+    }
+    user.state = 'ORDERED'
+
+    await manager.manualExit('pnl', 'NIFTY 50', 'test exit')
+
+    // 110 × 0.999 paper slippage = 109.89 → (109.89 − 100) × 65 = ₹642.85
+    expect(user.realizedPnlToday).toBe(64_285)
+  })
+
+  it('tags the paper-ledger fallback when live equity is unavailable', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const ingestor = new MasterIngestionEngine({ mockMode: true })
+      vi.spyOn(ingestor, 'getMasterToken').mockReturnValue(undefined)
+      const manager = new TenantManager(ingestor, new OrderGateway())
+      const user = manager.getOrCreateUser('live-base')
+      user.executionMode = 'live'
+      user.config.executionMode = 'live'
+      user.config.maxDailyLossPct = 10
+      user.paperBalance = 9_500_000
+
+      await (manager as any).updateDailyRisk(user)
+
+      expect(user.dayStartEquity).toBe(9_500_000)
+      expect(user.dayStartEquitySource).toBe('paper-fallback')
+      expect(user.dailyLossTripped).toBe(false)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
 })

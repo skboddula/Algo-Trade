@@ -65,6 +65,14 @@ export interface TelegramDailySummary {
   vixLast?: number
 }
 
+export interface TelegramDailyLossAlert {
+  /** ALL MONEY VALUES IN RUPEES (convert paise before calling). */
+  dayPnl: number
+  dayStartEquity: number
+  limitPct: number
+  source: string
+}
+
 function fmtNum(value: number): string {
   return value.toFixed(2).replace(/\.00$/, '')
 }
@@ -154,6 +162,20 @@ export function buildDailySummaryMessage(data: TelegramDailySummary): string {
     lines.push(`VIX (last): ${data.vixLast.toFixed(1)}`)
   }
   return lines.join('\n')
+}
+
+/** Daily loss kill switch — new entries are blocked for the rest of the day. */
+export function buildDailyLossAlertMessage(alert: TelegramDailyLossAlert): string {
+  const lossPct =
+    alert.dayStartEquity > 0
+      ? Math.abs(alert.dayPnl / alert.dayStartEquity) * 100
+      : 0
+  return [
+    `🛑 DAILY LOSS LIMIT — entries blocked for the rest of the day`,
+    `Day P&L: −₹${Math.abs(alert.dayPnl).toFixed(2)} (${lossPct.toFixed(2)}%) · limit −${fmtNum(alert.limitPct)}%`,
+    `Base: ₹${alert.dayStartEquity.toFixed(2)} (${alert.source})`,
+    `Open positions keep their stops. No new entries until the next trading day.`,
+  ].join('\n')
 }
 
 /**

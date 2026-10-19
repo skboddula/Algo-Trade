@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  buildDailyLossAlertMessage,
   buildDailySummaryMessage,
   buildEntryAlertMessage,
   buildExitAlertMessage,
@@ -132,5 +133,21 @@ describe('buildDailySummaryMessage', () => {
     expect(msg).toContain('Paper Balance: ₹98620.23')
     expect(msg).toContain('Best: FINNIFTY CE +₹1423.74')
     expect(msg).toContain('Worst: BANKNIFTY PE −₹1152.29')
+  })
+})
+
+describe('buildDailyLossAlertMessage', () => {
+  it('states the day P&L, limit and equity-base provenance', () => {
+    const msg = buildDailyLossAlertMessage({
+      dayPnl: -10000.01,
+      dayStartEquity: 100000,
+      limitPct: 10,
+      source: 'paper-ledger',
+    })
+
+    expect(msg).toContain('🛑 DAILY LOSS LIMIT — entries blocked for the rest of the day')
+    expect(msg).toContain('Day P&L: −₹10000.01 (10.00%) · limit −10%')
+    expect(msg).toContain('Base: ₹100000.00 (paper-ledger)')
+    expect(msg).toContain('No new entries until the next trading day.')
   })
 })

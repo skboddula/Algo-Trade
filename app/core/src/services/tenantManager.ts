@@ -23,11 +23,41 @@ import { getIndiaTime } from '../utils/timeUtils'
 import type { StateStore } from './stateStore'
 import type { Notifier } from './notifier'
 import {
+  buildDailyLossAlertMessage,
   buildDailySummaryMessage,
   buildEntryAlertMessage,
   buildExitAlertMessage,
   buildVixAlertMessage,
 } from '../../../../packages/shared/src/telegram'
+import { fetchUpstoxFunds } from '../../../../packages/shared/src/upstoxRest'
+
+/**
+ * Best-effort equity (₹) from an Upstox v3 `get-funds-and-margin` payload.
+ * Prefers `available_to_trade.total`, falling back to cash + pledge totals.
+ */
+function extractUpstoxEquity(payload: unknown): number | null {
+  const body = (payload as { data?: unknown } | null)?.data ?? payload
+  const available = (
+    body as {
+      available_to_trade?: {
+        total?: number
+        cash_available_to_trade?: { total?: number }
+        pledge_available_to_trade?: { total?: number }
+      }
+    } | null
+  )?.available_to_trade
+  if (!available) return null
+  if (typeof available.total === 'number' && Number.isFinite(available.total)) {
+    return available.total
+  }
+  const cash = available.cash_available_to_trade?.total
+  const pledge = available.pledge_available_to_trade?.total
+  if (typeof cash === 'number' || typeof pledge === 'number') {
+    return (typeof cash === 'number' ? cash : 0) +
+      (typeof pledge === 'number' ? pledge : 0)
+  }
+  return null
+}
 
 export class TenantManager extends EventEmitter {
   /** Env var that arms live trading server-side (client confirms are only UX). */
@@ -121,16 +151,22 @@ export class TenantManager extends EventEmitter {
         lastExitTimes: {},
         totalRealizedPnl: 0,
         paperBalance: paperAccount.balance,
+        realizedPnlToday: 0,
+        dayStartEquity: null,
+        dayStartEquitySource: null,
+        dailyLossTripped: false,
+        dailyLossTrippedAt: null,
         updatedAt: istInfo.date.toISOString(),
       }
       this.users.set(userId, user)
       this.persistUser(user, true)
     } else {
+      // Rows persisted before the daily-loss switch lack these fields.
+      this.normalizeDailyRisk(user)
       // Date rollover check: reset daily counts if new IST trading day
       if (user.lastTradeDate !== istInfo.dateString) {
         user.lastTradeDate = istInfo.dateString
-        user.tradesCountToday = 0
-        user.tradesCountPerSymbol = {}
+        this.resetDailyState(user)
         this.persistUser(user, true)
       }
       const paperAccount = this.orderGateway.getOrCreatePaperAccount(userId)
@@ -195,6 +231,15 @@ export class TenantManager extends EventEmitter {
   public syncPaperBalance(userId: string): UserBotState {
     const user = this.getOrCreateUser(userId)
     user.paperBalance = this.orderGateway.getOrCreatePaperAccount(userId).balance
+    // A manual paper ledger set/adjust/reset restarts the daily-risk baseline;
+    // otherwise a reset would carry a stale day-start equity or tripped flag.
+    if (user.executionMode !== 'live') {
+      user.realizedPnlToday = 0
+      user.dayStartEquity = null
+      user.dayStartEquitySource = null
+      user.dailyLossTripped = false
+      user.dailyLossTrippedAt = null
+    }
     user.updatedAt = new Date().toISOString()
     this.emitUserUpdate(user)
     this.persistUser(user, true)
@@ -269,7 +314,7 @@ export class TenantManager extends EventEmitter {
     const position = user.positions[symbol]
     if (position) {
       const exitPrice = position.currentPrice || position.entryPrice
-      await this.orderGateway.exitOrder({
+      const exitRes = await this.orderGateway.exitOrder({
         userId,
         executionMode: user.executionMode,
         token: this.resolveOrderToken(user),
@@ -277,6 +322,18 @@ export class TenantManager extends EventEmitter {
         exitPrice,
         reason,
       })
+
+      // Book the day's realized P&L for the daily loss kill switch. The fill
+      // returned by the gateway includes simulated paper slippage.
+      if (exitRes.success) {
+        const fillPrice = exitRes.filledPrice > 0 ? exitRes.filledPrice : exitPrice
+        const pnlPerUnit =
+          position.tradeType === 'selling'
+            ? position.entryPrice - fillPrice
+            : fillPrice - position.entryPrice
+        user.realizedPnlToday =
+          (user.realizedPnlToday || 0) + Math.round(pnlPerUnit * position.quantity * 100)
+      }
 
       user.positions[symbol] = null
       user.lastExitTimes[symbol] = Date.now()
@@ -301,6 +358,117 @@ export class TenantManager extends EventEmitter {
     return user.upstoxToken || this.masterIngestor.getMasterToken()
   }
 
+  /** Backfill daily-risk fields on rows persisted before the kill switch. */
+  private normalizeDailyRisk(user: UserBotState): void {
+    if (user.realizedPnlToday === undefined) user.realizedPnlToday = 0
+    if (user.dayStartEquity === undefined) user.dayStartEquity = null
+    if (user.dayStartEquitySource === undefined) user.dayStartEquitySource = null
+    if (user.dailyLossTripped === undefined) user.dailyLossTripped = false
+    if (user.dailyLossTrippedAt === undefined) user.dailyLossTrippedAt = null
+  }
+
+  /** Reset IST-day counters and the daily-risk baseline (date rollover). */
+  private resetDailyState(user: UserBotState): void {
+    user.tradesCountToday = 0
+    user.tradesCountPerSymbol = {}
+    user.realizedPnlToday = 0
+    user.dayStartEquity = null
+    user.dayStartEquitySource = null
+    user.dailyLossTripped = false
+    user.dailyLossTrippedAt = null
+  }
+
+  /**
+   * Daily loss kill switch (mark-to-market, IST day). Runs once per market
+   * tick per user:
+   *  1. Captures the day-start equity base on the first tick of the day.
+   *  2. Trips when realized-today + open-position unrealized falls to
+   *     −maxDailyLossPct% of that base. Sticky until the next IST day.
+   *
+   * Open positions keep running their own stops — only new entries are
+   * blocked, so a bad day cannot compound through fresh trades.
+   */
+  private async updateDailyRisk(user: UserBotState): Promise<void> {
+    if (user.dailyLossTripped) return
+    const pct = user.config.maxDailyLossPct
+    if (pct === undefined || pct <= 0) return
+
+    if (user.dayStartEquity == null) {
+      await this.captureDayStartEquity(user)
+      if (user.dayStartEquity == null) return
+    }
+
+    const unrealizedPaise = Object.values(user.positions).reduce(
+      (sum, position) => sum + (position?.unrealizedPnl || 0),
+      0,
+    )
+    const dayPnlPaise = (user.realizedPnlToday || 0) + unrealizedPaise
+    const limitPaise = -(pct / 100) * user.dayStartEquity
+    if (dayPnlPaise > limitPaise) return
+
+    user.dailyLossTripped = true
+    user.dailyLossTrippedAt = new Date().toISOString()
+    this.persistUser(user, true)
+    console.warn(
+      `[daily-loss] ${user.userId}: MTM day P&L ₹${(dayPnlPaise / 100).toFixed(2)} hit the ` +
+        `−${pct}% limit (base ₹${(user.dayStartEquity / 100).toFixed(2)}, ` +
+        `source ${user.dayStartEquitySource}) — entries blocked for the day`,
+    )
+    this.sendDailyLossAlert(user, dayPnlPaise)
+  }
+
+  /**
+   * Snapshot today's equity base for the daily loss kill switch.
+   * Paper: the local ledger. Live: Upstox funds (available-to-trade total).
+   * If live equity is unavailable the paper ledger is used as a visibly
+   * tagged fallback (`paper-fallback`) rather than leaving the day ungated.
+   */
+  private async captureDayStartEquity(user: UserBotState): Promise<void> {
+    if (user.executionMode !== 'live') {
+      user.dayStartEquity = user.paperBalance
+      user.dayStartEquitySource = 'paper-ledger'
+      this.persistUser(user, true)
+      return
+    }
+
+    const token = this.resolveOrderToken(user)
+    if (token) {
+      try {
+        const { status, data } = await fetchUpstoxFunds(token, 10_000)
+        const equityRupees =
+          status >= 200 && status < 300 ? extractUpstoxEquity(data) : null
+        if (equityRupees !== null && equityRupees > 0) {
+          user.dayStartEquity = Math.round(equityRupees * 100)
+          user.dayStartEquitySource = 'upstox-funds'
+          this.persistUser(user, true)
+          return
+        }
+      } catch (err) {
+        console.warn(
+          `[daily-loss] ${user.userId}: funds fetch failed — ${(err as Error).message}`,
+        )
+      }
+    }
+
+    user.dayStartEquity = user.paperBalance
+    user.dayStartEquitySource = 'paper-fallback'
+    console.warn(
+      `[daily-loss] ${user.userId}: live equity unavailable — using the paper ledger as the daily-loss base`,
+    )
+    this.persistUser(user, true)
+  }
+
+  private sendDailyLossAlert(user: UserBotState, dayPnlPaise: number): void {
+    this.fireAlert(
+      buildDailyLossAlertMessage({
+        dayPnl: dayPnlPaise / 100,
+        dayStartEquity: (user.dayStartEquity ?? 0) / 100,
+        limitPct: user.config.maxDailyLossPct ?? 0,
+        source: user.dayStartEquitySource ?? 'unknown',
+      }),
+    )
+  }
+
   private async handleMarketTick(tick: { timestamp: string; snapshots: Record<UnderlyingSymbol, MarketSnapshot> }) {
     const istInfo = getIndiaTime()
 
@@ -316,8 +484,7 @@ export class TenantManager extends EventEmitter {
       // Daily rollover check
       if (user.lastTradeDate !== istInfo.dateString) {
         user.lastTradeDate = istInfo.dateString
-        user.tradesCountToday = 0
-        user.tradesCountPerSymbol = {}
+        this.resetDailyState(user)
         this.persistUser(user, true)
       }
 
@@ -344,6 +511,10 @@ export class TenantManager extends EventEmitter {
         }
         continue
       }
+
+      // Daily loss kill switch: capture the day-start equity base and trip
+      // when MTM day P&L crosses the configured limit (sticky for the day).
+      await this.updateDailyRisk(user)
 
       const targetSymbols: UnderlyingSymbol[] =
         user.config.underlyingMode === 'ALL_PARALLEL'
@@ -422,6 +593,15 @@ export class TenantManager extends EventEmitter {
         // `position` check above is the duplicate guard).
         const entriesEnabled = user.state === 'RUNNING' || user.state === 'ORDERED'
         if (!position && entriesEnabled && !afterEntryCutoff) {
+          // Daily loss kill switch: sticky for the rest of the IST day.
+          if (user.dailyLossTripped) {
+            this.warnGate(
+              `${symbol}:daily-loss`,
+              `[daily-loss] [${symbol}] Entry blocked — ${user.config.maxDailyLossPct}% daily loss limit reached`,
+            )
+            continue
+          }
+
           // CR-15 (entry path): a failed state write means the persisted state
           // no longer matches reality. Block new LIVE entries until writes
           // recover; paper entries continue in-memory (the fault is surfaced).
