@@ -158,9 +158,12 @@ describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
     }
   })
 
-  it('exposes CR-11 candles-arm entry blockers until a real backfill lands', async () => {
+  it('exposes CR-11 freshness blockers until live data lands (REST arms)', async () => {
     const live = new MasterIngestionEngine({ primaryUpstoxToken: 'test-token' })
-    expect(live.getEntryBlockers('BANKNIFTY')).toEqual(['candles/indicators stale or missing'])
+    expect(live.getEntryBlockers('BANKNIFTY')).toEqual([
+      'underlying quote stale or missing',
+      'candles/indicators stale or missing',
+    ])
 
     vi.stubGlobal(
       'fetch',
@@ -173,11 +176,21 @@ describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
     )
     try {
       await (live as any).fetchLiveCandles('BANKNIFTY', [])
+      // Candles have landed; the REST quote stamp only flips on a successful acquire.
+      expect(live.getEntryBlockers('BANKNIFTY')).toEqual(['underlying quote stale or missing'])
+
+      ;(live as any).lastQuoteAtMs.set('BANKNIFTY', Date.now())
       expect(live.getEntryBlockers('BANKNIFTY')).toEqual([])
 
-      // A backfill older than CANDLES_MAX_AGE_MS gates entries again.
+      // A stale backfill gates entries again…
       ;(live as any).lastCandlesAtMs.set('BANKNIFTY', Date.now() - 200_000)
       expect(live.getEntryBlockers('BANKNIFTY')).toEqual(['candles/indicators stale or missing'])
+
+      // …and so does a stale quote (REST arms cover quote + candles; chains
+      // pass through untouched there and are not gated).
+      ;(live as any).lastCandlesAtMs.set('BANKNIFTY', Date.now())
+      ;(live as any).lastQuoteAtMs.set('BANKNIFTY', Date.now() - 40_000)
+      expect(live.getEntryBlockers('BANKNIFTY')).toEqual(['underlying quote stale or missing'])
     } finally {
       vi.unstubAllGlobals()
     }
@@ -186,5 +199,46 @@ describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
     // is never gated.
     expect(new MasterIngestionEngine({ mockMode: true }).getEntryBlockers('BANKNIFTY')).toEqual([])
     expect(new MasterIngestionEngine({}).getEntryBlockers('BANKNIFTY')).toEqual([])
+  })
+
+  it('derives WS freshness arms from the live feed (index ticks + chain refresh)', async () => {
+    const ws = new MasterIngestionEngine({ liveSource: 'ws', primaryUpstoxToken: 'test-token' })
+    const feed = (ws as any).wsSource
+    feed.getLastIndexTickAgeMs = () => 5_000
+    feed.getLastChainSuccessAgeMs = () => 5_000
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ data: { candles: [['2026-10-19T09:15:00+05:30', 1, 1, 1, 55000, 0]] } }),
+          { status: 200 },
+        ),
+      ),
+    )
+    try {
+      await (ws as any).fetchLiveCandles('BANKNIFTY', [])
+      expect(ws.getEntryBlockers('BANKNIFTY')).toEqual([])
+
+      feed.getLastChainSuccessAgeMs = () => 90_000
+      expect(ws.getEntryBlockers('BANKNIFTY')).toEqual(['option chain stale or missing'])
+
+      feed.getLastIndexTickAgeMs = () => null
+      expect(ws.getEntryBlockers('BANKNIFTY')).toEqual([
+        'underlying quote stale or missing',
+        'option chain stale or missing',
+      ])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('stamps snapshot.sources on every tick (empty blocker list in mock mode)', async () => {
+    const mock = new MasterIngestionEngine({ mockMode: true })
+    await mock.fetchAndComputeMarketData()
+    const sources = mock.getSnapshot('NIFTY 50')?.sources
+    expect(sources).toBeDefined()
+    expect(sources?.entryBlockedReasons).toEqual([])
+    expect(sources?.quoteAgeMs).toBeNull()
   })
 })

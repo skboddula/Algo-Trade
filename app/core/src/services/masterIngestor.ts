@@ -58,7 +58,9 @@ export function normalizeCandleOrder(rows: Candle[]): Candle[] {
 export class MasterIngestionEngine extends EventEmitter {
   private static readonly CANDLE_REFRESH_MS = 30_000
   /** CR-11: entries are blocked when the candle backfill is older than this. */
+  private static readonly QUOTE_MAX_AGE_MS = 30_000
   private static readonly CANDLES_MAX_AGE_MS = 120_000
+  private static readonly CHAIN_MAX_AGE_MS = 60_000
   private isRunning = false
   private timer: NodeJS.Timeout | null = null
   private candleBuffer: Map<UnderlyingSymbol, Candle[]> = new Map()
@@ -66,6 +68,8 @@ export class MasterIngestionEngine extends EventEmitter {
   private latestOptionChains: Map<UnderlyingSymbol, OptionData[]> = new Map()
   private lastCandleFetchMs: Map<UnderlyingSymbol, number> = new Map()
   private lastCandlesAtMs: Map<UnderlyingSymbol, number> = new Map()
+  /** REST-mode stamp: last successful per-symbol quote acquire (CR-11). */
+  private lastQuoteAtMs: Map<UnderlyingSymbol, number> = new Map()
   private latestVrd: VrdData | null = null
   private config: MasterIngestorConfig
   private consecutiveFailedTicks = 0
@@ -216,6 +220,11 @@ export class MasterIngestionEngine extends EventEmitter {
 
       const spotPrice = acquired.spotPrice
       const optionChain = acquired.optionChain
+      // REST-mode CR-11 stamp: a successful acquire proves the quote just came
+      // off the wire. WS mode tracks per-symbol freshness inside the feed.
+      if (!acquired.fetchFailed && source === this.restSource) {
+        this.lastQuoteAtMs.set(symbol, Date.now())
+      }
       // Real-candle backfill: replaces boot-time synthetic seeds with the
       // day's actual 1-minute candles (throttled; keeps fallback on failure).
       const candles = await this.fetchLiveCandles(symbol, acquired.candles)
@@ -264,6 +273,7 @@ export class MasterIngestionEngine extends EventEmitter {
         indicators,
         vrdData,
         signal: finalSignal,
+        sources: this.buildSourcesBlock(symbol),
       }
 
       this.latestSnapshots.set(symbol, snapshot)
@@ -369,18 +379,55 @@ export class MasterIngestionEngine extends EventEmitter {
   }
 
   /**
-   * CR-11 (candles arm): entry blockers for a symbol. In live mode, entries
-   * are gated until a recent real-candle backfill has succeeded — the
-   * boot-time synthetic seeds must never drive an order (mirrors the
-   * always-on-daemon's stale-data gate). No-op in mock mode / without a token.
+   * CR-11 entry blockers for a symbol (public accessor for callers/tests —
+   * tenants read the same reasons from snapshot.sources). No-op in mock mode /
+   * without a token (mock fallback semantics never gate entries).
    */
   public getEntryBlockers(symbol: UnderlyingSymbol): string[] {
-    if (this.config.mockMode || !this.config.primaryUpstoxToken) return []
-    const at = this.lastCandlesAtMs.get(symbol)
-    if (at === undefined || Date.now() - at > MasterIngestionEngine.CANDLES_MAX_AGE_MS) {
-      return ['candles/indicators stale or missing']
+    return this.buildSourcesBlock(symbol).entryBlockedReasons
+  }
+
+  /**
+   * CR-11 data-freshness block stamped on every snapshot (always-on-daemon
+   * parity). Ages are measured against the data a new entry would rely on:
+   *   - quote:   last index tick for the symbol (WS) / last successful REST
+   *              quote acquire;
+   *   - candles: last successful 1-minute real-candle backfill;
+   *   - chain:   last successful option-chain refresh (WS only — the REST
+   *              transport passes chains through untouched, so the arm is not
+   *              enforceable there).
+   * The VIX arm is intentionally omitted until live VRD/VIX ingestion is
+   * wired: the vrdData fallback re-stamps `fetchedAt` every tick and cannot
+   * prove freshness.
+   */
+  private buildSourcesBlock(symbol: UnderlyingSymbol): NonNullable<MarketSnapshot['sources']> {
+    const now = Date.now()
+    if (this.config.mockMode || !this.config.primaryUpstoxToken) {
+      return { quoteAgeMs: null, candlesAgeMs: null, chainAgeMs: null, vixAgeMs: null, entryBlockedReasons: [] }
     }
-    return []
+
+    const usingWs = this.config.liveSource === 'ws'
+    const quoteAt = usingWs ? undefined : this.lastQuoteAtMs.get(symbol)
+    const quoteAgeMs = usingWs
+      ? this.wsSource.getLastIndexTickAgeMs(symbol)
+      : quoteAt === undefined
+        ? null
+        : now - quoteAt
+    const chainAgeMs = usingWs ? this.wsSource.getLastChainSuccessAgeMs(symbol) : null
+    const candlesAgeMs = this.getCandlesAgeMs(symbol)
+
+    const entryBlockedReasons: string[] = []
+    if (quoteAgeMs === null || quoteAgeMs > MasterIngestionEngine.QUOTE_MAX_AGE_MS) {
+      entryBlockedReasons.push('underlying quote stale or missing')
+    }
+    if (candlesAgeMs === null || candlesAgeMs > MasterIngestionEngine.CANDLES_MAX_AGE_MS) {
+      entryBlockedReasons.push('candles/indicators stale or missing')
+    }
+    if (usingWs && (chainAgeMs === null || chainAgeMs > MasterIngestionEngine.CHAIN_MAX_AGE_MS)) {
+      entryBlockedReasons.push('option chain stale or missing')
+    }
+
+    return { quoteAgeMs, candlesAgeMs, chainAgeMs, vixAgeMs: null, entryBlockedReasons }
   }
 
   private generateSeedCandles(symbol: UnderlyingSymbol): Candle[] {

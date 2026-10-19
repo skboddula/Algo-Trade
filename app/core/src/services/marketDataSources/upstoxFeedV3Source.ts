@@ -140,6 +140,9 @@ export class UpstoxFeedV3Source implements MarketDataSource {
 
   private readonly indexCache = new Map<UnderlyingSymbol, IndexTick>()
   private readonly lastChainFetchAt = new Map<UnderlyingSymbol, number>()
+  // CR-11 freshness: per-symbol timestamps exposed to the entry gate (getters)
+  private readonly lastIndexTickAt = new Map<UnderlyingSymbol, number>()
+  private readonly lastChainSuccessAt = new Map<UnderlyingSymbol, number>()
   private readonly expiryCache = new Map<UnderlyingSymbol, ExpiryCacheEntry>()
 
   // Option-contract streaming (tick-level pricing for open positions + ATM window)
@@ -231,6 +234,24 @@ export class UpstoxFeedV3Source implements MarketDataSource {
       expiry: { calls: this.statExpiry.calls, failures: this.statExpiry.failures },
       lastMessageAgeMs: this.lastMessageAt ? now - this.lastMessageAt : null,
     }
+  }
+
+  /**
+   * CR-11 freshness: age (ms) of the newest index tick for the symbol — the
+   * underlying-quote proxy used by the entry gate. Null before the first tick.
+   */
+  public getLastIndexTickAgeMs(symbol: UnderlyingSymbol): number | null {
+    const at = this.lastIndexTickAt.get(symbol)
+    return at === undefined ? null : Date.now() - at
+  }
+
+  /**
+   * CR-11 freshness: age (ms) of the last SUCCESSFUL option-chain refresh for
+   * the symbol, or null if none has landed since boot.
+   */
+  public getLastChainSuccessAgeMs(symbol: UnderlyingSymbol): number | null {
+    const at = this.lastChainSuccessAt.get(symbol)
+    return at === undefined ? null : Date.now() - at
   }
 
   private markFeedActive(): void {
@@ -377,6 +398,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
         const tick = extractIndexTick(feed)
         if (tick) {
           this.indexCache.set(symbol, tick)
+          this.lastIndexTickAt.set(symbol, Date.now())
           this.statIndexTicks += 1
         }
         continue
@@ -482,6 +504,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
       })
       this.statChain.lastLatencyMs = Date.now() - startedAt
       if (chain.length) {
+        this.lastChainSuccessAt.set(symbol, Date.now())
         this.updateWindowKeys(symbol, chain, spotPrice)
         this.syncOptionSubscriptions()
         return chain

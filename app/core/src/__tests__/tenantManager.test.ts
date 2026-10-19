@@ -70,21 +70,7 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
     }
   })
 
-  it('gates new entries on candle freshness (CR-11 candles arm)', async () => {
-    const ingestor = new MasterIngestionEngine({ mockMode: true })
-    const gateway = new OrderGateway()
-    const manager = new TenantManager(ingestor, gateway)
-    const placeSpy = vi.spyOn(gateway, 'placeOrder')
-
-    manager.startBot('gated', 'paper')
-    manager.updateConfig('gated', {
-      underlyingMode: 'NIFTY 50',
-      lastEntryTime: '23:59', // deterministic: never past cutoff during tests
-      strongThreshold: 1,
-      moderateThreshold: 1,
-      minConfidence: 'moderate',
-    })
-
+  const buildEntryTick = () => {
     const chainRow = {
       expiry: '2099-01-07',
       strike_price: 25000,
@@ -109,24 +95,113 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
         pcrValue: 1,
       },
       signal: { signal: 'BUY_CE', confidence: 'strong', positionSize: 'full' },
+      sources: {
+        quoteAgeMs: 5_000,
+        candlesAgeMs: 5_000,
+        chainAgeMs: 5_000,
+        vixAgeMs: null,
+        entryBlockedReasons: [] as string[],
+      },
     }
     const tick = { timestamp: new Date().toISOString(), snapshots: { 'NIFTY 50': snapshot } }
+    return { snapshot, tick }
+  }
 
-    // No successful candle backfill yet → entry blocked, no order placed.
-    const blockers = vi
-      .spyOn(ingestor, 'getEntryBlockers')
-      .mockReturnValue(['candles/indicators stale or missing'])
-    await (manager as any).handleMarketTick(tick)
-    const gated = manager.getOrCreateUser('gated')
-    expect(placeSpy).not.toHaveBeenCalled()
-    expect(gated.positions['NIFTY 50']).toBeNull()
+  it('gates new entries on snapshot source freshness (CR-11 arms)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    try {
+      const ingestor = new MasterIngestionEngine({ mockMode: true })
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(ingestor, gateway)
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
 
-    // Fresh real candles → gate opens, the same tick enters normally.
-    blockers.mockReturnValue([])
-    await (manager as any).handleMarketTick(tick)
-    expect(placeSpy).toHaveBeenCalledTimes(1)
-    expect(gated.positions['NIFTY 50']).not.toBeNull()
-    placeSpy.mockRestore()
+      manager.startBot('gated', 'paper')
+      manager.updateConfig('gated', {
+        underlyingMode: 'NIFTY 50',
+        lastEntryTime: '23:59', // deterministic: never past cutoff during tests
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+      })
+
+      const { snapshot, tick } = buildEntryTick()
+
+      // Stale sources → entry blocked, no order placed.
+      snapshot.sources.entryBlockedReasons = ['candles/indicators stale or missing']
+      await (manager as any).handleMarketTick(tick)
+      const gated = manager.getOrCreateUser('gated')
+      expect(placeSpy).not.toHaveBeenCalled()
+      expect(gated.positions['NIFTY 50']).toBeNull()
+
+      // Fresh sources → gate opens, the same tick enters normally.
+      snapshot.sources.entryBlockedReasons = []
+      await (manager as any).handleMarketTick(tick)
+      expect(placeSpy).toHaveBeenCalledTimes(1)
+      expect(gated.positions['NIFTY 50']).not.toBeNull()
+      placeSpy.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('squares off positions held outside market hours (off-hours guard)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-10-19T12:30:00.000Z')) // Monday 18:00 IST — after close
+      const ingestor = new MasterIngestionEngine({ mockMode: true })
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(ingestor, gateway)
+
+      manager.startBot('keeper', 'paper')
+      const user = manager.getOrCreateUser('keeper')
+      user.positions['NIFTY 50'] = {
+        instrumentKey: 'NSE_FO|OPT_24000_CE',
+        direction: 'CE',
+        entryPrice: 100,
+        quantity: 65,
+        entryTime: new Date().toISOString(),
+        tradeId: Date.now(),
+        executionMode: 'paper',
+        currentPrice: 110,
+        tradeType: 'buying',
+        underlyingSymbol: 'NIFTY 50',
+      }
+      user.state = 'ORDERED'
+
+      const { tick } = buildEntryTick()
+      await (manager as any).handleMarketTick(tick)
+
+      expect(user.positions['NIFTY 50']).toBeNull()
+      expect(user.state).toBe('RUNNING')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('treats NSE holidays as non-market days (no entries)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-10-20T04:30:00.000Z')) // Tuesday 10:00 IST — Dussehra
+      const ingestor = new MasterIngestionEngine({ mockMode: true })
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(ingestor, gateway)
+
+      manager.startBot('holiday', 'paper')
+      manager.updateConfig('holiday', {
+        underlyingMode: 'NIFTY 50',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+      })
+
+      const { tick } = buildEntryTick()
+      await (manager as any).handleMarketTick(tick)
+
+      expect(manager.getOrCreateUser('holiday').positions['NIFTY 50']).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('allows manual position exit and updates state', async () => {

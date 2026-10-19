@@ -434,6 +434,14 @@ export interface MarketSnapshot {
   indicators?: IndicatorsResult
   vrdData?: VrdData
   signal?: FinalSignal
+  /** CR-11 data-freshness telemetry (live daemon): per-source ages + entry blockers. */
+  sources?: {
+    quoteAgeMs: number | null
+    candlesAgeMs: number | null
+    chainAgeMs: number | null
+    vixAgeMs: number | null
+    entryBlockedReasons: string[]
+  }
 }
 
 export interface UserBotState {

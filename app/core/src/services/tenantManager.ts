@@ -295,6 +295,24 @@ export class TenantManager extends EventEmitter {
       const afterEntryCutoff = istInfo.isAfterCutoff(user.config.lastEntryTime || '15:15')
       const afterSquareOff = istInfo.isAfterCutoff(user.config.squareOffTime || '15:35')
 
+      // ── Market-hours guard (NSE: Mon–Fri, 09:15–15:40 IST, minus holidays) ─
+      // Weekend/off-hours/holiday snapshots are the previous session's frozen
+      // data: signals computed on them are meaningless, and a position held
+      // while the market is closed cannot be managed — square it off
+      // immediately and never evaluate new entries.
+      if (!istInfo.isMarketHours) {
+        for (const symbol of Object.keys(user.positions) as UnderlyingSymbol[]) {
+          if (user.positions[symbol]) {
+            await this.manualExit(
+              userId,
+              symbol,
+              'Market closed — position held outside trading hours',
+            )
+          }
+        }
+        continue
+      }
+
       const targetSymbols: UnderlyingSymbol[] =
         user.config.underlyingMode === 'ALL_PARALLEL'
           ? ['NIFTY 50', 'BANKNIFTY', 'FINNIFTY']
@@ -368,10 +386,11 @@ export class TenantManager extends EventEmitter {
 
         // ── 2. Evaluate New Entry (If no position and before cutoff) ──────────
         if (!position && user.state === 'RUNNING' && !afterEntryCutoff) {
-          // CR-11 (candles arm): never enter while the candle buffer is still
-          // the boot-time synthetic seeds (or stale) — require a recent
-          // successful real-candle backfill. No-op in mock mode.
-          if (this.masterIngestor.getEntryBlockers(symbol).length > 0) continue
+          // CR-11: never enter on stale data — the ingestor stamps
+          // snapshot.sources each tick (quote / candles / chain freshness)
+          // and the blocker list is empty in mock mode.
+          const blockers = snapshot.sources?.entryBlockedReasons
+          if (blockers && blockers.length > 0) continue
           const tradesCount = user.tradesCountPerSymbol[symbol] || 0
           if (tradesCount >= user.config.maxTradesPerDay) continue
 
