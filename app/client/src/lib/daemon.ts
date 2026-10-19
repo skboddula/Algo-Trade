@@ -79,8 +79,19 @@ export interface DaemonUpstoxSettings {
   hasMasterToken: boolean
 }
 
+/** Masked view of the daemon's Telegram alert settings (secrets never returned). */
+export interface DaemonTelegramSettings {
+  hasBotToken: boolean
+  /** Masked prefix of the saved bot token, or null when unset. */
+  botTokenHint: string | null
+  hasChatId: boolean
+  /** Masked suffix of the chat id (e.g. •••••6003), or null when unset. */
+  chatIdHint: string | null
+}
+
 export interface DaemonSettings {
   upstox: DaemonUpstoxSettings
+  telegram: DaemonTelegramSettings
 }
 
 async function parseJson<T>(res: Response): Promise<T> {
@@ -157,6 +168,21 @@ export const daemonApi = {
     clearApiSecret?: boolean
   }): Promise<DaemonSettings & { success?: boolean }> =>
     post('/api/daemon/settings/upstox', payload),
+
+  /**
+   * Save the Telegram alert bot token / chat id into the daemon's SQLite.
+   * Omitted fields keep their value; takes effect on the next alert (the
+   * daemon resolves the config per send — no restart needed).
+   */
+  saveTelegramSettings: (payload: {
+    botToken?: string
+    chatId?: string
+  }): Promise<DaemonSettings & { success?: boolean }> =>
+    post('/api/daemon/settings/telegram', payload),
+
+  /** Deliver a test alert through the effective Telegram config. */
+  testTelegram: (): Promise<{ success?: boolean; error?: string }> =>
+    post('/api/daemon/settings/telegram/test', {}),
 
   saveConfig: (config: StrategyConfig): Promise<unknown> =>
     post('/api/bot/config', { userId: DAEMON_USER_ID, config }),

@@ -113,12 +113,17 @@ export function buildServer(opts?: {
 
   app.register(websocket)
 
-  // Initialize Core Services
-  const notifier = createTelegramNotifier()
-
-  // Window-managed settings (Upstox credentials + master token). Null in
-  // API-only/test compositions — every consumer treats it as optional.
+  // Window-managed settings (Upstox credentials + master token, Telegram
+  // alert config). Null in API-only/test compositions — every consumer
+  // treats it as optional.
   const settingsStore = opts?.store ?? null
+
+  // Initialize Core Services. The Telegram config resolves on every send
+  // (window-saved settings win over env), so changes apply without a restart.
+  const notifier = createTelegramNotifier(process.env, () => ({
+    botToken: settingsStore?.getSetting(DAEMON_SETTING_KEYS.telegramBotToken),
+    chatId: settingsStore?.getSetting(DAEMON_SETTING_KEYS.telegramChatId),
+  }))
 
   // Token precedence: explicit option (tests) → daemon settings (token saved
   // from the window or refreshed via OAuth) → environment. Settings win over

@@ -2,6 +2,7 @@ import type { BrokerAccount, BrokerPurpose } from '@/lib/types'
 import { useEffect, useRef, useState } from 'react'
 import {
   BarChart2,
+  Bell,
   Bot,
   Check,
   ChevronRight,
@@ -39,7 +40,11 @@ import {
   updateAccount,
 } from '@/lib/accounts'
 import type { DaemonController } from '@/hooks/useDaemon'
-import { daemonApi, type DaemonUpstoxSettings } from '@/lib/daemon'
+import {
+  daemonApi,
+  type DaemonTelegramSettings,
+  type DaemonUpstoxSettings,
+} from '@/lib/daemon'
 
 function generateId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36)
@@ -370,6 +375,7 @@ const PURPOSE_META = {
   analytics: { label: 'Portfolio Analytics', Icon: BarChart2 },
   'market-data': { label: 'Market Data', Icon: BarChart2 },
   orders: { label: 'Order Placing', Icon: ShoppingCart },
+  alerts: { label: 'Alerts', Icon: Bell },
 } as const
 
 const TOKEN_BADGE_META = {
@@ -1358,6 +1364,196 @@ function DaemonCredentialsInline({
   )
 }
 
+// ─── Daemon: window-managed Telegram alert settings ─────────────────
+// Alert config (bot token + chat id) is stored in the daemon's SQLite; the
+// window only ever sees masked hints. Applies without a restart — the daemon
+// resolves the config on every send.
+function DaemonTelegramInline({
+  settings,
+  onSaved,
+}: {
+  settings: DaemonTelegramSettings | null
+  onSaved: (next: DaemonTelegramSettings) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [botToken, setBotToken] = useState('')
+  const [chatId, setChatId] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [feedback, setFeedback] = useState<{
+    kind: 'ok' | 'error'
+    text: string
+  } | null>(null)
+
+  if (!settings) return null
+
+  const configured = settings.hasBotToken && settings.hasChatId
+
+  const openForm = () => {
+    setBotToken('')
+    setChatId('')
+    setFeedback(null)
+    setOpen(true)
+  }
+
+  const save = async () => {
+    const payload: { botToken?: string; chatId?: string } = {}
+    if (botToken.trim()) payload.botToken = botToken.trim()
+    if (chatId.trim()) payload.chatId = chatId.trim()
+
+    if (!settings.hasBotToken && !payload.botToken) {
+      setFeedback({
+        kind: 'error',
+        text: 'Enter the bot token from @BotFather.',
+      })
+      return
+    }
+    if (!settings.hasChatId && !payload.chatId) {
+      setFeedback({
+        kind: 'error',
+        text: 'Enter the chat id that should receive the alerts.',
+      })
+      return
+    }
+
+    setSaving(true)
+    setFeedback(null)
+    try {
+      const res = await daemonApi.saveTelegramSettings(payload)
+      onSaved(res.telegram)
+      setOpen(false)
+      setFeedback({
+        kind: 'ok',
+        text: 'Saved to the daemon — send a test message to confirm.',
+      })
+    } catch (err) {
+      setFeedback({
+        kind: 'error',
+        text:
+          err instanceof Error
+            ? err.message
+            : 'Failed to save Telegram settings.',
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const sendTest = async () => {
+    setTesting(true)
+    setFeedback(null)
+    try {
+      await daemonApi.testTelegram()
+      setFeedback({ kind: 'ok', text: 'Test message sent — check Telegram.' })
+    } catch (err) {
+      setFeedback({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Test message failed.',
+      })
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  return (
+    <div className="mt-3 border-t border-border pt-3">
+      {!open ? (
+        <div className="flex items-center justify-between gap-2">
+          <button
+            onClick={openForm}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors text-left"
+          >
+            <KeyRound size={11} className="shrink-0" />
+            {configured
+              ? `Configured · bot ${settings.botTokenHint ?? '•••'} · chat ${settings.chatIdHint ?? '•••'}`
+              : 'Set up Telegram alerts'}
+          </button>
+          {configured && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs px-2 shrink-0"
+              onClick={() => void sendTest()}
+              disabled={testing}
+            >
+              {testing ? 'Sending…' : 'Send test'}
+            </Button>
+          )}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-muted-foreground">
+            Entry, exit, VIX and end-of-day alerts are delivered to this chat.
+            Stored in the daemon&rsquo;s SQLite — never in the browser. Get the
+            bot token from @BotFather; the chat id from the chat that should
+            receive alerts.
+          </p>
+          <input
+            type="password"
+            value={botToken}
+            onChange={(e) => setBotToken(e.target.value)}
+            placeholder={
+              settings.hasBotToken
+                ? `Bot token saved (${settings.botTokenHint}) — type to replace`
+                : 'Bot token (e.g. 123456789:AA…)'
+            }
+            autoComplete="new-password"
+            className="h-8 px-3 rounded-md border border-border bg-background text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+          />
+          <input
+            type="text"
+            value={chatId}
+            onChange={(e) => setChatId(e.target.value)}
+            placeholder={
+              settings.hasChatId
+                ? `Chat id saved (${settings.chatIdHint}) — type to replace`
+                : 'Chat id (e.g. 643696003)'
+            }
+            autoComplete="off"
+            className="h-8 px-3 rounded-md border border-border bg-background text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+          />
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              className="h-8 text-xs px-3"
+              onClick={() => void save()}
+              disabled={saving}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </Button>
+            {configured && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs px-3"
+                onClick={() => void sendTest()}
+                disabled={testing}
+              >
+                {testing ? 'Sending…' : 'Send test'}
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 text-xs px-3"
+              onClick={() => setOpen(false)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+      {feedback && (
+        <p
+          className={`text-xs mt-2 ${feedback.kind === 'ok' ? 'text-success' : 'text-destructive'}`}
+        >
+          {feedback.text}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function DaemonBrokerAccounts({ daemon }: { daemon: DaemonController }) {
   const [token, setToken] = useState('')
   const [saving, setSaving] = useState(false)
@@ -1368,17 +1564,25 @@ function DaemonBrokerAccounts({ daemon }: { daemon: DaemonController }) {
   } | null>(null)
   const [alsoMaster, setAlsoMaster] = useState(false)
   const [creds, setCreds] = useState<DaemonUpstoxSettings | null>(null)
+  const [telegram, setTelegram] = useState<DaemonTelegramSettings | null>(null)
 
-  // Window-managed Upstox credentials (masked view; secrets stay server-side).
+  // Window-managed Upstox credentials + Telegram alert config (masked view;
+  // secrets stay server-side).
   useEffect(() => {
     let cancelled = false
     daemonApi
       .settings()
       .then((s) => {
-        if (!cancelled) setCreds(s.upstox)
+        if (!cancelled) {
+          setCreds(s.upstox)
+          setTelegram(s.telegram ?? null)
+        }
       })
       .catch(() => {
-        if (!cancelled) setCreds(null)
+        if (!cancelled) {
+          setCreds(null)
+          setTelegram(null)
+        }
       })
     return () => {
       cancelled = true
@@ -1544,12 +1748,29 @@ function DaemonBrokerAccounts({ daemon }: { daemon: DaemonController }) {
     ),
   }
 
+  const telegramConfigured = Boolean(
+    telegram?.hasBotToken && telegram?.hasChatId,
+  )
+  const telegramCard: AccountCardData = {
+    id: 'telegram-alerts',
+    label: 'Telegram alerts',
+    status: telegramConfigured ? 'connected' : 'need_auth',
+    subtitle: telegramConfigured
+      ? `Alerts · bot ${telegram?.botTokenHint ?? '•••'} → chat ${telegram?.chatIdHint ?? '•••'}`
+      : 'Entry · exit · VIX · EOD summary alerts',
+    purposes: [{ purpose: 'alerts', active: telegramConfigured }],
+    children: (
+      <DaemonTelegramInline settings={telegram} onSaved={setTelegram} />
+    ),
+  }
+
   return (
     <div className="flex flex-col gap-5 p-6 min-w-0">
       <BrokerAccountsHeader />
       <div className="flex flex-col gap-3 max-w-2xl">
         <AccountCard data={masterCard} />
         <AccountCard data={overrideCard} />
+        <AccountCard data={telegramCard} />
         <McpSection />
       </div>
     </div>

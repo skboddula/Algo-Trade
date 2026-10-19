@@ -45,4 +45,53 @@ describe('createTelegramNotifier', () => {
     })
     await expect(notifier('x')).resolves.toBeUndefined()
   })
+
+  it('prefers window-saved settings over env values', async () => {
+    const fetchSpy = vi.fn(async (_url: string | URL, _init?: RequestInit) => ({ ok: true }) as Response)
+    vi.stubGlobal('fetch', fetchSpy)
+
+    const notifier = createTelegramNotifier(
+      { TELEGRAM_BOT_TOKEN: 'env-bot', TELEGRAM_CHAT_ID: '11' },
+      () => ({ botToken: 'saved-bot', chatId: '99' }),
+    )
+    await notifier('hello')
+
+    const [url, init] = fetchSpy.mock.calls[0]
+    expect(url).toBe('https://api.telegram.org/botsaved-bot/sendMessage')
+    expect(JSON.parse(String(init?.body)).chat_id).toBe('99')
+  })
+
+  it('uses saved settings with no env values and falls through on blanks', async () => {
+    const fetchSpy = vi.fn(async (_url: string | URL, _init?: RequestInit) => ({ ok: true }) as Response)
+    vi.stubGlobal('fetch', fetchSpy)
+
+    // Saved-only config works without env values.
+    await createTelegramNotifier({}, () => ({ botToken: 'saved-bot', chatId: '99' }))('a')
+    // Blank saved fields fall through to env.
+    await createTelegramNotifier(
+      { TELEGRAM_BOT_TOKEN: 'env-bot', TELEGRAM_CHAT_ID: '11' },
+      () => ({ botToken: '   ', chatId: null }),
+    )('b')
+
+    const urls = fetchSpy.mock.calls.map(([u]) => String(u))
+    expect(urls).toEqual([
+      'https://api.telegram.org/botsaved-bot/sendMessage',
+      'https://api.telegram.org/botenv-bot/sendMessage',
+    ])
+  })
+
+  it('falls back to env when the settings resolver throws', async () => {
+    const fetchSpy = vi.fn(async (_url: string | URL, _init?: RequestInit) => ({ ok: true }) as Response)
+    vi.stubGlobal('fetch', fetchSpy)
+
+    const notifier = createTelegramNotifier(
+      { TELEGRAM_BOT_TOKEN: 'env-bot', TELEGRAM_CHAT_ID: '11' },
+      () => {
+        throw new Error('store closed')
+      },
+    )
+    await notifier('hello')
+
+    expect(fetchSpy.mock.calls[0][0]).toBe('https://api.telegram.org/botenv-bot/sendMessage')
+  })
 })

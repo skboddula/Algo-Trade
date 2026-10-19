@@ -14,6 +14,8 @@ export const DAEMON_SETTING_KEYS = {
   upstoxApiSecret: 'upstox.apiSecret',
   upstoxRedirectUri: 'upstox.redirectUri',
   upstoxMasterToken: 'upstox.masterToken',
+  telegramBotToken: 'telegram.botToken',
+  telegramChatId: 'telegram.chatId',
 } as const
 
 /**

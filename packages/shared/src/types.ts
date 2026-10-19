@@ -14,7 +14,7 @@ export type NiftySentiment =
 export type PcrZone = 'buy' | 'sell' | 'neutral' | 'overbought' | 'oversold'
 export type V3OrderType = 'buy' | 'sell' | 'hold'
 export type ExecutionMode = 'live' | 'paper'
-export type BrokerPurpose = 'analytics' | 'market-data' | 'orders'
+export type BrokerPurpose = 'analytics' | 'market-data' | 'orders' | 'alerts'
 export type NotificationType = 'info' | 'success' | 'warn' | 'error'
 
 export type UnderlyingSymbol = 'NIFTY 50' | 'BANKNIFTY' | 'FINNIFTY'

@@ -127,6 +127,45 @@ describe('daemon API client', () => {
     })
   })
 
+  it('saves Telegram settings and sends test alerts through the daemon', async () => {
+    okJson({
+      success: true,
+      telegram: {
+        hasBotToken: true,
+        botTokenHint: '89849437…',
+        hasChatId: true,
+        chatIdHint: '•••••6003',
+      },
+    })
+    okJson({ success: true })
+
+    const saved = await daemonApi.saveTelegramSettings({
+      botToken: '8984943700:AAGJKFAtc8yC8uT5xFbEfmxOTDuP-q07bxo',
+      chatId: '643696003',
+    })
+    expect(saved.telegram.botTokenHint).toBe('89849437…')
+
+    await daemonApi.testTelegram()
+
+    const [savePath, saveInit] = fetchMock.mock.calls[0] as [
+      string,
+      RequestInit,
+    ]
+    expect(savePath).toBe('/api/daemon/settings/telegram')
+    expect(saveInit.method).toBe('POST')
+    expect(JSON.parse(saveInit.body as string)).toEqual({
+      botToken: '8984943700:AAGJKFAtc8yC8uT5xFbEfmxOTDuP-q07bxo',
+      chatId: '643696003',
+    })
+
+    const [testPath, testInit] = fetchMock.mock.calls[1] as [
+      string,
+      RequestInit,
+    ]
+    expect(testPath).toBe('/api/daemon/settings/telegram/test')
+    expect(testInit.method).toBe('POST')
+  })
+
   it('falls back to the HTTP status when the error body is not JSON', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: false,
