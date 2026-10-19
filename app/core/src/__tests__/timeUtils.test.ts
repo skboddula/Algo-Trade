@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { getIndiaTime, isMarketOpen } from '../utils/timeUtils'
+import { getIndiaTime, getNseHolidayName, isMarketOpen } from '../utils/timeUtils'
 
 describe('IST Time Utilities Suite', () => {
   it('correctly converts UTC timestamps to Indian Standard Time (UTC+05:30)', () => {
@@ -32,6 +32,24 @@ describe('IST Time Utilities Suite', () => {
     const ist = getIndiaTime(saturday)
     expect(ist.isMarketDay).toBe(false)
     expect(ist.isMarketHours).toBe(false)
+  })
+
+  it('treats NSE trading holidays as non-market days (e.g. Dussehra)', () => {
+    // Tuesday 2026-10-20 = Dussehra (exchange holiday), 10:00 IST
+    const dussehra = new Date('2026-10-20T04:30:00.000Z')
+    const ist = getIndiaTime(dussehra)
+    expect(ist.dayOfWeek).toBe(2) // a weekday…
+    expect(ist.isMarketHoliday).toBe(true)
+    expect(ist.isMarketDay).toBe(false) // …but not a trading day
+    expect(ist.isMarketHours).toBe(false)
+    expect(isMarketOpen(dussehra)).toBe(false)
+    expect(getNseHolidayName(dussehra)).toBe('Dussehra')
+
+    // Monday 2026-10-19 10:00 IST is a normal trading day.
+    const monday = new Date('2026-10-19T04:30:00.000Z')
+    expect(getIndiaTime(monday).isMarketHoliday).toBe(false)
+    expect(getIndiaTime(monday).isMarketHours).toBe(true)
+    expect(getNseHolidayName(monday)).toBeNull()
   })
 
   it('correctly evaluates last entry time cutoff in IST', () => {
