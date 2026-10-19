@@ -220,6 +220,10 @@ export interface ActivePosition {
   legs?: PositionLeg[]
   exitedLegs?: string[]
   underlyingSymbol?: UnderlyingSymbol
+  /** Contract strike as selected at entry (alerting / display). */
+  strikePrice?: number
+  /** Contract expiry as selected at entry (alerting / display). */
+  expiry?: string
 }
 
 export interface StrategyConfig {

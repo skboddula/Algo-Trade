@@ -25,6 +25,9 @@ export function createTelegramNotifier(
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`
 
   return async (text: string): Promise<void> => {
+    // Bounded send: a hung Telegram call must never pile up behind the loop.
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 8000)
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -34,6 +37,7 @@ export function createTelegramNotifier(
           text,
           disable_web_page_preview: true,
         }),
+        signal: controller.signal,
       })
       if (!res.ok) {
         console.warn(`[notifier] telegram send failed: HTTP ${res.status}`)
@@ -41,6 +45,8 @@ export function createTelegramNotifier(
     } catch (err) {
       // Alerts must never crash the trading loop.
       console.warn(`[notifier] telegram send error: ${(err as Error).message}`)
+    } finally {
+      clearTimeout(timer)
     }
   }
 }

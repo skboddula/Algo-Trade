@@ -56,3 +56,10 @@ export const DEFAULT_STRATEGY_CONFIG = {
   brentCrudeOverhangThreshold: 85,
   exitCooldownSec: 60,
 }
+
+// ─── VIX thresholds (alerting) ────────────────────────────────────────────
+// Ported from the always-on-daemon branch — keep the values in sync there.
+export const VIX_ELEVATED_THRESHOLD = 18
+export const VIX_CRITICAL_THRESHOLD = 24
+export const VIX_HARD_STOP_MAX = 25
+export const VIX_CRITICAL_ALERT_COOLDOWN_MS = 5 * 60_000 // 5 minutes

@@ -6,8 +6,15 @@ import type {
   ActivePosition,
   MarketSnapshot,
   AllSignalData,
+  PaperTradeRecord,
 } from '../types'
-import { DEFAULT_STRATEGY_CONFIG } from '../constants'
+import {
+  DEFAULT_STRATEGY_CONFIG,
+  VIX_CRITICAL_ALERT_COOLDOWN_MS,
+  VIX_CRITICAL_THRESHOLD,
+  VIX_ELEVATED_THRESHOLD,
+  VIX_HARD_STOP_MAX,
+} from '../constants'
 import { MasterIngestionEngine } from './masterIngestor'
 import { OrderGateway } from './orderGateway'
 import { pickBestOptionContract } from './syntheticCalculators'
@@ -15,6 +22,12 @@ import { runHardStopChecks } from './strategyEngine'
 import { getIndiaTime } from '../utils/timeUtils'
 import type { StateStore } from './stateStore'
 import type { Notifier } from './notifier'
+import {
+  buildDailySummaryMessage,
+  buildEntryAlertMessage,
+  buildExitAlertMessage,
+  buildVixAlertMessage,
+} from '../../../../packages/shared/src/telegram'
 
 export class TenantManager extends EventEmitter {
   /** Env var that arms live trading server-side (client confirms are only UX). */
@@ -26,6 +39,9 @@ export class TenantManager extends EventEmitter {
   private store: StateStore | null
   private notifier?: Notifier
   private lastPersistAt: Map<string, number> = new Map()
+  private vixWarningLevel: 'none' | 'elevated' | 'critical' = 'none'
+  private lastVixAlertAt = 0
+  private dailySummaryDate: string | null = null
 
   constructor(
     masterIngestor: MasterIngestionEngine,
@@ -38,6 +54,8 @@ export class TenantManager extends EventEmitter {
     this.orderGateway = orderGateway
     this.store = opts.store ?? null
     this.notifier = opts.notifier
+    // Persisted so an EOD-summary re-send cannot happen after a restart.
+    this.dailySummaryDate = this.store?.getSetting('daily_summary_date') ?? null
 
     // Rehydrate persisted bot states first (restart / reboot recovery)
     if (this.store) {
@@ -237,7 +255,7 @@ export class TenantManager extends EventEmitter {
       user.updatedAt = new Date().toISOString()
       this.emitUserUpdate(user)
       this.persistUser(user, true)
-      this.fireAlert(`🔵 Algo-Trade: closed ${symbol} position for ${userId} (${reason}) @ ₹${exitPrice}`)
+      this.sendExitAlert(user, position, symbol, exitPrice, reason)
     }
     return user
   }
@@ -253,6 +271,12 @@ export class TenantManager extends EventEmitter {
 
   private async handleMarketTick(tick: { timestamp: string; snapshots: Record<UnderlyingSymbol, MarketSnapshot> }) {
     const istInfo = getIndiaTime()
+
+    // VIX early warning — once per tick, from the primary symbol's VRD data
+    const primarySnapshot = tick.snapshots['NIFTY 50'] ?? Object.values(tick.snapshots)[0]
+    if (primarySnapshot?.vrdData) {
+      this.checkVixWarning(primarySnapshot.vrdData.vix)
+    }
 
     for (const [userId, user] of this.users.entries()) {
       if (user.state === 'IDLE' || user.state === 'STOPPED') continue
@@ -365,6 +389,12 @@ export class TenantManager extends EventEmitter {
               })
 
               if (orderRes.success) {
+                const chainRow = optionChain.find(
+                  (row) =>
+                    row.call_options.instrument_key === selectedContract.instrumentKey ||
+                    row.put_options.instrument_key === selectedContract.instrumentKey,
+                )
+                const expiry = chainRow?.expiry
                 const newPos: ActivePosition = {
                   instrumentKey: selectedContract.instrumentKey,
                   direction,
@@ -380,6 +410,8 @@ export class TenantManager extends EventEmitter {
                   unrealizedPnl: 0,
                   peakFavorablePrice: orderRes.filledPrice,
                   underlyingSymbol: symbol,
+                  strikePrice: selectedContract.strike,
+                  expiry,
                 }
 
                 user.positions[symbol] = newPos
@@ -391,10 +423,12 @@ export class TenantManager extends EventEmitter {
                 user.updatedAt = new Date().toISOString()
                 this.emitUserUpdate(user)
                 this.persistUser(user, true)
-                this.fireAlert(
-                  `🟢 Algo-Trade: opened ${symbol} ${direction} for ${userId} ` +
-                    `@ ₹${orderRes.filledPrice} × ${orderRes.quantity} (${user.executionMode})`,
-                )
+                this.sendEntryAlert(user, newPos, symbol, {
+                  signal: signal.signal,
+                  confidence: signal.confidence,
+                  strikePrice: selectedContract.strike,
+                  expiry,
+                })
               } else {
                 user.error = orderRes.error
                 this.emitUserUpdate(user)
@@ -403,6 +437,11 @@ export class TenantManager extends EventEmitter {
             }
           }
         }
+      }
+
+      // Post-cutoff daily summary (skipped while any position is still open)
+      if (afterCutoff) {
+        this.checkDailySummary(user, istInfo)
       }
 
       // Persist supervised position updates (peak price, unrealized PnL) — throttled
@@ -448,5 +487,134 @@ export class TenantManager extends EventEmitter {
   private fireAlert(text: string): void {
     if (!this.notifier) return
     void this.notifier(text)
+  }
+
+  /**
+   * Telegram entry alert — full contract/levels detail so the trade can be
+   * mirrored manually in another app. Wording lives in the shared builders.
+   */
+  private sendEntryAlert(
+    user: UserBotState,
+    position: ActivePosition,
+    symbol: UnderlyingSymbol,
+    params: { signal: string; confidence?: string; strikePrice?: number; expiry?: string },
+  ): void {
+    this.fireAlert(
+      buildEntryAlertMessage({
+        symbol,
+        signal: params.signal,
+        confidence: params.confidence,
+        executionMode: user.executionMode === 'live' ? 'live' : 'paper',
+        strikePrice: params.strikePrice,
+        expiry: params.expiry,
+        legs: [
+          {
+            direction: position.direction,
+            entryPrice: position.entryPrice,
+            quantity: position.quantity,
+            lotSize: position.lotSize || 1,
+            tradeType: position.tradeType === 'selling' ? 'selling' : 'buying',
+          },
+        ],
+        maxProfitPct: user.config.maxProfitPct,
+        maxLossPct: user.config.maxLossPct,
+      }),
+    )
+  }
+
+  /** Telegram exit alert with realized PnL, duration and the exit reason. */
+  private sendExitAlert(
+    user: UserBotState,
+    position: ActivePosition,
+    symbol: UnderlyingSymbol,
+    exitPrice: number,
+    reason: string,
+  ): void {
+    this.fireAlert(
+      buildExitAlertMessage({
+        symbol,
+        direction: position.direction,
+        executionMode: user.executionMode === 'live' ? 'live' : 'paper',
+        entryPrice: position.entryPrice,
+        exitPrice,
+        quantity: position.quantity,
+        lotSize: position.lotSize || 1,
+        tradeType: position.tradeType === 'selling' ? 'selling' : 'buying',
+        reason,
+        entryTime: position.entryTime,
+        exitTime: new Date().toISOString(),
+        strikePrice: position.strikePrice,
+        expiry: position.expiry,
+      }),
+    )
+  }
+
+  /**
+   * VIX early warning — fires when India VIX crosses the critical threshold,
+   * with a 5-minute cooldown on repeats (ported from always-on-daemon).
+   */
+  private checkVixWarning(vix: number | null | undefined): void {
+    if (typeof vix !== 'number' || !Number.isFinite(vix)) return
+    const level =
+      vix >= VIX_CRITICAL_THRESHOLD ? 'critical' : vix >= VIX_ELEVATED_THRESHOLD ? 'elevated' : 'none'
+    if (level === this.vixWarningLevel) return
+    this.vixWarningLevel = level
+    if (level !== 'critical') return
+    const now = Date.now()
+    if (now - this.lastVixAlertAt < VIX_CRITICAL_ALERT_COOLDOWN_MS) return
+    this.lastVixAlertAt = now
+    this.fireAlert(buildVixAlertMessage({ vix, threshold: VIX_HARD_STOP_MAX }))
+  }
+
+  /**
+   * End-of-day Telegram summary — fires once per date, after the square-off
+   * cutoff with no open positions. Ledger values are stored in paise; the
+   * summary builder's contract is rupees.
+   */
+  private checkDailySummary(user: UserBotState, istInfo: { dateString: string }): void {
+    if (this.dailySummaryDate === istInfo.dateString) return
+    const hasActivePositions = Object.values(user.positions).some((p) => p !== null)
+    if (hasActivePositions) return
+
+    this.dailySummaryDate = istInfo.dateString
+    try {
+      this.store?.setSetting('daily_summary_date', istInfo.dateString)
+    } catch {
+      // Best effort — a settings write failure must never break the loop.
+    }
+
+    const closedTrades = this.orderGateway
+      .getPaperTrades(user.userId)
+      .filter((t) => t.status === 'CLOSED' && t.closedAt?.startsWith(istInfo.dateString))
+    if (closedTrades.length === 0) return
+
+    const wins = closedTrades.filter((t) => (t.realizedPnl ?? 0) > 0)
+    const losses = closedTrades.filter((t) => (t.realizedPnl ?? 0) <= 0)
+    const realizedPnlPaise = closedTrades.reduce((sum, t) => sum + (t.realizedPnl ?? 0), 0)
+    const symbolOf = (t: PaperTradeRecord): string =>
+      (t.metadata as { underlyingSymbol?: string } | undefined)?.underlyingSymbol ?? '—'
+    const best = wins.length
+      ? wins.reduce((a, b) => ((a.realizedPnl ?? 0) >= (b.realizedPnl ?? 0) ? a : b))
+      : undefined
+    const worst = losses.length
+      ? losses.reduce((a, b) => ((a.realizedPnl ?? 0) <= (b.realizedPnl ?? 0) ? a : b))
+      : undefined
+
+    this.fireAlert(
+      buildDailySummaryMessage({
+        date: istInfo.dateString,
+        totalTrades: closedTrades.length,
+        wins: wins.length,
+        losses: losses.length,
+        realizedPnl: realizedPnlPaise / 100,
+        paperBalance: (user.paperBalance ?? 0) / 100,
+        bestTrade: best
+          ? { symbol: symbolOf(best), direction: best.direction, pnl: (best.realizedPnl ?? 0) / 100 }
+          : undefined,
+        worstTrade: worst
+          ? { symbol: symbolOf(worst), direction: worst.direction, pnl: (worst.realizedPnl ?? 0) / 100 }
+          : undefined,
+      }),
+    )
   }
 }
