@@ -150,6 +150,9 @@ export function buildServer(opts?: {
     primaryUpstoxToken: primaryToken,
     mockMode: opts?.mockMode ?? (process.env.NODE_ENV === 'test' || !primaryToken),
     liveSource: process.env.MARKET_FEED_SOURCE === 'ws' ? 'ws' : 'rest',
+    // Default on: live entries require fresh real VRD + VIX. Set to 'false'
+    // only for isolated staging; live entries are then fail-closed.
+    useRealVrd: process.env.DAEMON_USE_REAL_VRD !== 'false',
     optionChainRefreshMs: optionalCountEnv('OPTION_CHAIN_REFRESH_MS'),
     atmWindowStrikes: optionalCountEnv('ATM_WINDOW_STRIKES'),
     notifier,
@@ -209,6 +212,8 @@ export function buildServer(opts?: {
       timestamp: new Date().toISOString(),
       memoryUsage: process.memoryUsage(),
       feed: masterIngestor.getFeedStats(),
+      // Fail-closed VRD/VIX provenance: `fault` non-null blocks live entries.
+      sentiment: masterIngestor.getSentimentStatus(),
     }
   })
 

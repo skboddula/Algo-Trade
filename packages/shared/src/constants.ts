@@ -45,9 +45,13 @@ export const DEFAULT_STRATEGY_CONFIG = {
   moderateGap: 3,
   maxProfitPct: 20,
   maxLossPct: 15,
+  /** Trailing stop percentage from peak favorable premium (default 5). */
+  trailPct: 5,
   maxTradesPerDay: 5,
   lastEntryTime: '15:15',
   squareOffTime: '15:35',
+  /** 5-min EMA 10/42 confluence gate (default: enabled). */
+  useMultiTimeframe: true,
   pollingIntervalSec: 2,
   minConfidence: 'moderate' as const,
   otmSkip: 0,
@@ -62,5 +66,14 @@ export const DEFAULT_STRATEGY_CONFIG = {
 // Ported from the always-on-daemon branch — keep the values in sync there.
 export const VIX_ELEVATED_THRESHOLD = 18
 export const VIX_CRITICAL_THRESHOLD = 24
+
+/**
+ * Streamed/REST VIX older than this window is not trusted for entries.
+ * Prevents trading on stale volatility data after a feed disconnect.
+ */
+export const VIX_FRESHNESS_WINDOW_MS = 120_000 // 2 minutes
+
+/** Hard-stop tradeability band (see scoreVix in the shared engine). */
 export const VIX_HARD_STOP_MAX = 25
+export const VIX_HARD_STOP_MIN = 10
 export const VIX_CRITICAL_ALERT_COOLDOWN_MS = 5 * 60_000 // 5 minutes

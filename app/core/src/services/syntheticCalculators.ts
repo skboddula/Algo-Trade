@@ -2,6 +2,7 @@ import type {
   NiftySentiment,
   OptionData,
   ActivePosition,
+  IndicatorsResult,
 } from '../types'
 
 export function clamp(value: number, min: number, max: number): number {
@@ -196,14 +197,189 @@ export function pickBestOptionContract(
   const selectedRow = sorted[targetIdx]
   if (!selectedRow) return null
 
-  const opt = direction === 'CE' ? selectedRow.call_options : selectedRow.put_options
+  const opt =
+    direction === 'CE' ? selectedRow.call_options : selectedRow.put_options
   if (!opt || !opt.instrument_key) return null
 
   return {
     strike: selectedRow.strike_price,
     instrumentKey: opt.instrument_key,
-    tradingSymbol: opt.trading_symbol || `${direction}_${selectedRow.strike_price}`,
+    tradingSymbol:
+      opt.trading_symbol || `${direction}_${selectedRow.strike_price}`,
     price: opt.market_data?.ltp || 0,
     lotSize: getLotSizeForSymbol('NIFTY 50'),
   }
+}
+
+// ─── Straddle IV from ATM option chain Greeks ─────────────────────────────
+export function computeStraddleIV(
+  optionChain: OptionData[],
+  niftyLtp: number,
+  vix: number | null,
+): {
+  currentIv: number | null
+  averageIv: number | null
+  percentAboveAvg: number | null
+} {
+  if (!optionChain.length || niftyLtp === 0)
+    return { currentIv: null, averageIv: null, percentAboveAvg: null }
+  const atm = optionChain.reduce((prev, curr) =>
+    Math.abs(curr.strike_price - niftyLtp) <
+    Math.abs(prev.strike_price - niftyLtp)
+      ? curr
+      : prev,
+  )
+  const callIv = atm.call_options.option_greeks?.iv ?? null
+  const putIv = atm.put_options.option_greeks?.iv ?? null
+  if (callIv === null || putIv === null)
+    return { currentIv: null, averageIv: vix, percentAboveAvg: null }
+  const avgStrikeIv = (callIv + putIv) / 2
+  // Compare ATM straddle IV to VIX (VIX IS the 30-day expected IV benchmark)
+  const pct =
+    vix && vix > 0
+      ? parseFloat((((avgStrikeIv - vix) / vix) * 100).toFixed(1))
+      : null
+  return {
+    currentIv: parseFloat(avgStrikeIv.toFixed(2)),
+    averageIv: vix,
+    percentAboveAvg: pct,
+  }
+}
+
+export function getAtmWindow(
+  optionChain: OptionData[],
+  niftyLtp: number,
+  windowSize = 5,
+): OptionData[] {
+  return [...optionChain]
+    .sort(
+      (left, right) =>
+        Math.abs(left.strike_price - niftyLtp) -
+        Math.abs(right.strike_price - niftyLtp),
+    )
+    .slice(0, windowSize)
+}
+
+// ─── Proxy FII flow/valuation (daemon equivalent of the browser's
+// localStorage-backed history) ──────────────────────────────────────────────
+const PROXY_HISTORY_KEY = 'algo-trade:proxy-history'
+const memoryProxyHistory = new Map<string, string>()
+
+function loadProxyHistory(): { date: string; netPosition: number }[] {
+  try {
+    return JSON.parse(memoryProxyHistory.get(PROXY_HISTORY_KEY) ?? '[]') as {
+      date: string
+      netPosition: number
+    }[]
+  } catch {
+    return []
+  }
+}
+
+function saveProxyHistory(history: { date: string; netPosition: number }[]) {
+  try {
+    memoryProxyHistory.set(
+      PROXY_HISTORY_KEY,
+      JSON.stringify(history.slice(-20)),
+    )
+  } catch {
+    /* ignore */
+  }
+}
+
+export function updateProxyHistory(netPosition: number): number | null {
+  const today = new Date().toISOString().split('T')[0]
+  const history = loadProxyHistory().filter((item) => item.date)
+  const withoutToday = history.filter((item) => item.date !== today)
+  const nextHistory = [...withoutToday, { date: today, netPosition }].sort(
+    (left, right) => right.date.localeCompare(left.date),
+  )
+  saveProxyHistory(nextHistory)
+
+  if (netPosition >= 0) return null
+
+  let consecutiveShortDays = 0
+  for (const item of nextHistory) {
+    if (item.netPosition < 0) consecutiveShortDays += 1
+    else break
+  }
+  return consecutiveShortDays || null
+}
+
+export function computeProxyFlow(optionChain: OptionData[], niftyLtp: number) {
+  if (!optionChain.length || niftyLtp === 0) {
+    return {
+      longPct: null as number | null,
+      shortPct: null as number | null,
+      netPosition: null as number | null,
+      consecutiveShortDays: null as number | null,
+    }
+  }
+
+  const window = getAtmWindow(optionChain, niftyLtp)
+  const callOi = window.reduce(
+    (sum, item) => sum + (item.call_options.market_data.oi ?? 0),
+    0,
+  )
+  const putOi = window.reduce(
+    (sum, item) => sum + (item.put_options.market_data.oi ?? 0),
+    0,
+  )
+  const totalOi = callOi + putOi
+  if (totalOi === 0) {
+    return {
+      longPct: null,
+      shortPct: null,
+      netPosition: null,
+      consecutiveShortDays: null,
+    }
+  }
+
+  const putShare = (putOi / totalOi) * 100
+  const longPct = parseFloat(clamp(putShare, 5, 95).toFixed(1))
+  const shortPct = parseFloat((100 - longPct).toFixed(1))
+  const netPosition = putOi - callOi
+  const consecutiveShortDays = updateProxyHistory(netPosition)
+
+  return {
+    longPct,
+    shortPct,
+    netPosition,
+    consecutiveShortDays,
+  }
+}
+
+export function computeProxyValuation(
+  _niftyLtp: number,
+  indicators: IndicatorsResult,
+  vix: number | null,
+  adRatio: number | null,
+): { pe: number; label: string } {
+  const rsiStretch = (indicators.rsi.value - 50) / 8
+  const trendStretch =
+    indicators.bollinger.trend === 'Up'
+      ? 1.25
+      : indicators.bollinger.trend === 'Down'
+        ? -1.25
+        : 0
+  const volStretch = vix === null ? 0 : (15 - vix) / 5
+  const breadthStretch =
+    adRatio === null ? 0 : adRatio > 1.4 ? -0.75 : adRatio < 0.8 ? 1 : 0
+  const premiumStretch =
+    indicators.pcrValue > 1.1 ? -0.75 : indicators.pcrValue < 0.8 ? 1.25 : 0
+  const base =
+    21 +
+    rsiStretch +
+    trendStretch +
+    volStretch +
+    breadthStretch +
+    premiumStretch
+  const pe = parseFloat(clamp(base, 16, 30).toFixed(1))
+  const label =
+    pe < 18
+      ? 'Synthetic undervaluation'
+      : pe > 24
+        ? 'Synthetic overvaluation'
+        : 'Synthetic fair value'
+  return { pe, label }
 }

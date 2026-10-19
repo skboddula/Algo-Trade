@@ -100,6 +100,7 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
         candlesAgeMs: 5_000,
         chainAgeMs: 5_000,
         vixAgeMs: null,
+        sentimentFault: null as string | null,
         entryBlockedReasons: [] as string[],
       },
     }
@@ -428,6 +429,91 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
       errorSpy.mockRestore()
       infoSpy.mockRestore()
       store.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('blocks live entries on a sentiment fault while paper continues (fail-closed VRD)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(new MasterIngestionEngine({ mockMode: true }), gateway)
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+
+      // Paper staging continues on the deterministic fallback.
+      manager.startBot('paper-vrd', 'paper')
+      manager.updateConfig('paper-vrd', {
+        underlyingMode: 'NIFTY 50',
+        lastEntryTime: '23:59',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+      })
+      const { snapshot, tick } = buildEntryTick()
+      snapshot.sources.sentimentFault = 'India VIX stale'
+      await (manager as any).handleMarketTick(tick)
+      expect(placeSpy).toHaveBeenCalledTimes(1)
+
+      // ... but LIVE entries are blocked by the same fault (fail-closed).
+      const liveUser = manager.getOrCreateUser('live-vrd')
+      liveUser.executionMode = 'live'
+      liveUser.config.executionMode = 'live'
+      liveUser.state = 'RUNNING'
+      placeSpy.mockClear()
+      await (manager as any).handleMarketTick(tick)
+      expect(placeSpy).not.toHaveBeenCalled()
+      expect(liveUser.positions['NIFTY 50']).toBeNull()
+      expect(warnSpy).toHaveBeenCalled()
+      placeSpy.mockRestore()
+    } finally {
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('applies the reference VIX hard-stop gate to new entries', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(new MasterIngestionEngine({ mockMode: true }), gateway)
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+
+      manager.startBot('vix-block', 'paper')
+      manager.updateConfig('vix-block', {
+        underlyingMode: 'NIFTY 50',
+        lastEntryTime: '23:59',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+      })
+
+      const { snapshot, tick } = buildEntryTick()
+      ;(snapshot as any).vrdData = {
+        mmi: null,
+        advancesDeclines: null,
+        fiiLongShort: null,
+        fiiPositioning: null,
+        pcr: null,
+        straddleIv: null,
+        niftyPe: null,
+        vix: 30, // outside the tradeability band — blocks BOTH directions
+        giftNifty: null,
+        supportWall: null,
+        resistanceWall: null,
+        maxPain: null,
+        fetchedAt: new Date().toISOString(),
+      }
+
+      await (manager as any).handleMarketTick(tick)
+      expect(placeSpy).not.toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Entry blocked'))
+      placeSpy.mockRestore()
+    } finally {
+      warnSpy.mockRestore()
       vi.useRealTimers()
     }
   })

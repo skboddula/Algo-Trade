@@ -16,6 +16,7 @@ import {
   MOMENTUM_OVERBOUGHT,
   MOMENTUM_OVERSOLD,
 } from './constants'
+import { calcHigherTimeframeTrend } from '../../../../packages/strategy-engine/src/higherTimeframe'
 // ─── EMA helpers ─────────────────────────────────────────────────────────────
 function updateEMA(prev: number, price: number, k: number): number {
   return price * k + prev * (1 - k)
@@ -331,5 +332,6 @@ export function computeAllIndicators(
     atr: calcATR(candles),
     pcr: pcrResult.signal,
     pcrValue: pcrResult.value,
+    higherTimeframeTrend: calcHigherTimeframeTrend(candles),
   }
 }

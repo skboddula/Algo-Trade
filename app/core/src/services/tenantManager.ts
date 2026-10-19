@@ -18,7 +18,7 @@ import {
 import { MasterIngestionEngine } from './masterIngestor'
 import { OrderGateway } from './orderGateway'
 import { pickBestOptionContract } from './syntheticCalculators'
-import { runHardStopChecks } from './strategyEngine'
+import { runHardStopChecks, shouldExit } from './strategyEngine'
 import { getIndiaTime } from '../utils/timeUtils'
 import type { StateStore } from './stateStore'
 import type { Notifier } from './notifier'
@@ -46,6 +46,16 @@ export class TenantManager extends EventEmitter {
   // entries are blocked until persistence is healthy again; paper continues
   // in-memory (the fault stays surfaced via getPersistenceFault()).
   private persistenceFault: string | null = null
+  /** Throttle fail-closed entry warnings to once/30s per symbol+gate. */
+  private lastGateWarnAtMs = new Map<string, number>()
+
+  /** Rate-limited operational warning for a fail-closed entry gate. */
+  private warnGate(key: string, message: string): void {
+    const last = this.lastGateWarnAtMs.get(key) ?? 0
+    if (Date.now() - last < 30_000) return
+    this.lastGateWarnAtMs.set(key, Date.now())
+    console.warn(message)
+  }
 
   constructor(
     masterIngestor: MasterIngestionEngine,
@@ -399,9 +409,9 @@ export class TenantManager extends EventEmitter {
             vrd: snapshot.vrdData || null,
           }
 
-          const hardStop = runHardStopChecks(position, signalData, user.config)
-          if (hardStop.triggered) {
-            await this.manualExit(userId, symbol, hardStop.reason || 'Hard Stop / Trailing SL')
+          const exitDecision = shouldExit(position, signalData, currentPrice, user.config)
+          if (exitDecision.exit) {
+            await this.manualExit(userId, symbol, exitDecision.reason || 'Hard Stop / Trailing SL')
             continue
           }
         }
@@ -416,6 +426,19 @@ export class TenantManager extends EventEmitter {
           // no longer matches reality. Block new LIVE entries until writes
           // recover; paper entries continue in-memory (the fault is surfaced).
           if (user.executionMode === 'live' && this.persistenceFault !== null) continue
+
+          // Fail-closed sentiment gate: LIVE entries require fresh live VRD +
+          // India VIX. Paper staging continues on the deterministic fallback.
+          if (user.executionMode === 'live') {
+            const sentimentFault = snapshot.sources?.sentimentFault
+            if (sentimentFault) {
+              this.warnGate(
+                `${symbol}:sentiment`,
+                `[sentiment] [${symbol}] LIVE entry blocked — ${sentimentFault}`,
+              )
+              continue
+            }
+          }
 
           // CR-14: optional GLOBAL cap across all symbols for the day
           // (unset = off; per-symbol maxTradesPerDay still applies below).
@@ -436,6 +459,16 @@ export class TenantManager extends EventEmitter {
 
           const signal = snapshot.signal
           if (signal && (signal.signal === 'BUY_CE' || signal.signal === 'BUY_PE')) {
+            // Entry hard-stop gate (reference parity): the VIX tradeability
+            // band + high-severity macro news block new entries entirely.
+            const hardStop = runHardStopChecks(snapshot.vrdData ?? null)
+            if (hardStop.blocked) {
+              this.warnGate(
+                `${symbol}:hard-stop`,
+                `[hard-stop] [${symbol}] Entry blocked: ${hardStop.reasons.join('; ')}`,
+              )
+              continue
+            }
             const direction = signal.signal === 'BUY_CE' ? 'CE' : 'PE'
             const optionChain = snapshot.optionChain || []
             const selectedContract = pickBestOptionContract(optionChain, direction, user.config.otmSkip)

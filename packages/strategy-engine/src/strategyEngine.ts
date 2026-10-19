@@ -1,0 +1,734 @@
+import {
+  scoreMMI,
+  scoreADRatio,
+  scoreFiiLongShort,
+  scoreFiiPositioning,
+  scoreNiftyPE,
+  scoreVix,
+  scoreStraddleIV,
+} from './vrdSignals'
+import {
+  SIGNAL_BUY_CE,
+  SIGNAL_BUY_PE,
+  SIGNAL_NO_TRADE,
+  TRADE_TYPE_SELLING,
+  SIGNAL_BUY,
+  SIGNAL_SELL,
+  SIGNAL_HOLD,
+  ORDER_TYPE_BUY,
+  ORDER_TYPE_SELL,
+  ORDER_TYPE_HOLD,
+  CONFIDENCE_STRONG,
+  CONFIDENCE_MODERATE,
+  CONFIDENCE_WEAK,
+  CONFIDENCE_NONE,
+  POSITION_SIZE_FULL,
+  POSITION_SIZE_HALF,
+  LEG_DIRECTION_CE,
+  LEG_DIRECTION_PE,
+} from '../../shared/src/constants'
+
+import type {
+  IndicatorsResult,
+  SignalType,
+  VrdData,
+  StrategyConfig,
+  ScoreBreakdown,
+  ScoreResult,
+  FinalSignal,
+  AllSignalData,
+  ActivePosition,
+} from '../../shared/src/types'
+
+// ─── Final signal decision ────────────────────────────────────────────────────
+export function getFinalSignal(
+  data: AllSignalData,
+  config: Partial<StrategyConfig>,
+): FinalSignal {
+  const bull = scoreBullish(data, config)
+  const bear = scoreBearish(data, config)
+  const v4 = getV4Signal(data.indicators)
+  const gap = Math.abs(bull.score - bear.score)
+  const top = Math.max(bull.score, bear.score)
+  const dominant =
+    bull.score > bear.score
+      ? 'bull'
+      : bear.score > bull.score
+        ? 'bear'
+        : CONFIDENCE_NONE
+  const scoreMax =
+    dominant === 'bull'
+      ? Math.max(bull.max, 1)
+      : dominant === 'bear'
+        ? Math.max(bear.max, 1)
+        : Math.max(bull.max, bear.max, 1)
+
+  const ratio = scoreMax > 0 ? top / scoreMax : 0
+  let confidence: 'strong' | 'moderate' | 'weak' | 'none' = CONFIDENCE_NONE
+
+  const strongThreshold = config.strongThreshold ?? 14
+  const moderateThreshold = config.moderateThreshold ?? 10
+  const strongGap = config.strongGap ?? 6
+  const moderateGap = config.moderateGap ?? 3
+
+  const satisfiesStrong =
+    top >= strongThreshold ||
+    (ratio >= 0.7 && top >= Math.max(strongThreshold, 10))
+  const satisfiesModerate =
+    top >= moderateThreshold ||
+    (ratio >= 0.5 && top >= Math.max(moderateThreshold, 6))
+
+  if (satisfiesStrong && gap >= strongGap) confidence = CONFIDENCE_STRONG
+  else if (satisfiesModerate && gap >= moderateGap)
+    confidence = CONFIDENCE_MODERATE
+  else if (satisfiesModerate) confidence = CONFIDENCE_WEAK
+
+  const minConf = config.minConfidence ?? CONFIDENCE_MODERATE
+  const shouldTrade =
+    confidence === CONFIDENCE_STRONG ||
+    (minConf === CONFIDENCE_MODERATE && confidence === CONFIDENCE_MODERATE)
+
+  if (!shouldTrade || dominant === CONFIDENCE_NONE) {
+    return {
+      signal: SIGNAL_NO_TRADE,
+      confidence,
+      positionSize: CONFIDENCE_NONE,
+      v3: data.v3,
+      v4,
+      bullScore: bull.score,
+      bearScore: bear.score,
+      scoreMax: scoreMax,
+    }
+  }
+
+  const signal = dominant === 'bull' ? SIGNAL_BUY_CE : SIGNAL_BUY_PE
+  const positionSize =
+    confidence === CONFIDENCE_STRONG ? POSITION_SIZE_FULL : POSITION_SIZE_HALF
+
+  // Multi-timeframe confluence filter: block counter-trend entries where the
+  // 1-min signal disagrees with the 5-min resampled EMA 10/42 trend. This
+  // prevents buying calls during a higher-timeframe downtrend (and vice
+  // versa) — the source of most counter-trend losses. Neutral ('hold')
+  // higher-timeframe trends do not block either direction.
+  if (config.useMultiTimeframe !== false && data.indicators) {
+    const htTrend = data.indicators.higherTimeframeTrend
+    if (signal === SIGNAL_BUY_CE && htTrend === SIGNAL_SELL) {
+      return {
+        signal: SIGNAL_NO_TRADE,
+        confidence,
+        positionSize: CONFIDENCE_NONE,
+        v3: data.v3,
+        v4,
+        bullScore: bull.score,
+        bearScore: bear.score,
+        scoreMax: scoreMax,
+      }
+    }
+    if (signal === SIGNAL_BUY_PE && htTrend === SIGNAL_BUY) {
+      return {
+        signal: SIGNAL_NO_TRADE,
+        confidence,
+        positionSize: CONFIDENCE_NONE,
+        v3: data.v3,
+        v4,
+        bullScore: bull.score,
+        bearScore: bear.score,
+        scoreMax: scoreMax,
+      }
+    }
+  }
+
+  // Prevent entering a trade that would immediately trigger exit conditions
+  const isBullishBias = signal === SIGNAL_BUY_CE
+  const adRatio = data.vrd?.advancesDeclines?.ratio
+  const isImmediateExit = isBullishBias
+    ? v4 === SIGNAL_SELL ||
+      data.v3 === ORDER_TYPE_SELL ||
+      (adRatio != null && adRatio < 0.8)
+    : v4 === SIGNAL_BUY ||
+      data.v3 === ORDER_TYPE_BUY ||
+      (adRatio != null && adRatio > 1.5)
+
+  if (isImmediateExit) {
+    return {
+      signal: SIGNAL_NO_TRADE,
+      confidence: CONFIDENCE_NONE,
+      positionSize: CONFIDENCE_NONE,
+      v3: data.v3,
+      v4,
+      bullScore: bull.score,
+      bearScore: bear.score,
+      scoreMax: scoreMax,
+    }
+  }
+
+  return {
+    signal,
+    confidence,
+    positionSize,
+    v3: data.v3,
+    v4,
+    bullScore: bull.score,
+    bearScore: bear.score,
+    scoreMax: scoreMax,
+  }
+}
+
+// ─── Exit decision ────────────────────────────────────────────────────────────
+export function shouldExit(
+  position: ActivePosition,
+  currentData: AllSignalData,
+  currentPrice: number,
+  config: Pick<StrategyConfig, 'maxProfitPct' | 'maxLossPct' | 'trailPct'>,
+): { exit: boolean; reason: string } {
+  let pct: number
+  if (position.legs && position.legs.length > 0) {
+    let totalPnl = 0
+    let totalEntryValue = 0
+    for (const leg of position.legs) {
+      const legCurrentPrice = leg.currentPrice ?? leg.entryPrice
+      const legPnl =
+        leg.tradeType === TRADE_TYPE_SELLING
+          ? (leg.entryPrice - legCurrentPrice) * leg.quantity
+          : (legCurrentPrice - leg.entryPrice) * leg.quantity
+      totalPnl += legPnl
+      totalEntryValue += leg.entryPrice * leg.quantity
+    }
+    pct = totalEntryValue > 0 ? (totalPnl / totalEntryValue) * 100 : 0
+  } else {
+    const entryPrice = position.entryPrice || 1
+    const isSelling = position.tradeType === TRADE_TYPE_SELLING
+    pct = isSelling
+      ? ((position.entryPrice - currentPrice) / entryPrice) * 100
+      : ((currentPrice - position.entryPrice) / entryPrice) * 100
+  }
+
+  if (pct >= config.maxProfitPct)
+    return { exit: true, reason: `Profit +${pct.toFixed(1)}% reached` }
+  if (pct <= -config.maxLossPct)
+    return {
+      exit: true,
+      reason: `Stop loss -${Math.abs(pct).toFixed(1)}% triggered`,
+    }
+
+  // Trailing stop: exit when the price retraces trailPct% from the peak
+  // favorable price, but only when the position is in profit.
+  const trailPct = config.trailPct
+  const peak = position.peakFavorablePrice
+  if (trailPct !== undefined && trailPct > 0 && peak !== undefined) {
+    const isSelling = position.tradeType === TRADE_TYPE_SELLING
+    if (isSelling && peak < position.entryPrice) {
+      const trailPrice = peak * (1 + trailPct / 100)
+      if (currentPrice >= trailPrice) {
+        return {
+          exit: true,
+          reason: `Trailing stop — price ${currentPrice.toFixed(2)} rose ${trailPct}% from peak ${peak.toFixed(2)}`,
+        }
+      }
+    } else if (!isSelling && peak > position.entryPrice) {
+      const trailPrice = peak * (1 - trailPct / 100)
+      if (currentPrice <= trailPrice) {
+        return {
+          exit: true,
+          reason: `Trailing stop — price ${currentPrice.toFixed(2)} dropped ${trailPct}% from peak ${peak.toFixed(2)}`,
+        }
+      }
+    }
+  }
+
+  const v4 = getV4Signal(currentData.indicators)
+  const isSellingMode = position.tradeType === TRADE_TYPE_SELLING
+  const isBullishBias = isSellingMode
+    ? position.direction === LEG_DIRECTION_PE
+    : position.direction === LEG_DIRECTION_CE
+
+  const reversal = isBullishBias ? SIGNAL_SELL : SIGNAL_BUY
+  if (v4 === reversal)
+    return { exit: true, reason: `V4 signal reversed to ${v4}` }
+
+  const v3Reversal = isBullishBias ? ORDER_TYPE_SELL : ORDER_TYPE_BUY
+  if (currentData.v3 === v3Reversal)
+    return { exit: true, reason: `V3 signal reversed to ${currentData.v3}` }
+
+  const ad = currentData.vrd?.advancesDeclines
+  if (ad?.ratio != null) {
+    if (isBullishBias && ad.ratio < 0.8)
+      return { exit: true, reason: 'Breadth turned bearish' }
+    if (!isBullishBias && ad.ratio > 1.5)
+      return { exit: true, reason: 'Breadth turned bullish' }
+  }
+
+  return { exit: false, reason: '' }
+}
+
+// ─── Hard stop checks (Layer 0) ───────────────────────────────────────────────
+export function runHardStopChecks(vrd: VrdData | null): {
+  blocked: boolean
+  blockedDirection: 'CE' | 'PE' | 'BOTH' | 'NONE'
+  reasons: string[]
+} {
+  const reasons: string[] = []
+  let blockedDirection: 'CE' | 'PE' | 'BOTH' | 'NONE' = 'NONE'
+
+  // Only VIX is a reliable hard stop (real Upstox data). Nifty PE is now
+  // synthetic (proxy-computed from indicators) and is penalised through scoring
+  // instead — see scoreNiftyPE() in scoreBearish/scoreBullish.
+  if (!vrd) return { blocked: false, blockedDirection: 'NONE', reasons }
+  const vixCheck = scoreVix(vrd.vix)
+  if (!vixCheck.tradeable) {
+    reasons.push(vixCheck.label)
+    blockedDirection = 'BOTH'
+  }
+
+  // Brent Crude check removed from hard stops in favor of sentiment scoring.
+
+  if (vrd.newsAlerts) {
+    const highMacro = vrd.newsAlerts.find(
+      (alert) => alert.type === 'MACRO' && alert.severity === 'HIGH',
+    )
+    if (highMacro) {
+      reasons.push(`Macro Guard: High Risk Event - ${highMacro.headline}`)
+      blockedDirection = 'BOTH'
+    }
+  }
+
+  return { blocked: reasons.length > 0, blockedDirection, reasons }
+}
+
+// ─── V4 composite signal ──────────────────────────────────────────────────────
+function getV4Signal(ind: IndicatorsResult): SignalType {
+  const { ema, adx, pcr, bollinger } = ind
+  let baseSignal: SignalType = SIGNAL_HOLD
+
+  // All 4 agree
+  if (
+    ema === SIGNAL_BUY &&
+    (adx === SIGNAL_BUY || adx === SIGNAL_HOLD) &&
+    pcr === SIGNAL_BUY &&
+    bollinger.signal === SIGNAL_BUY
+  ) {
+    baseSignal = SIGNAL_BUY
+  } else if (
+    ema === SIGNAL_SELL &&
+    (adx === SIGNAL_SELL || adx === SIGNAL_HOLD) &&
+    pcr === SIGNAL_SELL &&
+    bollinger.signal === SIGNAL_SELL
+  ) {
+    baseSignal = SIGNAL_SELL
+  } else {
+    // 3 of 4 agree (relaxed)
+    const buyVotes = [
+      ema === SIGNAL_BUY,
+      adx === SIGNAL_BUY,
+      pcr === SIGNAL_BUY,
+      bollinger.signal === SIGNAL_BUY,
+    ].filter(Boolean).length
+    const sellVotes = [
+      ema === SIGNAL_SELL,
+      adx === SIGNAL_SELL,
+      pcr === SIGNAL_SELL,
+      bollinger.signal === SIGNAL_SELL,
+    ].filter(Boolean).length
+    if (buyVotes >= 3) baseSignal = SIGNAL_BUY
+    if (sellVotes >= 3) baseSignal = SIGNAL_SELL
+  }
+
+  return baseSignal
+}
+
+function addScore(
+  breakdown: ScoreBreakdown[],
+  layer: string,
+  indicator: string,
+  condition: string,
+  points: number,
+  max: number,
+): number {
+  breakdown.push({ layer, indicator, condition, points, max })
+  return points
+}
+
+// ─── Bullish scoring ──────────────────────────────────────────────────────────
+export function scoreBullish(
+  data: AllSignalData,
+  config?: Partial<StrategyConfig>,
+): ScoreResult {
+  const bd: ScoreBreakdown[] = []
+  let score = 0
+  let max = 0
+  const v4 = getV4Signal(data.indicators)
+
+  // V3 (4 pts)
+  const v3p =
+    data.v3 === ORDER_TYPE_BUY ? 4 : data.v3 === ORDER_TYPE_HOLD ? 0 : -2
+  score += addScore(bd, 'V3', 'Macro Signal', data.v3, v3p, 4)
+  max += 4
+
+  // V4 (5 pts)
+  const v4p = v4 === SIGNAL_BUY ? 5 : v4 === SIGNAL_HOLD ? 0 : -3
+  score += addScore(bd, 'V4', 'Price Action', v4, v4p, 5)
+  max += 5
+
+  // EMA (3 pts)
+  const emap =
+    data.indicators.ema === SIGNAL_BUY
+      ? 3
+      : data.indicators.ema === SIGNAL_HOLD
+        ? 0
+        : -1
+  score += addScore(bd, 'V4', 'EMA Crossover', data.indicators.ema, emap, 3)
+  max += 3
+
+  // RSI (2 pts)
+  const rsip =
+    data.indicators.rsi.signal === 'Oversold'
+      ? 2
+      : data.indicators.rsi.signal === SIGNAL_HOLD
+        ? 1
+        : -1
+  score += addScore(
+    bd,
+    'V4',
+    `RSI ${data.indicators.rsi.value.toFixed(1)}`,
+    data.indicators.rsi.signal,
+    rsip,
+    2,
+  )
+  max += 2
+
+  // ATR (penalty only)
+  if (data.indicators.atr.level === 'Low') {
+    score += addScore(bd, 'V4', 'ATR', 'Low volatility', -2, 0)
+  }
+
+  // VRD signals
+  if (data.vrd) {
+    const mmi = scoreMMI(data.vrd.mmi?.score ?? null)
+    if (mmi.direction === 'BULL') {
+      max += mmi.max
+      score += addScore(bd, 'L2', 'MMI', mmi.label, mmi.score, mmi.max)
+    }
+
+    const ad = data.vrd.advancesDeclines
+    const adS = scoreADRatio(
+      ad?.advances ?? null,
+      ad?.declines ?? null,
+      ad?.ratio ?? null,
+    )
+    if (adS.direction === 'BULL') {
+      max += adS.max
+      score += addScore(bd, 'L3', 'A/D Ratio', adS.label, adS.score, adS.max)
+    }
+
+    const fii = data.vrd.fiiLongShort
+    const fiiS = scoreFiiLongShort(fii?.longPct ?? null, fii?.shortPct ?? null)
+    if (fiiS.direction === 'BULL' || fiiS.contrarian) {
+      max += fiiS.max
+      score += addScore(bd, 'L2', 'FII L/S', fiiS.label, fiiS.score, fiiS.max)
+    }
+
+    const pos = data.vrd.fiiPositioning
+    const posS = scoreFiiPositioning(
+      pos?.netPosition ?? null,
+      pos?.consecutiveShortDays ?? null,
+    )
+    if (posS.score > 0) {
+      max += posS.max
+      score += addScore(
+        bd,
+        'L2',
+        'FII Positioning',
+        posS.label,
+        posS.score,
+        posS.max,
+      )
+    }
+
+    const pe = scoreNiftyPE(data.vrd.niftyPe?.pe ?? null)
+    if (pe.bias !== LEG_DIRECTION_PE) {
+      max += pe.max
+      score += addScore(bd, 'L2', 'Nifty PE', pe.label, pe.score, pe.max)
+    }
+
+    const iv = scoreStraddleIV(data.vrd.straddleIv?.percentAboveAvg ?? null)
+    if (iv.preferBuy) {
+      max += iv.max
+      score += addScore(bd, 'L3', 'Straddle IV', iv.label, iv.score, iv.max)
+    }
+  }
+
+  // Brent Crude Overhang Penalty (Commodities)
+  if (data.globalIndices) {
+    const brent = data.globalIndices.find(
+      (item) => item.symbol.toLowerCase() === 'brent oil',
+    )
+    const brentPrice = brent?.last_price ? Number(brent.last_price) : null
+    const brentOverhangThreshold = config?.brentCrudeOverhangThreshold ?? 88
+    const brentExtremeThreshold = config?.brentCrudeExtremeThreshold ?? 125
+    if (brentPrice !== null) {
+      if (brentPrice >= brentExtremeThreshold) {
+        score += addScore(
+          bd,
+          'Macro',
+          'Brent Crude Extreme Risk',
+          `Oil at $${brentPrice} >= $${brentExtremeThreshold} (severe penalty)`,
+          -4,
+          0,
+        )
+      } else if (brentPrice >= brentOverhangThreshold) {
+        score += addScore(
+          bd,
+          'Macro',
+          'Brent Crude Overhang',
+          `Oil at $${brentPrice} >= $${brentOverhangThreshold} (penalty)`,
+          -2,
+          0,
+        )
+      }
+    }
+  }
+
+  // News Alerts Macro / Earnings Guard Penalty
+  if (data.vrd?.newsAlerts) {
+    const macroAlerts = data.vrd.newsAlerts.filter(
+      (alert) =>
+        alert.type === 'MACRO' &&
+        (alert.severity === 'HIGH' || alert.severity === 'MEDIUM'),
+    )
+    const earningsAlerts = data.vrd.newsAlerts.filter(
+      (alert) =>
+        alert.type === 'EARNINGS' &&
+        (alert.severity === 'HIGH' || alert.severity === 'MEDIUM'),
+    )
+    if (macroAlerts.length > 0) {
+      score += addScore(
+        bd,
+        'Macro',
+        'Macro News Penalty',
+        `Classified ${macroAlerts.length} risk events (penalty)`,
+        -2 * macroAlerts.length,
+        0,
+      )
+    }
+    if (earningsAlerts.length > 0) {
+      score += addScore(
+        bd,
+        'Macro',
+        'Earnings News Penalty',
+        `Classified ${earningsAlerts.length} earnings events (penalty)`,
+        -1 * earningsAlerts.length,
+        0,
+      )
+    }
+  }
+
+  return { score: Math.max(0, score), max, breakdown: bd }
+}
+
+// ─── Bearish scoring ──────────────────────────────────────────────────────────
+export function scoreBearish(
+  data: AllSignalData,
+  config?: Partial<StrategyConfig>,
+): ScoreResult {
+  const bd: ScoreBreakdown[] = []
+  let score = 0
+  let max = 0
+  const v4 = getV4Signal(data.indicators)
+
+  const v3p =
+    data.v3 === ORDER_TYPE_SELL ? 4 : data.v3 === ORDER_TYPE_HOLD ? 0 : -2
+  score += addScore(bd, 'V3', 'Macro Signal', data.v3, v3p, 4)
+  max += 4
+
+  const v4p = v4 === SIGNAL_SELL ? 5 : v4 === SIGNAL_HOLD ? 0 : -3
+  score += addScore(bd, 'V4', 'Price Action', v4, v4p, 5)
+  max += 5
+
+  const emap =
+    data.indicators.ema === SIGNAL_SELL
+      ? 3
+      : data.indicators.ema === SIGNAL_HOLD
+        ? 0
+        : -1
+  score += addScore(bd, 'V4', 'EMA Crossover', data.indicators.ema, emap, 3)
+  max += 3
+
+  const rsip =
+    data.indicators.rsi.signal === 'Overbought'
+      ? 2
+      : data.indicators.rsi.signal === SIGNAL_HOLD
+        ? 1
+        : -1
+  score += addScore(
+    bd,
+    'V4',
+    `RSI ${data.indicators.rsi.value.toFixed(1)}`,
+    data.indicators.rsi.signal,
+    rsip,
+    2,
+  )
+  max += 2
+
+  if (data.indicators.atr.level === 'Low') {
+    score += addScore(bd, 'V4', 'ATR', 'Low volatility', -2, 0)
+  }
+
+  if (data.vrd) {
+    const mmi = scoreMMI(data.vrd.mmi?.score ?? null)
+    if (mmi.direction === 'BEAR') {
+      max += mmi.max
+      const pts = Math.abs(mmi.score)
+      score += addScore(bd, 'L2', 'MMI', mmi.label, pts, mmi.max)
+    }
+
+    const ad = data.vrd.advancesDeclines
+    const adS = scoreADRatio(
+      ad?.advances ?? null,
+      ad?.declines ?? null,
+      ad?.ratio ?? null,
+    )
+    if (adS.direction === 'BEAR') {
+      max += adS.max
+      score += addScore(
+        bd,
+        'L3',
+        'A/D Ratio',
+        adS.label,
+        Math.abs(adS.score),
+        adS.max,
+      )
+    }
+
+    // FII L/S — momentum-short scoring (shortPct 60–79%)
+    const fiiLs = data.vrd.fiiLongShort
+    const fiiLsS = scoreFiiLongShort(
+      fiiLs?.longPct ?? null,
+      fiiLs?.shortPct ?? null,
+    )
+    if (fiiLsS.direction === 'BEAR') {
+      max += fiiLsS.max
+      score += addScore(
+        bd,
+        'L2',
+        'FII L/S',
+        fiiLsS.label,
+        Math.abs(fiiLsS.score),
+        fiiLsS.max,
+      )
+    }
+
+    // FII Net Positioning — negative net = FII net short = bearish confirmation
+    const fiiPos = data.vrd.fiiPositioning
+    const fiiPosS = scoreFiiPositioning(
+      fiiPos?.netPosition ?? null,
+      fiiPos?.consecutiveShortDays ?? null,
+    )
+    if (fiiPosS.score < 0) {
+      max += fiiPosS.max
+      score += addScore(
+        bd,
+        'L2',
+        'FII Positioning',
+        fiiPosS.label,
+        Math.abs(fiiPosS.score),
+        fiiPosS.max,
+      )
+    }
+
+    const pe = scoreNiftyPE(data.vrd.niftyPe?.pe ?? null)
+    if (pe.bias === LEG_DIRECTION_PE) {
+      max += pe.max
+      score += addScore(
+        bd,
+        'L2',
+        'Nifty PE',
+        pe.label,
+        Math.abs(pe.score),
+        pe.max,
+      )
+    }
+
+    const iv = scoreStraddleIV(data.vrd.straddleIv?.percentAboveAvg ?? null)
+    if (!iv.preferBuy && iv.score < 0) {
+      max += iv.max
+      score += addScore(
+        bd,
+        'L3',
+        'Straddle IV',
+        iv.label,
+        Math.abs(iv.score),
+        iv.max,
+      )
+    }
+  }
+
+  // Brent Crude Overhang Bonus (Commodities)
+  if (data.globalIndices) {
+    const brent = data.globalIndices.find(
+      (item) => item.symbol.toLowerCase() === 'brent oil',
+    )
+    const brentPrice = brent?.last_price ? Number(brent.last_price) : null
+    const brentOverhangThreshold = config?.brentCrudeOverhangThreshold ?? 88
+    const brentExtremeThreshold = config?.brentCrudeExtremeThreshold ?? 125
+    if (brentPrice !== null) {
+      if (brentPrice >= brentExtremeThreshold) {
+        max += 2
+        score += addScore(
+          bd,
+          'Macro',
+          'Brent Crude Extreme Risk',
+          `Oil at $${brentPrice} >= $${brentExtremeThreshold} (strong bearish catalyst)`,
+          2,
+          2,
+        )
+      } else if (brentPrice >= brentOverhangThreshold) {
+        max += 1
+        score += addScore(
+          bd,
+          'Macro',
+          'Brent Crude Overhang',
+          `Oil at $${brentPrice} >= $${brentOverhangThreshold} (bearish catalyst)`,
+          1,
+          1,
+        )
+      }
+    }
+  }
+
+  // News Alerts Macro / Earnings Guard confirmation & penalty
+  if (data.vrd?.newsAlerts) {
+    const macroAlerts = data.vrd.newsAlerts.filter(
+      (alert) =>
+        alert.type === 'MACRO' &&
+        (alert.severity === 'HIGH' || alert.severity === 'MEDIUM'),
+    )
+    const earningsAlerts = data.vrd.newsAlerts.filter(
+      (alert) =>
+        alert.type === 'EARNINGS' &&
+        (alert.severity === 'HIGH' || alert.severity === 'MEDIUM'),
+    )
+    if (macroAlerts.length > 0) {
+      const pts = Math.min(2, macroAlerts.length)
+      score += addScore(
+        bd,
+        'Macro',
+        'Macro News Confirmation',
+        `Classified ${macroAlerts.length} risk events (bearish catalyst)`,
+        pts,
+        2,
+      )
+    }
+    if (earningsAlerts.length > 0) {
+      score += addScore(
+        bd,
+        'Macro',
+        'Earnings News Penalty',
+        `Classified ${earningsAlerts.length} earnings events (penalty)`,
+        -1 * earningsAlerts.length,
+        0,
+      )
+    }
+  }
+
+  return { score: Math.max(0, score), max, breakdown: bd }
+}

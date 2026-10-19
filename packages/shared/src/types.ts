@@ -87,6 +87,13 @@ export interface IndicatorsResult {
   atr: { value: number; level: VolatilityLevel }
   pcr: SignalType
   pcrValue: number
+  /**
+   * Higher-timeframe (5-min resampled) EMA 10/42 trend direction.
+   * Used as a multi-timeframe confluence filter: BUY_CE signals are blocked
+   * when the 5-min trend is bearish, and BUY_PE when it is bullish. 'Hold'
+   * (neutral) or undefined does not block either direction.
+   */
+  higherTimeframeTrend?: SignalType
 }
 
 export interface NewsAlert {
@@ -124,6 +131,8 @@ export interface VrdData {
     netPosition: number | null
     consecutiveShortDays: number | null
   } | null
+  /** DII net cash (₹ Cr) — display-only dashboard source, not strategy input. */
+  diiNetCashCr?: number | null
   pcr: { value: number | null; zone: string | null } | null
   straddleIv: {
     elevated: boolean | null
@@ -235,6 +244,8 @@ export interface StrategyConfig {
   moderateGap: number
   maxProfitPct: number
   maxLossPct: number
+  /** Trailing stop percentage from peak favorable price (default 5). */
+  trailPct?: number
   maxTradesPerDay: number
   /** Optional global cap across ALL symbols per IST day (CR-14). Unset = off. */
   maxTotalTradesPerDay?: number
@@ -251,6 +262,13 @@ export interface StrategyConfig {
   brentCrudeExtremeThreshold: number
   brentCrudeOverhangThreshold: number
   exitCooldownSec?: number
+  /** Prefer tick-level stream prices for exits/PnL when available. */
+  useMarketStream?: boolean
+  /**
+   * When true (default), BUY_CE signals are blocked when the 5-min
+   * resampled EMA 10/42 trend is bearish, and BUY_PE when it is bullish.
+   */
+  useMultiTimeframe?: boolean
 }
 
 export interface PaperAccount {
@@ -436,12 +454,27 @@ export interface MarketSnapshot {
   indicators?: IndicatorsResult
   vrdData?: VrdData
   signal?: FinalSignal
+  /** Global indices snapshot used by the V3 macro layer + score panel. */
+  globalIndices?: McMarketItem[]
   /** CR-11 data-freshness telemetry (live daemon): per-source ages + entry blockers. */
   sources?: {
     quoteAgeMs: number | null
     candlesAgeMs: number | null
     chainAgeMs: number | null
     vixAgeMs: number | null
+    /** Age of the last live market-wide VRD fetch (null in mock mode). */
+    vrdAgeMs?: number | null
+    /**
+     * `live` means the VRD is authoritative for live entries (fresh market-wide
+     * fetch + VIX). `fallback` means degraded/chain-derived composition.
+     */
+    vrdSource?: 'live' | 'fallback'
+    /**
+     * Fail-closed sentiment fault. When non-null, LIVE entries are blocked
+     * (`useRealVrd` is on but the VRD/VIX pipeline could not prove fresh live
+     * data). Paper entries continue so the bot can be exercised in staging.
+     */
+    sentimentFault?: string | null
     entryBlockedReasons: string[]
   }
 }
