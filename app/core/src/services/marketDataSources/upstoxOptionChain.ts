@@ -22,8 +22,12 @@ function authHeaders(token: string): Record<string, string> {
 }
 
 /**
- * Nearest non-past expiry (YYYY-MM-DD) among the active contracts of an underlying.
- * Returns null when the contract list has no upcoming expiry.
+ * Nearest strictly future expiry (YYYY-MM-DD) among the active contracts of
+ * an underlying. Returns null when the contract list has no upcoming expiry.
+ *
+ * CR-12: same-day (0-DTE) contracts are deliberately skipped. The strategy's
+ * premium/SL/TP assumptions are calibrated for multi-day weeklies; 0-DTE
+ * gamma/theta makes those risk layers tick-dominated (reference parity).
  */
 export async function fetchNearestExpiry(opts: UpstoxOptionsRequest): Promise<string | null> {
   const res = await fetch(
@@ -41,7 +45,8 @@ export async function fetchNearestExpiry(opts: UpstoxOptionsRequest): Promise<st
   }
 
   const today = getIndiaTime().dateString
-  const upcoming = [...expiries].filter((expiry) => expiry >= today).sort()
+  // Strictly future: never trade the expiry-day (0-DTE) contract.
+  const upcoming = [...expiries].filter((expiry) => expiry > today).sort()
   return upcoming[0] ?? null
 }
 

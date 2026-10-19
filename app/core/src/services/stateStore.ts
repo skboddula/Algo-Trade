@@ -28,6 +28,8 @@ const { DatabaseSync } = nodeRequire('node:sqlite') as typeof import('node:sqlit
 export class StateStore {
   private db: DatabaseSyncType
   private closed = false
+  /** CR-15: rows skipped during the last load (unreadable JSON), for surfacing. */
+  private loadErrors: string[] = []
   private saveUserStmt: StatementSync
   private loadUsersStmt: StatementSync
   private saveAccountStmt: StatementSync
@@ -59,7 +61,7 @@ export class StateStore {
          updated_at = excluded.updated_at`,
     )
     this.loadUsersStmt = this.db.prepare(
-      'SELECT state_json FROM bot_state ORDER BY user_id',
+      'SELECT user_id, state_json FROM bot_state ORDER BY user_id',
     )
     this.saveAccountStmt = this.db.prepare(
       `INSERT INTO paper_accounts (id, user_id, mode, balance, currency, updated_at)
@@ -156,16 +158,25 @@ export class StateStore {
   }
 
   public loadUserStates(): UserBotState[] {
-    const rows = this.loadUsersStmt.all() as { state_json: string }[]
+    this.loadErrors = []
+    const rows = this.loadUsersStmt.all() as { user_id: string; state_json: string }[]
     const users: UserBotState[] = []
     for (const row of rows) {
       try {
         users.push(JSON.parse(row.state_json) as UserBotState)
-      } catch {
-        // Skip unreadable rows rather than failing daemon startup.
+      } catch (err) {
+        // Skip unreadable rows rather than failing daemon startup, but keep
+        // the failure so the caller can surface it (CR-15) — a skipped row
+        // can mean an open position the daemon no longer knows about.
+        this.loadErrors.push(`${row.user_id}: ${(err as Error).message}`)
       }
     }
     return users
+  }
+
+  /** CR-15: unreadable rows skipped by the most recent loadUserStates(). */
+  public getLoadErrors(): string[] {
+    return [...this.loadErrors]
   }
 
   public savePaperAccount(account: PaperAccount): void {

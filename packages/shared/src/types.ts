@@ -236,6 +236,8 @@ export interface StrategyConfig {
   maxProfitPct: number
   maxLossPct: number
   maxTradesPerDay: number
+  /** Optional global cap across ALL symbols per IST day (CR-14). Unset = off. */
+  maxTotalTradesPerDay?: number
   lastEntryTime: string
   /** EOD square-off time (IST HH:MM) — open positions are force-closed at
    *  this time; independent of lastEntryTime (entries close earlier than

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { StateStore } from '../services/stateStore'
 import { DEFAULT_STRATEGY_CONFIG } from '../constants'
 import type { PaperTradeRecord, UserBotState } from '../types'
@@ -155,6 +156,26 @@ describe('StateStore', () => {
     expect(trades[0].realizedPnl).toBe(75000)
     expect(trades[0].metadata?.exitReason).toBe('EOD')
     store.close()
+  })
+
+  it('surfaces unreadable state rows instead of skipping silently (CR-15)', () => {
+    const dir = tempDir()
+    const store = new StateStore(dir)
+    store.saveUserState(sampleUser())
+    store.close()
+
+    // Corrupt the row behind the store's back (bit rot / manual tampering).
+    const nodeRequire = createRequire(path.join(process.cwd(), 'package.json'))
+    const { DatabaseSync } = nodeRequire('node:sqlite') as typeof import('node:sqlite')
+    const raw = new DatabaseSync(path.join(dir, 'algo-trade.sqlite'))
+    raw.prepare('UPDATE bot_state SET state_json = ? WHERE user_id = ?').run('{not json', 'u1')
+    raw.close()
+
+    const store2 = new StateStore(dir)
+    expect(store2.loadUserStates()).toHaveLength(0)
+    expect(store2.getLoadErrors()).toHaveLength(1)
+    expect(store2.getLoadErrors()[0]).toContain('u1')
+    store2.close()
   })
 
   it('creates the data directory if missing and closes idempotently', () => {

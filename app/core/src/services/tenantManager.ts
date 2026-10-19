@@ -42,6 +42,10 @@ export class TenantManager extends EventEmitter {
   private vixWarningLevel: 'none' | 'elevated' | 'critical' = 'none'
   private lastVixAlertAt = 0
   private dailySummaryDate: string | null = null
+  // CR-15: a failed critical state write is an operational fault. Live
+  // entries are blocked until persistence is healthy again; paper continues
+  // in-memory (the fault stays surfaced via getPersistenceFault()).
+  private persistenceFault: string | null = null
 
   constructor(
     masterIngestor: MasterIngestionEngine,
@@ -62,6 +66,12 @@ export class TenantManager extends EventEmitter {
       for (const persisted of this.store.loadUserStates()) {
         this.users.set(persisted.userId, persisted)
       }
+      // CR-15: unreadable rows are skipped rather than failing startup, but
+      // they must never pass silently — a skipped row can mean an open
+      // position the daemon no longer knows about.
+      for (const error of this.store.getLoadErrors()) {
+        console.error(`[persistence] skipped unreadable bot_state row — ${error}`)
+      }
     }
 
     // Stream any rehydrated open-position contracts at tick level
@@ -73,6 +83,11 @@ export class TenantManager extends EventEmitter {
         this.emit('error', err)
       })
     })
+  }
+
+  /** CR-15: current persistence fault, or null when writes are healthy. */
+  public getPersistenceFault(): string | null {
+    return this.persistenceFault
   }
 
   public getOrCreateUser(userId: string): UserBotState {
@@ -185,6 +200,13 @@ export class TenantManager extends EventEmitter {
     const requestedMode = executionMode ?? user.executionMode
     if (requestedMode === 'live') {
       this.requireLiveArmed()
+      // CR-15: never start live on top of a broken state store — a restart
+      // would not see the positions this session opens.
+      if (this.persistenceFault !== null) {
+        throw new Error(
+          `Live trading blocked: persistence fault (${this.persistenceFault})`,
+        )
+      }
     }
 
     // Every user shares ONE broker token: two active users would place
@@ -385,7 +407,21 @@ export class TenantManager extends EventEmitter {
         }
 
         // ── 2. Evaluate New Entry (If no position and before cutoff) ──────────
-        if (!position && user.state === 'RUNNING' && !afterEntryCutoff) {
+        // CR-03: STOPPED bots never enter. CR-14: ORDERED bots CAN enter on
+        // their remaining symbols (ALL_PARALLEL semantics — the per-symbol
+        // `position` check above is the duplicate guard).
+        const entriesEnabled = user.state === 'RUNNING' || user.state === 'ORDERED'
+        if (!position && entriesEnabled && !afterEntryCutoff) {
+          // CR-15 (entry path): a failed state write means the persisted state
+          // no longer matches reality. Block new LIVE entries until writes
+          // recover; paper entries continue in-memory (the fault is surfaced).
+          if (user.executionMode === 'live' && this.persistenceFault !== null) continue
+
+          // CR-14: optional GLOBAL cap across all symbols for the day
+          // (unset = off; per-symbol maxTradesPerDay still applies below).
+          const totalCap = user.config.maxTotalTradesPerDay
+          if (totalCap !== undefined && (user.tradesCountToday || 0) >= totalCap) continue
+
           // CR-11: never enter on stale data — the ingestor stamps
           // snapshot.sources each tick (quote / candles / chain freshness)
           // and the blocker list is empty in mock mode.
@@ -510,7 +546,22 @@ export class TenantManager extends EventEmitter {
     const last = this.lastPersistAt.get(user.userId) ?? 0
     if (!immediate && now - last < 2000) return
     this.lastPersistAt.set(user.userId, now)
-    this.store.saveUserState(user)
+    try {
+      this.store.saveUserState(user)
+      if (this.persistenceFault !== null) {
+        this.persistenceFault = null
+        console.info('[persistence] user-state writes healthy again')
+      }
+    } catch (err) {
+      const message = (err as Error).message
+      // Log once per fault episode (the gate blocks on every tick silently).
+      if (this.persistenceFault === null) {
+        console.error(
+          `[persistence] CRITICAL: user-state save FAILED — live entries blocked until resolved: ${message}`,
+        )
+      }
+      this.persistenceFault = `user-state save failed: ${message}`
+    }
   }
 
   private fireAlert(text: string): void {

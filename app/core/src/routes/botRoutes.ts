@@ -106,6 +106,9 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
       snapshots,
       userState: sanitizeUserState(userState),
       paperTrades,
+      // CR-15: null when healthy; a message means live entries are blocked
+      // until the state store recovers (paper continues in-memory).
+      persistenceFault: tenantManager.getPersistenceFault(),
       // Boolean only — the master token itself never leaves the daemon.
       hasToken: Boolean(masterIngestor.getMasterToken()),
       // Boolean only — whether this user has a per-user order-token override.

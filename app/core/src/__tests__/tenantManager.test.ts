@@ -278,4 +278,157 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
 
     store.close()
   })
+
+  it('allows entries on other symbols while ORDERED (ALL_PARALLEL, CR-14)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    try {
+      const ingestor = new MasterIngestionEngine({ mockMode: true })
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(ingestor, gateway)
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+
+      manager.startBot('parallel', 'paper')
+      manager.updateConfig('parallel', {
+        underlyingMode: 'ALL_PARALLEL',
+        lastEntryTime: '23:59',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+      })
+
+      const user = manager.getOrCreateUser('parallel')
+      // One open position in NIFTY keeps the bot ORDERED.
+      user.positions['NIFTY 50'] = {
+        instrumentKey: 'NSE_FO|CE1',
+        direction: 'CE',
+        entryPrice: 100,
+        quantity: 1,
+        entryTime: new Date().toISOString(),
+        tradeId: 1,
+        executionMode: 'paper',
+        tradeType: 'buying',
+        currentPrice: 100,
+        underlyingSymbol: 'NIFTY 50',
+      }
+      user.state = 'ORDERED'
+
+      const { snapshot } = buildEntryTick()
+      const tick = {
+        timestamp: new Date().toISOString(),
+        snapshots: {
+          'NIFTY 50': snapshot,
+          BANKNIFTY: { ...snapshot, underlyingSymbol: 'BANKNIFTY' },
+        },
+      }
+      await (manager as any).handleMarketTick(tick)
+
+      expect(placeSpy).toHaveBeenCalledTimes(1)
+      expect(user.positions['NIFTY 50']).not.toBeNull()
+      expect(user.positions['BANKNIFTY']).not.toBeNull()
+      placeSpy.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('enforces the optional global daily cap across symbols (CR-14)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    try {
+      const ingestor = new MasterIngestionEngine({ mockMode: true })
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(ingestor, gateway)
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+
+      manager.startBot('capped', 'paper')
+      manager.updateConfig('capped', {
+        underlyingMode: 'ALL_PARALLEL',
+        lastEntryTime: '23:59',
+        maxTotalTradesPerDay: 1,
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+      })
+      const user = manager.getOrCreateUser('capped')
+      user.tradesCountToday = 1
+
+      const { tick } = buildEntryTick()
+      await (manager as any).handleMarketTick(tick)
+
+      expect(placeSpy).not.toHaveBeenCalled()
+      expect(user.positions['NIFTY 50']).toBeNull()
+      placeSpy.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('surfaces persistence faults, blocks live entries, lets paper continue (CR-15)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    const oldArm = process.env[TenantManager.LIVE_ARM_ENV]
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {})
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'algo-persist-fault-'))
+    const store = new StateStore(dir)
+    try {
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        gateway,
+        { store },
+      )
+      process.env[TenantManager.LIVE_ARM_ENV] = 'true'
+
+      // A failed critical write is surfaced and blocks a live start.
+      const failSave = () => {
+        throw new Error('disk full')
+      }
+      const saveSpy = vi.spyOn(store, 'saveUserState').mockImplementation(failSave)
+      expect(() => manager.startBot('live-start', 'live')).toThrow(/persistence fault/)
+      expect(manager.getPersistenceFault()).toContain('disk full')
+      saveSpy.mockRestore()
+
+      // Paper trading continues while the store is broken.
+      manager.startBot('paper-ok', 'paper')
+      manager.updateConfig('paper-ok', {
+        lastEntryTime: '23:59',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+      })
+      const paper = manager.getOrCreateUser('paper-ok')
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+      const saveSpy2 = vi.spyOn(store, 'saveUserState').mockImplementation(failSave)
+
+      const { tick } = buildEntryTick()
+      await (manager as any).handleMarketTick(tick)
+      expect(placeSpy).toHaveBeenCalledTimes(1)
+      expect(paper.positions['NIFTY 50']).not.toBeNull()
+
+      // ... but new LIVE entries are blocked while the fault is active.
+      const liveUser = manager.getOrCreateUser('live-entry')
+      liveUser.executionMode = 'live'
+      liveUser.config.executionMode = 'live'
+      liveUser.state = 'RUNNING'
+      placeSpy.mockClear()
+      await (manager as any).handleMarketTick(tick)
+      expect(placeSpy).not.toHaveBeenCalled()
+      expect(liveUser.positions['NIFTY 50']).toBeNull()
+
+      // Recovery clears the fault once a write succeeds again.
+      saveSpy2.mockRestore()
+      manager.updateConfig('live-entry', { strongThreshold: 2 })
+      expect(manager.getPersistenceFault()).toBeNull()
+      placeSpy.mockRestore()
+    } finally {
+      if (oldArm === undefined) delete process.env[TenantManager.LIVE_ARM_ENV]
+      else process.env[TenantManager.LIVE_ARM_ENV] = oldArm
+      errorSpy.mockRestore()
+      infoSpy.mockRestore()
+      store.close()
+      vi.useRealTimers()
+    }
+  })
 })

@@ -39,6 +39,36 @@ describe('fetchNearestExpiry', () => {
     expect(urls[0]).toBe('http://rest.test/v2/option/contract?instrument_key=NSE_INDEX%7CNifty%2050')
   })
 
+  it('skips a same-day (0-DTE) expiry and returns the next future one (CR-12)', async () => {
+    const today = getIndiaTime().dateString
+    const next = istDatePlusDays(7)
+    stubFetch(() => ({
+      ok: true,
+      json: async () => ({ data: [{ expiry: today }, { expiry: next }] }),
+    }))
+
+    const expiry = await fetchNearestExpiry({
+      restApiBaseUrl: 'http://rest.test/v2',
+      token: 'tok',
+      instrumentKey: 'NSE_INDEX|Nifty 50',
+    })
+
+    expect(expiry).toBe(next)
+  })
+
+  it('returns null when only a same-day expiry is listed (CR-12)', async () => {
+    stubFetch(() => ({
+      ok: true,
+      json: async () => ({ data: [{ expiry: getIndiaTime().dateString }] }),
+    }))
+    const expiry = await fetchNearestExpiry({
+      restApiBaseUrl: 'http://rest.test/v2',
+      token: 'tok',
+      instrumentKey: 'NSE_INDEX|Nifty 50',
+    })
+    expect(expiry).toBeNull()
+  })
+
   it('returns null when no upcoming expiry exists', async () => {
     stubFetch(() => ({ ok: true, json: async () => ({ data: [{ expiry: istDatePlusDays(-1) }] }) }))
     const expiry = await fetchNearestExpiry({

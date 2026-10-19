@@ -6,11 +6,16 @@ import type { MarketSnapshot, UnderlyingSymbol } from '../types'
 
 // These tests exercise live-order token resolution, which the server-side
 // arming gate (DAEMON_LIVE_ARMED) now guards. Arm the gate for this file.
+// Pin the clock to a weekday market-hours instant so the market-hours guard
+// (NSE 09:15–15:40 IST) does not make the suite time-of-day dependent.
 beforeAll(() => {
   process.env[TenantManager.LIVE_ARM_ENV] = 'true'
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
 })
 afterAll(() => {
   delete process.env[TenantManager.LIVE_ARM_ENV]
+  vi.useRealTimers()
 })
 
 // ── Fixtures ────────────────────────────────────────────────────────────────

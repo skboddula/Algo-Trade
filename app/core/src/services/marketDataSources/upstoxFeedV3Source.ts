@@ -194,9 +194,15 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     return { spotPrice, candles: mergedCandles, optionChain: nextChain }
   }
 
-  /** Drop the current connection so the next acquire() reconnects with the new token. */
+  /**
+   * CR-09: swap the token, then reconnect immediately when one is available.
+   * Waiting for the next acquire() cycle would leave the feed dark for up to
+   * a full refresh interval after an OAuth refresh / manual token paste.
+   */
   public setToken(_token: string): void {
     this.teardownSocket()
+    // Do not revive a feed that was explicitly stopped (daemon shutdown).
+    if (!this.stopped) this.ensureConnection()
   }
 
   /** Close the feed and stop reconnecting (called on engine shutdown). */
@@ -426,7 +432,10 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   private scheduleReconnect(): void {
     if (this.stopped || this.reconnectTimer) return
     this.statReconnects += 1
-    const delay = this.reconnectDelay
+    // CR-09: ±25% jitter (reference parity) so reconnect attempts cannot
+    // synchronize into a retry storm across processes/restarts.
+    const jittered = this.reconnectDelay * (0.75 + Math.random() * 0.5)
+    const delay = Math.min(Math.round(jittered), this.reconnectMaxMs)
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       this.reconnectDelay = Math.min(Math.round(this.reconnectDelay * 1.5), this.reconnectMaxMs)
@@ -522,13 +531,26 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     const today = getIndiaTime().dateString
     const cached = this.expiryCache.get(symbol)
     if (cached && cached.date === today) {
-      if (cached.expiry) return cached.expiry
-      if (cached.failedAt && Date.now() - cached.failedAt < EXPIRY_RETRY_MS) return null
+      // CR-12: a cached expiry is usable only while it is strictly in the
+      // future. A long-running daemon crossing expiry day (or a bad fetch)
+      // must never keep requesting the expired / 0-DTE series.
+      if (cached.expiry && cached.expiry > today) return cached.expiry
+      if (cached.expiry) this.expiryCache.delete(symbol)
+      else if (cached.failedAt && Date.now() - cached.failedAt < EXPIRY_RETRY_MS) return null
     }
 
     this.statExpiry.calls += 1
     try {
       const expiry = await fetchNearestExpiry({ restApiBaseUrl: this.restApiBaseUrl, token, instrumentKey })
+      // Defensive: never cache a past/same-day expiry. fetchNearestExpiry
+      // already filters strictly future; this guards against a stale API
+      // response or a regression in the helper.
+      if (!expiry || expiry <= today) {
+        this.statExpiry.failures += 1
+        this.log(`expiry lookup for ${symbol} returned ${expiry ?? 'none'} — no strictly future expiry`)
+        this.expiryCache.set(symbol, { date: today, expiry: null, failedAt: Date.now() })
+        return null
+      }
       this.expiryCache.set(symbol, { date: today, expiry })
       return expiry
     } catch (err) {

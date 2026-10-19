@@ -357,12 +357,41 @@ describe('UpstoxFeedV3Source', () => {
     await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't0', candles, optionChain: [] })
     await waitFor(() => h.connections.length === 1, 3000, 'first connection')
 
+    // CR-10: an open position's contract is subscribed on the old socket.
+    h.source.setWatchedOptionContracts(['NSE_FO|CE_RESUB'])
+    await waitFor(
+      () => h.messages.some((m) => m.data?.instrumentKeys?.includes('NSE_FO|CE_RESUB')),
+      3000,
+      'initial option subscription',
+    )
+
     h.tokenBox.value = 'fresh-token'
     h.source.setToken('fresh-token')
     await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't1', candles, optionChain: [] })
 
     await waitFor(() => h.connections.length === 2, 3000, 'reconnected')
     expect(h.connections[1].authorization).toBe('Bearer fresh-token')
+    // CR-10: the subscription set is replayed on the new socket.
+    await waitFor(
+      () => h.messages.filter((m) => m.data?.instrumentKeys?.includes('NSE_FO|CE_RESUB')).length >= 2,
+      3000,
+      'option subscription restored after reconnect',
+    )
+  })
+
+  it('does not spin reconnects when no token is available (CR-09)', async () => {
+    const h = await startHarness({ token: '' })
+    activeHarness = h
+    const candles = sampleCandles(2)
+
+    await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't0', candles, optionChain: [] })
+    await sleep(150)
+    expect(h.connections).toHaveLength(0)
+
+    // Token arriving later must connect immediately (no wait for next cycle).
+    h.tokenBox.value = 'late-token'
+    h.source.setToken('late-token')
+    await waitFor(() => h.connections.length === 1, 3000, 'connects when token arrives')
   })
 
   it('stop() closes the socket and does not reconnect', async () => {
