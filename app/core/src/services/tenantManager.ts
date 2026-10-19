@@ -289,7 +289,11 @@ export class TenantManager extends EventEmitter {
         this.persistUser(user, true)
       }
 
-      const afterCutoff = istInfo.isAfterCutoff(user.config.lastEntryTime || '15:15')
+      // Two independent cutoffs: entries close at lastEntryTime; open
+      // positions are squared off at squareOffTime (later — aligned with
+      // the NSE 15:40 derivatives close).
+      const afterEntryCutoff = istInfo.isAfterCutoff(user.config.lastEntryTime || '15:15')
+      const afterSquareOff = istInfo.isAfterCutoff(user.config.squareOffTime || '15:35')
 
       const targetSymbols: UnderlyingSymbol[] =
         user.config.underlyingMode === 'ALL_PARALLEL'
@@ -338,9 +342,11 @@ export class TenantManager extends EventEmitter {
           position.unrealizedPnl = Math.round(pnlPerUnit * position.quantity * 100) / 100
           supervisedAny = true
 
-          // Check EOD auto square-off
-          if (afterCutoff) {
-            await this.manualExit(userId, symbol, '15:15 EOD Cutoff Square-off')
+          // Check EOD auto square-off (at squareOffTime — independent of
+          // the entry cutoff)
+          if (afterSquareOff) {
+            const squareOffLabel = user.config.squareOffTime || '15:35'
+            await this.manualExit(userId, symbol, `EOD Square-off (${squareOffLabel})`)
             continue
           }
 
@@ -361,7 +367,7 @@ export class TenantManager extends EventEmitter {
         }
 
         // ── 2. Evaluate New Entry (If no position and before cutoff) ──────────
-        if (!position && user.state === 'RUNNING' && !afterCutoff) {
+        if (!position && user.state === 'RUNNING' && !afterEntryCutoff) {
           // CR-11 (candles arm): never enter while the candle buffer is still
           // the boot-time synthetic seeds (or stale) — require a recent
           // successful real-candle backfill. No-op in mock mode.
@@ -443,8 +449,8 @@ export class TenantManager extends EventEmitter {
         }
       }
 
-      // Post-cutoff daily summary (skipped while any position is still open)
-      if (afterCutoff) {
+      // Daily summary after the square-off cutoff (skipped while any position is still open)
+      if (afterSquareOff) {
         this.checkDailySummary(user, istInfo)
       }
 

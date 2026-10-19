@@ -237,6 +237,10 @@ export interface StrategyConfig {
   maxLossPct: number
   maxTradesPerDay: number
   lastEntryTime: string
+  /** EOD square-off time (IST HH:MM) — open positions are force-closed at
+   *  this time; independent of lastEntryTime (entries close earlier than
+   *  the exchange's 15:40 derivatives close). Default 15:35. */
+  squareOffTime?: string
   pollingIntervalSec: number
   minConfidence: 'strong' | 'moderate'
   otmSkip: number
@@ -356,6 +360,7 @@ export const DEFAULT_CONFIG: StrategyConfig = {
   maxLossPct: 5,
   maxTradesPerDay: 3,
   lastEntryTime: '14:30',
+  squareOffTime: '15:35',
   pollingIntervalSec: 60,
   minConfidence: 'moderate',
   otmSkip: 3,

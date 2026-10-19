@@ -47,6 +47,7 @@ export const DEFAULT_STRATEGY_CONFIG = {
   maxLossPct: 15,
   maxTradesPerDay: 5,
   lastEntryTime: '15:15',
+  squareOffTime: '15:35',
   pollingIntervalSec: 2,
   minConfidence: 'moderate' as const,
   otmSkip: 0,
