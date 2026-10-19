@@ -26,8 +26,8 @@ export function resampleCandles(candles: Candle[], factor: number): Candle[] {
   return out
 }
 
-function updateEMA(prev: number, next: number, k: number): number {
-  return prev + k * (next - prev)
+function updateEMA(prev: number, price: number, k: number): number {
+  return price * k + prev * (1 - k)
 }
 
 /**
