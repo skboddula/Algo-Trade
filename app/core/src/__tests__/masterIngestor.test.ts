@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import { MasterIngestionEngine, normalizeCandleOrder } from '../services/masterIngestor'
 import { computeAllIndicators } from '../services/indicators'
-import type { Candle } from '../types'
+import { getFinalSignal } from '../services/strategyEngine'
+import { DEFAULT_STRATEGY_CONFIG } from '../constants'
+import type { AllSignalData, Candle } from '../types'
 
 describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
   it('initializes and computes snapshots for all tracked underlying symbols in mock mode', async () => {
@@ -20,6 +22,24 @@ describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
     expect(niftySnapshot?.signal).toBeDefined()
     // The filter-off twin must be present for per-user toggle/replay.
     expect(niftySnapshot?.unfilteredSignal).toBeDefined()
+
+    // The tenant path must be able to reproduce the reference signal exactly
+    // from the persisted snapshot inputs (no hidden scoring state).
+    const replayData: AllSignalData = {
+      v3: niftySnapshot!.v3!,
+      indicators: niftySnapshot!.indicators!,
+      vrd: niftySnapshot!.vrdData ?? null,
+      globalIndices: niftySnapshot!.globalIndices,
+    }
+    expect(getFinalSignal(replayData, DEFAULT_STRATEGY_CONFIG)).toEqual(
+      niftySnapshot!.signal,
+    )
+    expect(
+      getFinalSignal(replayData, {
+        ...DEFAULT_STRATEGY_CONFIG,
+        useMultiTimeframe: false,
+      }),
+    ).toEqual(niftySnapshot!.unfilteredSignal)
 
     expect(bankNiftySnapshot).toBeDefined()
     expect(bankNiftySnapshot?.spotPrice).toBeGreaterThan(40000)
