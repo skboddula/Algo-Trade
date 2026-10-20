@@ -43,8 +43,11 @@ trailing is disabled in that arm.
 
 ## Headline
 
-Production config = 20% target, 15% stop, **5% trailing stop**, 6 trades/symbol/day,
-OTM-3, 10 bps/side slippage.
+Strategy-plan baseline = 20% target, 15% stop, **5% trailing stop**, 6
+trades/symbol/day, OTM-3, 14:30 entry cutoff, 15:30 square-off, 10 bps/side
+slippage. The **running paper daemon** currently uses ATM-0, a 15:15 cutoff and
+square-off, a 60-second cooldown and a 10% daily-loss stop; its parity arm is
+shown separately below.
 
 | Arm | Trades | Win rate | Gross P&L* | Charges** | Net P&L | Return | Max DD | Profit factor |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -52,6 +55,7 @@ OTM-3, 10 bps/side slippage.
 | Production · filter **off** | 297 | 36.4% | −₹10,239.75 | ₹18,404.26 | **−₹28,644.01** | −28.64% | 28.64% | 0.683 |
 | Production · filter on · **0 bps** | 281 | 37.4% | −₹2,021.25 | ₹17,369.49 | **−₹19,390.74** | −19.39% | 19.77% | 0.761 |
 | Production · filter on · **25 bps** | 278 | 37.8% | −₹16,265.25 | ₹17,150.84 | **−₹33,416.09** | −33.42% | 33.42% | 0.624 |
+| **Current paper daemon parity** · ATM-0 · filter on | 291 | 40.2% | −₹8,733.00 | ₹20,416.37 | **−₹29,149.37** | −29.15% | 29.18% | 0.748 |
 | Diagnostic **no-trail** · filter on | 175 | 47.4% | +₹12,843.00 | ₹10,637.74 | **+₹2,205.26** | +2.21% | 17.12% | 1.022 |
 | Diagnostic no-trail · filter off | 199 | 44.2% | +₹4,396.50 | ₹12,068.68 | **−₹7,672.18** | −7.67% | 19.23% | 0.937 |
 | Diagnostic no-trail · filter on · **0 bps** | 174 | 47.7% | +₹15,101.25 | ₹10,581.80 | **+₹4,519.45** | +4.52% | 15.91% | 1.045 |
@@ -65,6 +69,18 @@ charges.
 The ATM variant (OTM-0) was worse: 276 trades, 40.2% win rate,
 −₹31,183.44 net, 31.82% max drawdown. OTM-3 is not the source of the loss.
 
+The **current paper-daemon parity** arm
+([`configs/current-daemon-2026.json`](../app/core/scripts/options-replay/configs/current-daemon-2026.json))
+is the closest replay to the running daemon: ATM-0, 15:15 cutoff/square-off,
+60-second re-entry cooldown, 10% daily-loss stop, 20/15/5 exits, filter on. It
+is also negative: **−₹29,149.37 net**, 29.18% max drawdown, 40.2% win rate,
+291 trades, 231 trailing exits. Its gross P&L is −₹8,733.00 and charges are
+₹20,416.37, so costs again dominate. Its mean net/trade is −₹100.17 (95% CI
+**[−₹214.04, +₹11.54]**); the paired daily difference versus the baseline is
+−₹80.72/day (95% CI **[−₹295.68, +₹146.81]**), so "worse" is a point estimate,
+not a statistically significant difference. The 2-second polling and
+ALL_PARALLEL universe cannot be reproduced on 1-minute NIFTY-only data.
+
 ## What the numbers mean
 
 ### 1. There is no positive gross edge; costs turn the production arm negative
@@ -75,7 +91,9 @@ slippage; with zero slippage the separate 0 bps run still has gross
 −₹2,021.25 and net **−₹19,390.74**. At 25 bps it is −₹33,416.09 net.
 
 In other words: the frictionless strategy is roughly flat-to-negative before
-costs, and the cost burden is decisive. Average net per trade is −₹77.84
+costs, and the cost burden is decisive. The current-daemon parity arm is worse
+still (−₹29,149.37 net; −₹8,733.00 gross; ₹20,416.37 charges). Average net per
+trade for the baseline is −₹77.84
 (95% bootstrap CI **[−₹167.12, +₹12.92]**); the average charge alone is about
 ₹61.73/trade. There is no gross alpha here that costs are merely shaving. The
 filter-off arm is slightly worse: −₹96.44/trade, 95% CI **[−₹182.73,
@@ -125,13 +143,15 @@ March was a −9.5% NIFTY crash month; PE buying did well. Outside that regime t
 arm lost money. A result that flips from +₹4.5k at 0 bps to −₹6.9k at 25 bps is
 not robust for OTM options, where real spreads can exceed 25 bps.
 
-The production 5%-trail arm is flat-to-negative in every month: Jan
+The **baseline** 5%-trail arm is flat-to-negative in every month: Jan
 −₹9,668.49, Feb −₹4,830.61, Mar −₹0.54 (positive gross of +₹3,948.00, eaten by
-charges), Apr −₹2,712.89, May −₹4,349.14.
+charges), Apr −₹2,712.89, May −₹4,349.14. The current-daemon parity arm is
+Jan −₹11,244.71, Feb −₹3,293.17, Mar +₹5,937.07, Apr −₹8,834.10, May
+−₹11,714.46; again only March is positive, and the full window is negative.
 
 ### 4. The 5-min EMA 10/42 veto is not statistically significant
 
-In the production config, filter on improves net P&L by **₹7,082.34** versus
+In the baseline config, filter on improves net P&L by **₹7,082.34** versus
 filter off (277 vs 297 trades; gross −₹4,461.75 vs −₹10,239.75). The paired
 daily difference is **+₹75.34/day**, 95% bootstrap CI **[−₹106.69,
 +₹225.88]** — it includes zero.
@@ -157,12 +177,13 @@ samples and signal inputs differ, so this is a sanity check, not validation.
 
 ## Verdict
 
-**No verified edge.** The production configuration has no positive gross edge
-before costs and loses 21.6% after charges and 10 bps slippage. The 5-minute
-filter is not statistically significant in this reconstruction. The no-trail
-variant is breakeven at best, is entirely dependent on one crash month, and
-does not survive 25 bps slippage. This is not enough to arm live, and it is not
-enough to change production exits on its own.
+**No verified edge.** The strategy-plan baseline has no positive gross edge
+before costs and loses 21.6% after charges and 10 bps slippage. The
+current-daemon parity arm is worse (−₹29,149.37, 29.18% max drawdown). The
+5-minute filter is not statistically significant in this reconstruction. The
+no-trail variant is breakeven at best, is entirely dependent on one crash
+month, and does not survive 25 bps slippage. This is not enough to arm live,
+and it is not enough to change production exits on its own.
 
 ## Decision / next actions
 
@@ -195,9 +216,19 @@ npx tsx scripts/options-replay.ts \
   --label filter-on-slip10 \
   --out data/replay/reports/filter-on-slip10
 
+# Current paper-daemon parity (ATM-0, 15:15 cutoff/square-off, 60s cooldown,
+# 10% daily loss).
+npx tsx scripts/options-replay.ts \
+  --from 2026-01-01 --to 2026-05-22 \
+  --config scripts/options-replay/configs/current-daemon-2026.json \
+  --filter on --slippage-bps 10 \
+  --label current-daemon-slip10 \
+  --out data/replay/reports/current-daemon-slip10
+
 node scripts/options-replay/compare.mjs \
   "Production filter on=data/replay/reports/filter-on-slip10" \
   "Production filter off=data/replay/reports/filter-off-slip10" \
+  "Current paper daemon=data/replay/reports/current-daemon-slip10" \
   "Production filter on · 0 bps=data/replay/reports/filter-on-slip0" \
   "Production filter on · 25 bps=data/replay/reports/filter-on-slip25" \
   "No-trail filter on=data/replay/reports/filter-on-notrail" \

@@ -61,7 +61,7 @@ node scripts/options-replay/download-hf.mjs \
 node scripts/options-replay/fetch-macro.mjs \
   --from 2026-01-01 --to 2026-05-22
 
-# 3. Replay the production config (filter on, 10 bps/side).
+# 3. Replay the strategy-plan baseline (OTM-3, 14:30/15:30, filter on, 10 bps/side).
 npx tsx scripts/options-replay.ts \
   --from 2026-01-01 --to 2026-05-22 \
   --filter on --slippage-bps 10 \
@@ -73,15 +73,30 @@ The report is at
 `data/replay/reports/filter-on-slip10/report.md`; the machine-readable
 aggregate is `summary.json`, and every trade is in `trades.csv`.
 
+The running paper daemon currently differs from that baseline (ATM-0, 15:15
+cutoff/square-off, 60s cooldown, 10% daily-loss stop). Reproduce its parity
+arm with:
+
+```bash
+npx tsx scripts/options-replay.ts \
+  --from 2026-01-01 --to 2026-05-22 \
+  --config scripts/options-replay/configs/current-daemon-2026.json \
+  --filter on --slippage-bps 10 \
+  --label current-daemon-slip10 \
+  --out data/replay/reports/current-daemon-slip10
+```
+
 Useful overrides:
 
 ```bash
 --filter off                 # disable the 5-min EMA 10/42 veto
 --slippage-bps 0             # frictionless diagnostic
 --slippage-bps 25            # pessimistic fill
---otm-skip 0                 # ATM instead of the production OTM-3
+--otm-skip 0                 # ATM instead of the baseline OTM-3
 --trail-pct 0                # disable trailing stop (diagnostic)
 --max-profit-pct 20 --max-loss-pct 15
+--max-total-trades-per-day 18 --max-daily-loss-pct 10
+--exit-cooldown-sec 60
 --capital 100000 --lots 1 --lot-size 75
 --cost-model paper-parity    # browser ledger fee parity (no SEBI fee)
 ```
@@ -98,6 +113,7 @@ plus a paired daily bootstrap against the first arm (or `--baseline`):
 node scripts/options-replay/compare.mjs \
   "Production filter on=data/replay/reports/filter-on-slip10" \
   "Production filter off=data/replay/reports/filter-off-slip10" \
+  "Current paper daemon=data/replay/reports/current-daemon-slip10" \
   "No-trail filter on=data/replay/reports/filter-on-notrail" \
   --baseline="Production filter on" \
   --out=data/replay/reports/comparison.md

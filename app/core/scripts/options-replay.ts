@@ -88,6 +88,9 @@ Options:
   --max-profit-pct N           Target % (default from config)
   --max-loss-pct N             Stop % (default from config)
   --max-trades-per-day N       Per-symbol daily cap
+  --max-total-trades-per-day N Total daily cap
+  --max-daily-loss-pct N       Stop new entries after this daily loss
+  --exit-cooldown-sec N        Re-entry cooldown after an exit
   --last-entry-time HH:MM      Entry cutoff
   --square-off-time HH:MM      EOD square-off
   --capital N                  Initial capital (default 100000)
@@ -137,6 +140,31 @@ Options:
     strategy.maxTradesPerDay = Math.max(
       1,
       Math.trunc(numberArg(args['max-trades-per-day'], strategy.maxTradesPerDay)),
+    )
+  }
+  if (args['max-total-trades-per-day'] !== undefined) {
+    strategy.maxTotalTradesPerDay = Math.max(
+      1,
+      Math.trunc(
+        numberArg(
+          args['max-total-trades-per-day'],
+          strategy.maxTotalTradesPerDay ?? strategy.maxTradesPerDay,
+        ),
+      ),
+    )
+  }
+  if (args['max-daily-loss-pct'] !== undefined) {
+    strategy.maxDailyLossPct = Math.max(
+      0,
+      numberArg(args['max-daily-loss-pct'], strategy.maxDailyLossPct ?? 0),
+    )
+  }
+  if (args['exit-cooldown-sec'] !== undefined) {
+    strategy.exitCooldownSec = Math.max(
+      0,
+      Math.trunc(
+        numberArg(args['exit-cooldown-sec'], strategy.exitCooldownSec ?? 300),
+      ),
     )
   }
   if (args['last-entry-time']) strategy.lastEntryTime = args['last-entry-time']
