@@ -24,6 +24,8 @@
     "dayjs": "^1.11.11",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
+    "hyparquet": "^1.31.5",
+    "hyparquet-compressors": "^1.1.2",
     "pino": "^9.2.0",
     "pino-pretty": "^11.2.1",
     "protobufjs": "^7",

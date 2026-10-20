@@ -19,6 +19,7 @@
     "src/types.ts",
     "src/constants.ts",
     "src/services/**/*",
+    "src/backtest/**/*",
     "src/routes/**/*",
     "src/__tests__/**/*",
     "scripts/**/*",

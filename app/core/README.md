@@ -76,7 +76,26 @@ yarn build
 yarn start
 ```
 
-### 7. Always-On Operation
+### 7. Historical options replay (research)
+
+The cost-aware NIFTY options replay runs production scoring, the 5-min veto,
+caps and exits against actual historical option premiums, with next-bar fills,
+brokerage + statutory costs and configurable slippage:
+
+```bash
+cd app/core
+node scripts/options-replay/download-hf.mjs --from 2026-01-01 --to 2026-05-22
+node scripts/options-replay/fetch-macro.mjs --from 2026-01-01 --to 2026-05-22
+npx tsx scripts/options-replay.ts --from 2026-01-01 --to 2026-05-22 --filter on
+```
+
+See [`scripts/options-replay/README.md`](scripts/options-replay/README.md) for
+the full command set, output files and data/licence caveats, and
+[`docs/options-replay.md`](../../docs/options-replay.md) for the Jan–May 2026
+evidence review. The replay is reconstructed partial-system evidence, not
+exact live-VRD parity; do not arm live from it alone.
+
+### 8. Always-On Operation
 Install the daemon as a systemd user service (starts on boot, auto-restarts on crash, survives closing every browser):
 
 ```bash

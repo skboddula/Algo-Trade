@@ -96,3 +96,13 @@ DELETE FROM signal_snapshots WHERE ist_date < '2026-07-21';
 Back up `algo-trade.sqlite` before pruning. The table contains no broker
 tokens or order credentials, but it does contain full VRD/news and account
 user ids, so treat it as private trading data.
+
+## Related replay harness
+
+The cost-aware historical options replay lives in
+[`app/core/scripts/options-replay/README.md`](../app/core/scripts/options-replay/README.md)
+and the Jan–May 2026 evidence review is in
+[`docs/options-replay.md`](options-replay.md). It uses reconstructed inputs and
+is **not** a substitute for exact snapshot replay; once this table has enough
+rows, the replay's `signalFor` hook can be backed by `data_json`,
+`config_json`, `user_signal_json` and `unfiltered_signal_json`.

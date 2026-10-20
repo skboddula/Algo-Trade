@@ -1,0 +1,23 @@
+{
+  "underlyingMode": "NIFTY 50",
+  "multiSymbolExecutionMode": "independent",
+  "strongThreshold": 14,
+  "moderateThreshold": 10,
+  "strongGap": 6,
+  "moderateGap": 3,
+  "maxProfitPct": 20,
+  "maxLossPct": 15,
+  "trailPct": 5,
+  "maxTradesPerDay": 6,
+  "maxTotalTradesPerDay": 18,
+  "lastEntryTime": "14:30",
+  "squareOffTime": "15:30",
+  "pollingIntervalSec": 60,
+  "minConfidence": "moderate",
+  "otmSkip": 3,
+  "executionMode": "paper",
+  "tradeType": "buying",
+  "useMultiTimeframe": true,
+  "brentCrudeExtremeThreshold": 125,
+  "brentCrudeOverhangThreshold": 88
+}

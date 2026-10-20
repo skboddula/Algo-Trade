@@ -1068,6 +1068,11 @@ fsevents@~2.3.2, fsevents@~2.3.3:
   resolved "https://registry.yarnpkg.com/fsevents/-/fsevents-2.3.3.tgz#cac6407785d03675a2a5e1a5305c697b347d90d6"
   integrity sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==
 
+fzstd@0.1.1:
+  version "0.1.1"
+  resolved "https://registry.yarnpkg.com/fzstd/-/fzstd-0.1.1.tgz#a3da29f2fff45070ca90073f866d97e0c56a4a52"
+  integrity sha512-dkuVSOKKwh3eas5VkJy1AW1vFpet8TA/fGmVA5krThl8YcOVE/8ZIoEA1+U1vEn5ckxxhLirSdY837azmbaNHA==
+
 glob@^10.3.4:
   version "10.5.0"
   resolved "https://registry.yarnpkg.com/glob/-/glob-10.5.0.tgz#8ec0355919cd3338c28428a23d4f24ecc5fe738c"
@@ -1095,6 +1100,24 @@ http-errors@2.0.0:
     setprototypeof "1.2.0"
     statuses "2.0.1"
     toidentifier "1.0.1"
+
+hyparquet-compressors@^1.1.2:
+  version "1.1.2"
+  resolved "https://registry.yarnpkg.com/hyparquet-compressors/-/hyparquet-compressors-1.1.2.tgz#f6bece07becc85d2b394502963ec4a6b9d27467b"
+  integrity sha512-0Hx6w0ZpVpNCefKy5xBYLTp6rKeZn/tsUzuliNzfKqSCdLcTQSfwATEoeedS703Y17k1qNS61HwRME5aOeNkPg==
+  dependencies:
+    fzstd "0.1.1"
+    hysnappy "1.1.1"
+
+hyparquet@^1.31.5:
+  version "1.31.5"
+  resolved "https://registry.yarnpkg.com/hyparquet/-/hyparquet-1.31.5.tgz#3af5b7566171fa04669ee3e2faf9a4a08b5117b9"
+  integrity sha512-KPVfaxW8xOiO2/4fjeiBfFNEXhGVw9tfcb9ha2iNZdJ3J/yBjEwIeAnTyyuhllFFTb9YO9wg0DfRAOnm6KCvBg==
+
+hysnappy@1.1.1:
+  version "1.1.1"
+  resolved "https://registry.yarnpkg.com/hysnappy/-/hysnappy-1.1.1.tgz#30b688c94f6537e418f8b502a7e65cdc0b942341"
+  integrity sha512-/V9XcN2NtRyWjR4LYMfvnvasVVF8jbT/ej0eofBQjZel91E3D813FQ3mQC6gDSMMTCq/FJh28XHeyqr3I/oBRw==
 
 ieee754@^1.2.1:
   version "1.2.1"
