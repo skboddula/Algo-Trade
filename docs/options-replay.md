@@ -175,6 +175,23 @@ The replay's production loss is **−₹1.04 per unit per trade** (₹21,561.67 
 negative; the replay is less negative than the paper daemon. The periods,
 samples and signal inputs differ, so this is a sanity check, not validation.
 
+## Exit calibration follow-up
+
+A pre-specified 10-arm trail/target/stop grid was calibrated on Jan–Mar and
+validated on Apr–May. **No arm produced a validation-positive result.**
+
+The best calibration arm was no-trail with a 20% target: +₹7,199.18 in
+calibration (PF 1.099) but **−₹4,993.92** in validation. No-trail target-25
+and target-30 were +₹5,864.85 and +₹4,106.01 in calibration, then −₹6,096.83
+and −₹5,108.02 in validation. Every arm lost money in both April and May; the
+baseline lost −₹7,062.03 in validation. At 25 bps, the no-trail validation
+results were −₹5,645 to −₹9,214, and the full-window results were −₹4,941 to
+−₹6,933. The trail is costly, but removing it only moves the strategy to
+breakeven in one crash month—it does not create a robust edge.
+
+Full method, tables and caveats:
+[`docs/options-replay-exit-calibration.md`](options-replay-exit-calibration.md).
+
 ## Verdict
 
 **No verified edge.** The strategy-plan baseline has no positive gross edge
@@ -191,10 +208,11 @@ and it is not enough to change production exits on its own.
    trading and snapshot accumulation.
 2. **Keep `useMultiTimeframe` on** pending exact snapshot A/B. Do not turn it
    off because the proxy A/B is inconclusive.
-3. **Do not change production `trailPct`/target/stop solely from this replay.**
-   The no-trail arm was post-hoc and in-sample. If the trailing-stop hypothesis
-   is pursued, pre-register a paper A/B (5% vs a wider/no trail) with a fixed
-   window and enough trades, and do not arm live during it.
+3. **Do not change production `trailPct`/target/stop from this replay.** The
+   Jan–May exit grid produced no validation-positive candidate; the no-trail
+   arm is a March-dependent diagnostic, not a replacement. If the trailing-stop
+   hypothesis is pursued further, pre-register a paper A/B on fresh data (5%
+   vs a wider/no trail) and do not arm live during it.
 4. **Build the exact snapshot replay** when `signal_snapshots` has several
    weeks of data. This replay's `signalFor` hook is the integration point; the
    table was empty when this run was made.

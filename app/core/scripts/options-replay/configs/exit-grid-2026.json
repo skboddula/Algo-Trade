@@ -1,0 +1,114 @@
+{
+  "name": "exit-grid-2026",
+  "status": "pre-registered before looking at validation results",
+  "window": {
+    "from": "2026-01-01",
+    "to": "2026-05-22",
+    "calibrationEndExclusive": "2026-04-01"
+  },
+  "fixed": {
+    "underlying": "NIFTY 50",
+    "strategyPlan": "OTM-3, 14:30 entry cutoff, 15:30 square-off",
+    "filter": "on",
+    "costModel": "statutory",
+    "slippageBps": 10,
+    "lotSize": 75,
+    "lots": 1,
+    "maxTradesPerDay": 6,
+    "maxTotalTradesPerDay": 18
+  },
+  "arms": [
+    {
+      "label": "filter-on-slip10",
+      "description": "baseline: 5% trail, 20% target, 15% stop",
+      "trailPct": 5,
+      "maxProfitPct": 20,
+      "maxLossPct": 15
+    },
+    {
+      "label": "filter-on-notrail",
+      "description": "no trail, 20% target, 15% stop",
+      "trailPct": 0,
+      "maxProfitPct": 20,
+      "maxLossPct": 15
+    },
+    {
+      "label": "grid-t8-r20-s15",
+      "trailPct": 8,
+      "maxProfitPct": 20,
+      "maxLossPct": 15
+    },
+    {
+      "label": "grid-t10-r20-s15",
+      "trailPct": 10,
+      "maxProfitPct": 20,
+      "maxLossPct": 15
+    },
+    {
+      "label": "grid-t8-r25-s15",
+      "trailPct": 8,
+      "maxProfitPct": 25,
+      "maxLossPct": 15
+    },
+    {
+      "label": "grid-t10-r25-s15",
+      "trailPct": 10,
+      "maxProfitPct": 25,
+      "maxLossPct": 15
+    },
+    {
+      "label": "grid-t0-r25-s15",
+      "trailPct": 0,
+      "maxProfitPct": 25,
+      "maxLossPct": 15
+    },
+    {
+      "label": "grid-t0-r30-s15",
+      "trailPct": 0,
+      "maxProfitPct": 30,
+      "maxLossPct": 15
+    },
+    {
+      "label": "grid-t10-r30-s15",
+      "trailPct": 10,
+      "maxProfitPct": 30,
+      "maxLossPct": 15
+    },
+    {
+      "label": "grid-t10-r25-s20",
+      "trailPct": 10,
+      "maxProfitPct": 25,
+      "maxLossPct": 20
+    }
+  ],
+  "notIncluded": [
+    "time stop / max hold",
+    "entry cutoff and trade-frequency changes",
+    "confidence threshold changes",
+    "strike/expiry selection changes",
+    "regime filters"
+  ],
+  "selection": {
+    "calibrationOnly": true,
+    "minimumCalibrationTrades": 30,
+    "rankBy": "calibration net P&L",
+    "shortlistSize": 3,
+    "shortlistRequirements": [
+      "calibration net P&L > 0",
+      "calibration profit factor > 1.10",
+      "positive calibration month in at least 2 of 3 months"
+    ],
+    "stress": {
+      "slippageBps": 25,
+      "description": "rerun the shortlist at 25 bps before reading validation"
+    },
+    "validationRequirements": [
+      "validation net P&L > 0 at 25 bps",
+      "validation profit factor > 1.10",
+      "validation max drawdown < 15%",
+      "both April and May net P&L > 0 at 25 bps",
+      "at least 30 validation trades"
+    ],
+    "decision": "Only a shortlist that clears every validation requirement is eligible for a paper A/B. Otherwise keep production unchanged and report no candidate."
+  }
+}

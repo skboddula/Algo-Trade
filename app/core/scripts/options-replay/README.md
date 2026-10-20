@@ -119,6 +119,27 @@ node scripts/options-replay/compare.mjs \
   --out=data/replay/reports/comparison.md
 ```
 
+## Calibration split
+
+`calibrate.mjs` reads completed report directories and reports a
+**calibration** window and a held-out **validation** window separately. It
+prints calibration metrics by default so validation data cannot leak into arm
+selection:
+
+```bash
+node scripts/options-replay/calibrate.mjs \
+  "Trail 5%=data/replay/reports/filter-on-slip10" \
+  "No trail=data/replay/reports/filter-on-notrail" \
+  --split=2026-04-01 \
+  --out=data/replay/reports/calibration.md
+```
+
+After the candidate set is frozen, rerun with `--validation` to show the
+held-out columns. The pre-registered exit grid and selection rules are in
+[`configs/exit-grid-2026.json`](configs/exit-grid-2026.json); the result is
+reviewed in
+[`docs/options-replay-exit-calibration.md`](../../../../docs/options-replay-exit-calibration.md).
+
 ## Tests
 
 ```bash
