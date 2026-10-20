@@ -462,7 +462,15 @@ export interface MarketSnapshot {
   pcr?: number
   indicators?: IndicatorsResult
   vrdData?: VrdData
+  /** V3 macro order type used by the scoring engine (replay/telemetry). */
+  v3?: V3OrderType
   signal?: FinalSignal
+  /**
+   * The same scoring as `signal`, but with the multi-timeframe confluence
+   * veto disabled. Lets the daemon apply each user's `useMultiTimeframe`
+   * setting without re-running the V3/VRD assembly.
+   */
+  unfilteredSignal?: FinalSignal
   /** Global indices snapshot used by the V3 macro layer + score panel. */
   globalIndices?: McMarketItem[]
   /** CR-11 data-freshness telemetry (live daemon): per-source ages + entry blockers. */

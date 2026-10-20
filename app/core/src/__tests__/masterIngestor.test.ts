@@ -16,7 +16,10 @@ describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
     expect(niftySnapshot?.spotPrice).toBeGreaterThan(20000)
     expect(niftySnapshot?.candles.length).toBeGreaterThanOrEqual(50)
     expect(niftySnapshot?.indicators).toBeDefined()
+    expect(niftySnapshot?.v3).toBeDefined()
     expect(niftySnapshot?.signal).toBeDefined()
+    // The filter-off twin must be present for per-user toggle/replay.
+    expect(niftySnapshot?.unfilteredSignal).toBeDefined()
 
     expect(bankNiftySnapshot).toBeDefined()
     expect(bankNiftySnapshot?.spotPrice).toBeGreaterThan(40000)

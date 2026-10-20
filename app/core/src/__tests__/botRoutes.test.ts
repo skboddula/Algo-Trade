@@ -43,6 +43,25 @@ describe('Fastify Bot Routes & API Suite', () => {
     expect(Array.isArray(json.paperTrades)).toBe(true)
   })
 
+  it('GET /api/bot/signal-snapshots returns a dated, bounded list', async () => {
+    const res = await server.app.inject({
+      method: 'GET',
+      url: '/api/bot/signal-snapshots?userId=test_trader&date=2026-10-19&limit=50',
+    })
+    expect(res.statusCode).toBe(200)
+    const json = JSON.parse(res.body)
+    expect(json.userId).toBe('test_trader')
+    expect(json.date).toBe('2026-10-19')
+    expect(Array.isArray(json.snapshots)).toBe(true)
+    expect(json.count).toBe(json.snapshots.length)
+
+    const bad = await server.app.inject({
+      method: 'GET',
+      url: '/api/bot/signal-snapshots?date=19-10-2026',
+    })
+    expect(bad.statusCode).toBe(400)
+  })
+
   it('POST /api/bot/start arms the user bot', async () => {
     const res = await server.app.inject({
       method: 'POST',

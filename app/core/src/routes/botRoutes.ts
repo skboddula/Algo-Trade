@@ -116,6 +116,36 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     })
   })
 
+  // ── GET /api/bot/signal-snapshots ──────────────────────────────────────────
+  // Replayable entry-evaluation records (filter on/off, V3/V4/VRD/HTF).
+  // Loopback window only; no broker credentials are stored in these rows.
+  fastify.get('/api/bot/signal-snapshots', async (request, reply) => {
+    const query = request.query as {
+      userId?: string
+      date?: string
+      limit?: string
+    }
+    const userId = query.userId || 'default_user'
+    if (query.date && !/^\d{4}-\d{2}-\d{2}$/.test(query.date)) {
+      return reply.status(400).send({ error: 'date must be YYYY-MM-DD' })
+    }
+    const parsedLimit = Number(query.limit)
+    const limit = Number.isFinite(parsedLimit)
+      ? Math.min(Math.max(Math.trunc(parsedLimit), 1), 5000)
+      : 200
+    const snapshots = tenantManager.getSignalSnapshots(
+      userId,
+      query.date,
+      limit,
+    )
+    return reply.send({
+      userId,
+      date: query.date ?? null,
+      count: snapshots.length,
+      snapshots,
+    })
+  })
+
   // ── POST /api/bot/start ────────────────────────────────────────────────────
   fastify.post('/api/bot/start', async (request, reply) => {
     const body = request.body as { userId?: string; executionMode?: 'paper' | 'live' } | null

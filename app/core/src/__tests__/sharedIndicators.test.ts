@@ -9,6 +9,7 @@ import {
   computeAllIndicators,
 } from '../services/indicators'
 import {
+  applyMultiTimeframeFilter,
   scoreBullish,
   scoreBearish,
   getFinalSignal,
@@ -20,6 +21,7 @@ import type {
   OptionData,
   AllSignalData,
   ActivePosition,
+  FinalSignal,
   VrdData,
 } from '../types'
 import { DEFAULT_STRATEGY_CONFIG } from '../constants'
@@ -151,6 +153,35 @@ describe('V5 Strategy Scoring & Risk Engine Suite', () => {
     const finalSignal = getFinalSignal(signalData, DEFAULT_STRATEGY_CONFIG)
     expect(finalSignal.signal).toBe('BUY_CE')
     expect(finalSignal.confidence).toBe('strong')
+  })
+
+  it('applies the HTF veto without altering confidence and can be disabled', () => {
+    const signal: FinalSignal = {
+      signal: 'BUY_CE',
+      confidence: 'strong',
+      positionSize: 'full',
+      v3: 'buy',
+      v4: 'Buy',
+      bullScore: 20,
+      bearScore: 2,
+      scoreMax: 20,
+    }
+
+    const vetoed = applyMultiTimeframeFilter(signal, 'Sell', true)
+    expect(vetoed.signal).toBe('NO_TRADE')
+    expect(vetoed.confidence).toBe('strong')
+    expect(vetoed.positionSize).toBe('none')
+    expect(applyMultiTimeframeFilter(signal, 'Sell', false).signal).toBe(
+      'BUY_CE',
+    )
+    expect(applyMultiTimeframeFilter(signal, 'Buy', true).signal).toBe('BUY_CE')
+    expect(
+      applyMultiTimeframeFilter(
+        { ...signal, signal: 'BUY_PE' },
+        'Buy',
+        true,
+      ).signal,
+    ).toBe('NO_TRADE')
   })
 
   it('triggers trailing stop via the reference shouldExit when price pulls back from peak', () => {

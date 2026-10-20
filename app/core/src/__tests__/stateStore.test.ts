@@ -5,7 +5,12 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { StateStore } from '../services/stateStore'
 import { DEFAULT_STRATEGY_CONFIG } from '../constants'
-import type { PaperTradeRecord, UserBotState } from '../types'
+import type {
+  FinalSignal,
+  PaperTradeRecord,
+  SignalSnapshotRecord,
+  UserBotState,
+} from '../types'
 
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'algo-store-test-'))
@@ -26,6 +31,78 @@ function sampleUser(overrides: Partial<UserBotState> = {}): UserBotState {
     totalRealizedPnl: 0,
     paperBalance: 10000000,
     updatedAt: new Date().toISOString(),
+    ...overrides,
+  }
+}
+
+const baseSignal: FinalSignal = {
+  signal: 'BUY_CE',
+  confidence: 'moderate',
+  positionSize: 'half',
+  v3: 'buy',
+  v4: 'Buy',
+  bullScore: 12,
+  bearScore: 2,
+  scoreMax: 14,
+}
+
+function signalFixture(
+  overrides: Partial<SignalSnapshotRecord> = {},
+): SignalSnapshotRecord {
+  return {
+    userId: 'u1',
+    symbol: 'NIFTY 50',
+    capturedAt: '2026-10-19T04:30:00.000Z',
+    istDate: '2026-10-19',
+    executionMode: 'paper',
+    botState: 'RUNNING',
+    spotPrice: 25000,
+    config: { ...DEFAULT_STRATEGY_CONFIG, useMultiTimeframe: true },
+    data: {
+      v3: 'buy',
+      indicators: {
+        ema: 'Buy',
+        adx: 'Buy',
+        rsi: { value: 60, signal: 'Hold' },
+        stochastic: { k: 50, d: 50, signal: 'Hold' },
+        bollinger: {
+          upper: 25100,
+          middle: 25000,
+          lower: 24900,
+          signal: 'Hold',
+          trend: 'Up',
+        },
+        atr: { value: 30, level: 'Neutral' },
+        pcr: 'Hold',
+        pcrValue: 1,
+        higherTimeframeTrend: 'Sell',
+      },
+      vrd: null,
+      globalIndices: [],
+    },
+    defaultSignal: baseSignal,
+    userSignal: { ...baseSignal, signal: 'NO_TRADE', positionSize: 'none' },
+    unfilteredSignal: baseSignal,
+    higherTimeframeTrend: 'Sell',
+    entryEligible: false,
+    filterVerdict: 'vetoed',
+    blockedReason: 'htf-veto',
+    context: {
+      tradesCountToday: 0,
+      tradesCountPerSymbol: 0,
+      dailyLossTripped: false,
+      cooldownRemainingMs: 0,
+      entryBlockedReasons: [],
+      sentimentFault: null,
+      persistenceFault: null,
+    },
+    sources: {
+      quoteAgeMs: 1000,
+      candlesAgeMs: 1000,
+      chainAgeMs: 1000,
+      vixAgeMs: 1000,
+      entryBlockedReasons: [],
+    },
     ...overrides,
   }
 }
@@ -155,6 +232,52 @@ describe('StateStore', () => {
     expect(trades[0].status).toBe('CLOSED')
     expect(trades[0].realizedPnl).toBe(75000)
     expect(trades[0].metadata?.exitReason).toBe('EOD')
+    store.close()
+  })
+
+  it('round-trips replayable signal snapshots and attaches an order', () => {
+    const dir = tempDir()
+    const store = new StateStore(dir)
+
+    const id = store.saveSignalSnapshot(signalFixture())
+    expect(id).toBeGreaterThan(0)
+    store.updateSignalSnapshot(id, {
+      orderPlaced: true,
+      tradeId: 'paper_tr_9',
+      instrumentKey: 'NSE_FO|CE1',
+      entryPrice: 12345,
+      blockedReason: null,
+    })
+
+    const loaded = store.loadSignalSnapshots('u1', '2026-10-19')
+    expect(loaded).toHaveLength(1)
+    expect(loaded[0].id).toBe(id)
+    expect(loaded[0].data.v3).toBe('buy')
+    expect(loaded[0].data.indicators.higherTimeframeTrend).toBe('Sell')
+    expect(loaded[0].config.useMultiTimeframe).toBe(true)
+    expect(loaded[0].filterVerdict).toBe('vetoed')
+    expect(loaded[0].unfilteredSignal.signal).toBe('BUY_CE')
+    expect(loaded[0].userSignal.signal).toBe('NO_TRADE')
+    expect(loaded[0].orderPlaced).toBe(true)
+    expect(loaded[0].tradeId).toBe('paper_tr_9')
+    expect(loaded[0].instrumentKey).toBe('NSE_FO|CE1')
+    expect(loaded[0].entryPrice).toBe(12345)
+    store.close()
+  })
+
+  it('filters signal snapshots by IST date and user', () => {
+    const dir = tempDir()
+    const store = new StateStore(dir)
+    store.saveSignalSnapshot(signalFixture())
+    store.saveSignalSnapshot(
+      signalFixture({ istDate: '2026-10-18', capturedAt: '2026-10-18T04:30:00.000Z' }),
+    )
+    store.saveSignalSnapshot(signalFixture({ userId: 'u2' }))
+
+    expect(store.loadSignalSnapshots('u1')).toHaveLength(2)
+    expect(store.loadSignalSnapshots('u1', '2026-10-19')).toHaveLength(1)
+    expect(store.loadSignalSnapshots('u1', '2026-10-18')).toHaveLength(1)
+    expect(store.loadSignalSnapshots('u2')).toHaveLength(1)
     store.close()
   })
 

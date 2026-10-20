@@ -40,6 +40,31 @@ import type {
   ActivePosition,
 } from '../../shared/src/types'
 
+/**
+ * Apply the 5-minute confluence veto to an already-scored signal.
+ *
+ * Kept as a separate pure function so the daemon can apply a user's
+ * `useMultiTimeframe` setting to the reference signal without duplicating the
+ * scoring math. `getFinalSignal` uses the same helper for its built-in filter.
+ */
+export function applyMultiTimeframeFilter(
+  signal: FinalSignal,
+  higherTimeframeTrend: SignalType | undefined,
+  enabled: boolean,
+): FinalSignal {
+  if (!enabled || !higherTimeframeTrend) return signal
+  const counterTrend =
+    (signal.signal === SIGNAL_BUY_CE &&
+      higherTimeframeTrend === SIGNAL_SELL) ||
+    (signal.signal === SIGNAL_BUY_PE && higherTimeframeTrend === SIGNAL_BUY)
+  if (!counterTrend) return signal
+  return {
+    ...signal,
+    signal: SIGNAL_NO_TRADE,
+    positionSize: CONFIDENCE_NONE,
+  }
+}
+
 // ─── Final signal decision ────────────────────────────────────────────────────
 export function getFinalSignal(
   data: AllSignalData,
@@ -110,33 +135,21 @@ export function getFinalSignal(
   // prevents buying calls during a higher-timeframe downtrend (and vice
   // versa) — the source of most counter-trend losses. Neutral ('hold')
   // higher-timeframe trends do not block either direction.
-  if (config.useMultiTimeframe !== false && data.indicators) {
-    const htTrend = data.indicators.higherTimeframeTrend
-    if (signal === SIGNAL_BUY_CE && htTrend === SIGNAL_SELL) {
-      return {
-        signal: SIGNAL_NO_TRADE,
-        confidence,
-        positionSize: CONFIDENCE_NONE,
-        v3: data.v3,
-        v4,
-        bullScore: bull.score,
-        bearScore: bear.score,
-        scoreMax: scoreMax,
-      }
-    }
-    if (signal === SIGNAL_BUY_PE && htTrend === SIGNAL_BUY) {
-      return {
-        signal: SIGNAL_NO_TRADE,
-        confidence,
-        positionSize: CONFIDENCE_NONE,
-        v3: data.v3,
-        v4,
-        bullScore: bull.score,
-        bearScore: bear.score,
-        scoreMax: scoreMax,
-      }
-    }
-  }
+  const filteredSignal = applyMultiTimeframeFilter(
+    {
+      signal,
+      confidence,
+      positionSize,
+      v3: data.v3,
+      v4,
+      bullScore: bull.score,
+      bearScore: bear.score,
+      scoreMax: scoreMax,
+    },
+    data.indicators?.higherTimeframeTrend,
+    config.useMultiTimeframe !== false,
+  )
+  if (filteredSignal.signal === SIGNAL_NO_TRADE) return filteredSignal
 
   // Prevent entering a trade that would immediately trigger exit conditions
   const isBullishBias = signal === SIGNAL_BUY_CE

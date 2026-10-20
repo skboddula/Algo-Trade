@@ -6,7 +6,9 @@ import type {
   ActivePosition,
   MarketSnapshot,
   AllSignalData,
+  FinalSignal,
   PaperTradeRecord,
+  SignalSnapshotRecord,
 } from '../types'
 import {
   DEFAULT_STRATEGY_CONFIG,
@@ -18,7 +20,12 @@ import {
 import { MasterIngestionEngine } from './masterIngestor'
 import { OrderGateway } from './orderGateway'
 import { pickBestOptionContract } from './syntheticCalculators'
-import { runHardStopChecks, shouldExit } from './strategyEngine'
+import {
+  applyMultiTimeframeFilter,
+  getFinalSignal,
+  runHardStopChecks,
+  shouldExit,
+} from './strategyEngine'
 import { getIndiaTime } from '../utils/timeUtils'
 import type { StateStore } from './stateStore'
 import type { Notifier } from './notifier'
@@ -78,6 +85,15 @@ export class TenantManager extends EventEmitter {
   private persistenceFault: string | null = null
   /** Throttle fail-closed entry warnings to once/30s per symbol+gate. */
   private lastGateWarnAtMs = new Map<string, number>()
+  /**
+   * Signal-snapshot dedupe: one row per signal episode/minute, but keep the
+   * latest row id so the resulting order can be attached to it.
+   */
+  private signalSnapshotThrottle = new Map<
+    string,
+    { fingerprint: string; lastAt: number; id: number }
+  >()
+  private lastSignalSnapshotWarnAt = 0
 
   /** Rate-limited operational warning for a fail-closed entry gate. */
   private warnGate(key: string, message: string): void {
@@ -128,6 +144,15 @@ export class TenantManager extends EventEmitter {
   /** CR-15: current persistence fault, or null when writes are healthy. */
   public getPersistenceFault(): string | null {
     return this.persistenceFault
+  }
+
+  /** Newest-first replayable signal snapshots for the analysis/A-B window. */
+  public getSignalSnapshots(
+    userId: string,
+    istDate?: string,
+    limit = 200,
+  ): SignalSnapshotRecord[] {
+    return this.store?.loadSignalSnapshots(userId, istDate, limit) ?? []
   }
 
   public getOrCreateUser(userId: string): UserBotState {
@@ -593,6 +618,113 @@ export class TenantManager extends EventEmitter {
         // `position` check above is the duplicate guard).
         const entriesEnabled = user.state === 'RUNNING' || user.state === 'ORDERED'
         if (!position && entriesEnabled && !afterEntryCutoff) {
+          // Resolve the entry signal with THIS user's config. The master
+          // snapshot's `signal` is the default-config reference; the
+          // unfiltered twin lets us honour `useMultiTimeframe:false` without
+          // rerunning V3/VRD assembly.
+          const entryIndicators = snapshot.indicators
+          const higherTimeframeTrend = entryIndicators?.higherTimeframeTrend
+          const baseSignal = snapshot.unfilteredSignal ?? snapshot.signal
+          if (!baseSignal) continue
+          const canRecompute = Boolean(entryIndicators && snapshot.unfilteredSignal)
+          const entrySignalData: AllSignalData | null = entryIndicators
+            ? {
+                v3: snapshot.v3 ?? snapshot.signal?.v3 ?? 'hold',
+                indicators: entryIndicators,
+                vrd: snapshot.vrdData ?? null,
+                globalIndices: snapshot.globalIndices,
+              }
+            : null
+
+          const userSignal: FinalSignal =
+            canRecompute && entrySignalData
+              ? getFinalSignal(entrySignalData, user.config)
+              : applyMultiTimeframeFilter(
+                  baseSignal,
+                  higherTimeframeTrend,
+                  user.config.useMultiTimeframe !== false,
+                )
+          const unfilteredSignal: FinalSignal =
+            canRecompute && entrySignalData
+              ? getFinalSignal(entrySignalData, {
+                  ...user.config,
+                  useMultiTimeframe: false,
+                })
+              : baseSignal
+
+          const userFilterEnabled = user.config.useMultiTimeframe !== false
+          const htfVetoed =
+            userFilterEnabled &&
+            Boolean(higherTimeframeTrend) &&
+            ((unfilteredSignal.signal === 'BUY_CE' &&
+              higherTimeframeTrend === 'Sell') ||
+              (unfilteredSignal.signal === 'BUY_PE' &&
+                higherTimeframeTrend === 'Buy'))
+          const filterVerdict: SignalSnapshotRecord['filterVerdict'] =
+            !higherTimeframeTrend
+              ? 'not-applicable'
+              : !userFilterEnabled
+                ? 'off'
+                : htfVetoed
+                  ? 'vetoed'
+                  : userSignal.signal === 'BUY_CE' ||
+                      userSignal.signal === 'BUY_PE'
+                    ? 'allowed'
+                    : 'not-applicable'
+          const entryEligible =
+            userSignal.signal === 'BUY_CE' || userSignal.signal === 'BUY_PE'
+          const candidate =
+            entryEligible ||
+            unfilteredSignal.signal === 'BUY_CE' ||
+            unfilteredSignal.signal === 'BUY_PE' ||
+            userSignal.confidence !== 'none' ||
+            unfilteredSignal.confidence !== 'none'
+
+          const lastExit = user.lastExitTimes[symbol] || 0
+          const cooldownMs = (user.config.exitCooldownSec || 60) * 1000
+          const context: SignalSnapshotRecord['context'] = {
+            tradesCountToday: user.tradesCountToday || 0,
+            tradesCountPerSymbol: user.tradesCountPerSymbol[symbol] || 0,
+            dailyLossTripped: user.dailyLossTripped === true,
+            cooldownRemainingMs: Math.max(
+              0,
+              cooldownMs - (Date.now() - lastExit),
+            ),
+            entryBlockedReasons:
+              snapshot.sources?.entryBlockedReasons ?? [],
+            sentimentFault: snapshot.sources?.sentimentFault ?? null,
+            persistenceFault: this.persistenceFault,
+          }
+          const blockedReason = this.describeEntryBlock(
+            user,
+            snapshot,
+            entryEligible,
+            htfVetoed,
+          )
+          let signalSnapshotId: number | null = null
+          if (candidate && entrySignalData) {
+            signalSnapshotId = this.logSignalSnapshot({
+              userId,
+              symbol,
+              capturedAt: snapshot.timestamp,
+              istDate: getIndiaTime(new Date(snapshot.timestamp)).dateString,
+              executionMode: user.executionMode,
+              botState: user.state,
+              spotPrice: snapshot.spotPrice,
+              config: { ...user.config },
+              data: entrySignalData,
+              defaultSignal: snapshot.signal,
+              userSignal,
+              unfilteredSignal,
+              higherTimeframeTrend,
+              entryEligible,
+              filterVerdict,
+              blockedReason,
+              context,
+              sources: snapshot.sources,
+            })
+          }
+
           // Daily loss kill switch: sticky for the rest of the IST day.
           if (user.dailyLossTripped) {
             this.warnGate(
@@ -633,12 +765,9 @@ export class TenantManager extends EventEmitter {
           const tradesCount = user.tradesCountPerSymbol[symbol] || 0
           if (tradesCount >= user.config.maxTradesPerDay) continue
 
-          const lastExit = user.lastExitTimes[symbol] || 0
-          const cooldownMs = (user.config.exitCooldownSec || 60) * 1000
           if (Date.now() - lastExit < cooldownMs) continue
 
-          const signal = snapshot.signal
-          if (signal && (signal.signal === 'BUY_CE' || signal.signal === 'BUY_PE')) {
+          if (entryEligible) {
             // Entry hard-stop gate (reference parity): the VIX tradeability
             // band + high-severity macro news block new entries entirely.
             const hardStop = runHardStopChecks(snapshot.vrdData ?? null)
@@ -649,7 +778,7 @@ export class TenantManager extends EventEmitter {
               )
               continue
             }
-            const direction = signal.signal === 'BUY_CE' ? 'CE' : 'PE'
+            const direction = userSignal.signal === 'BUY_CE' ? 'CE' : 'PE'
             const optionChain = snapshot.optionChain || []
             const selectedContract = pickBestOptionContract(optionChain, direction, user.config.otmSkip)
 
@@ -701,17 +830,33 @@ export class TenantManager extends EventEmitter {
                 user.updatedAt = new Date().toISOString()
                 this.emitUserUpdate(user)
                 this.persistUser(user, true)
+                this.updateSignalSnapshotOutcome(signalSnapshotId, {
+                  orderPlaced: true,
+                  tradeId: orderRes.tradeId,
+                  instrumentKey: selectedContract.instrumentKey,
+                  entryPrice: orderRes.filledPrice,
+                  blockedReason: null,
+                })
                 this.sendEntryAlert(user, newPos, symbol, {
-                  signal: signal.signal,
-                  confidence: signal.confidence,
+                  signal: userSignal.signal,
+                  confidence: userSignal.confidence,
                   strikePrice: selectedContract.strike,
                   expiry,
                 })
               } else {
+                this.updateSignalSnapshotOutcome(signalSnapshotId, {
+                  orderPlaced: false,
+                  blockedReason: `order-failed: ${orderRes.error ?? 'unknown'}`,
+                })
                 user.error = orderRes.error
                 this.emitUserUpdate(user)
                 this.persistUser(user)
               }
+            } else {
+              this.updateSignalSnapshotOutcome(signalSnapshotId, {
+                orderPlaced: false,
+                blockedReason: 'no-contract',
+              })
             }
           }
         }
@@ -725,6 +870,118 @@ export class TenantManager extends EventEmitter {
       // Persist supervised position updates (peak price, unrealized PnL) — throttled
       if (supervisedAny) {
         this.persistUser(user)
+      }
+    }
+  }
+
+  /**
+   * First gate that would stop an actionable signal, for the snapshot row.
+   * Telemetry only — the real gates below remain authoritative.
+   */
+  private describeEntryBlock(
+    user: UserBotState,
+    snapshot: MarketSnapshot,
+    entryEligible: boolean,
+    htfVetoed: boolean,
+  ): string | undefined {
+    if (user.dailyLossTripped) return 'daily-loss'
+    if (user.executionMode === 'live' && this.persistenceFault !== null) {
+      return 'persistence-fault'
+    }
+    if (user.executionMode === 'live' && snapshot.sources?.sentimentFault) {
+      return 'sentiment-fault'
+    }
+    const totalCap = user.config.maxTotalTradesPerDay
+    if (totalCap !== undefined && (user.tradesCountToday || 0) >= totalCap) {
+      return 'total-cap'
+    }
+    const blockers = snapshot.sources?.entryBlockedReasons
+    if (blockers && blockers.length > 0) {
+      return `stale-data: ${blockers.join('; ')}`
+    }
+    const symbol = snapshot.underlyingSymbol
+    const tradesCount = user.tradesCountPerSymbol[symbol] || 0
+    if (tradesCount >= user.config.maxTradesPerDay) return 'symbol-cap'
+    const lastExit = user.lastExitTimes[symbol] || 0
+    const cooldownMs = (user.config.exitCooldownSec || 60) * 1000
+    if (Date.now() - lastExit < cooldownMs) return 'cooldown'
+    if (!entryEligible) return htfVetoed ? 'htf-veto' : 'no-entry-signal'
+    const hardStop = runHardStopChecks(snapshot.vrdData ?? null)
+    if (hardStop.blocked) {
+      return `hard-stop: ${hardStop.reasons.join('; ')}`
+    }
+    return undefined
+  }
+
+  /**
+   * Persist a signal snapshot at most once per minute per user+symbol for an
+   * unchanged decision fingerprint. Returns the row id so a placed order can
+   * be attached to the same episode. Never throws into the trading path.
+   */
+  private logSignalSnapshot(record: SignalSnapshotRecord): number | null {
+    if (!this.store) return null
+    const key = `${record.userId}:${record.symbol}`
+    const fingerprint = JSON.stringify({
+      signal: record.userSignal.signal,
+      confidence: record.userSignal.confidence,
+      bull: record.userSignal.bullScore,
+      bear: record.userSignal.bearScore,
+      unfiltered: record.unfilteredSignal.signal,
+      unfilteredConfidence: record.unfilteredSignal.confidence,
+      ht: record.higherTimeframeTrend,
+      filter: record.config.useMultiTimeframe !== false,
+      blocked: record.blockedReason,
+      spot: Math.round(record.spotPrice),
+    })
+    const now = Date.now()
+    const previous = this.signalSnapshotThrottle.get(key)
+    if (
+      previous &&
+      previous.fingerprint === fingerprint &&
+      now - previous.lastAt < 60_000
+    ) {
+      return previous.id
+    }
+    try {
+      const id = this.store.saveSignalSnapshot(record)
+      this.signalSnapshotThrottle.set(key, {
+        fingerprint,
+        lastAt: now,
+        id,
+      })
+      return id
+    } catch (err) {
+      if (now - this.lastSignalSnapshotWarnAt > 60_000) {
+        this.lastSignalSnapshotWarnAt = now
+        console.warn(
+          `[signal-snapshot] write failed (entry path unaffected): ${(err as Error).message}`,
+        )
+      }
+      return null
+    }
+  }
+
+  /** Best-effort attach of the order outcome to a snapshot row. */
+  private updateSignalSnapshotOutcome(
+    id: number | null,
+    patch: {
+      orderPlaced?: boolean
+      tradeId?: string | null
+      instrumentKey?: string | null
+      entryPrice?: number | null
+      blockedReason?: string | null
+    },
+  ): void {
+    if (id === null || !this.store) return
+    try {
+      this.store.updateSignalSnapshot(id, patch)
+    } catch (err) {
+      const now = Date.now()
+      if (now - this.lastSignalSnapshotWarnAt > 60_000) {
+        this.lastSignalSnapshotWarnAt = now
+        console.warn(
+          `[signal-snapshot] outcome update failed (entry path unaffected): ${(err as Error).message}`,
+        )
       }
     }
   }

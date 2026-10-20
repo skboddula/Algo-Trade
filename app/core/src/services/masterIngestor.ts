@@ -344,6 +344,13 @@ export class MasterIngestionEngine extends EventEmitter {
       }
 
       const finalSignal = getFinalSignal(signalData, DEFAULT_STRATEGY_CONFIG)
+      // Reference scoring with the multi-timeframe veto disabled. Each user's
+      // entry path applies their own `useMultiTimeframe` setting to this base
+      // rather than recomputing V3/VRD per tenant.
+      const unfilteredSignal = getFinalSignal(signalData, {
+        ...DEFAULT_STRATEGY_CONFIG,
+        useMultiTimeframe: false,
+      })
 
       const snapshot: MarketSnapshot = {
         timestamp,
@@ -357,7 +364,9 @@ export class MasterIngestionEngine extends EventEmitter {
         pcr: indicators.pcrValue,
         indicators,
         vrdData,
+        v3,
         signal: finalSignal,
+        unfilteredSignal,
         globalIndices,
         sources: this.buildSourcesBlock(symbol),
       }

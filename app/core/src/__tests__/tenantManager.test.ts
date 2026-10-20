@@ -93,6 +93,7 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
         atr: { value: 30, level: 'Medium' },
         pcr: 'Hold',
         pcrValue: 1,
+        higherTimeframeTrend: 'Hold',
       },
       signal: { signal: 'BUY_CE', confidence: 'strong', positionSize: 'full' },
       sources: {
@@ -142,6 +143,82 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
       expect(gated.positions['NIFTY 50']).not.toBeNull()
       placeSpy.mockRestore()
     } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('logs replayable filter verdicts and honors the per-user multi-timeframe toggle', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'algo-signal-log-'))
+    const store = new StateStore(dir)
+    try {
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        gateway,
+        { store },
+      )
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+
+      manager.startBot('filter-log', 'paper')
+      manager.updateConfig('filter-log', {
+        underlyingMode: 'NIFTY 50',
+        lastEntryTime: '23:59',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+        maxTradesPerDay: 5,
+        maxTotalTradesPerDay: 18,
+        useMultiTimeframe: true,
+      })
+
+      const { snapshot, tick } = buildEntryTick()
+      snapshot.indicators.higherTimeframeTrend = 'Sell'
+      // Mark the snapshot as a production one (with the unfiltered reference
+      // twin) so this exercises the per-user recompute path, not the legacy
+      // test-fixture fallback.
+      ;(snapshot as any).v3 = 'buy'
+      ;(snapshot as any).unfilteredSignal = {
+        signal: 'BUY_CE',
+        confidence: 'strong',
+        positionSize: 'full',
+        v3: 'buy',
+        v4: 'Hold',
+        bullScore: 8,
+        bearScore: 0,
+        scoreMax: 14,
+      }
+
+      // Filter on: the counter-trend BUY_CE is vetoed, no order, but the
+      // evaluation is still persisted with both arms.
+      await (manager as any).handleMarketTick(tick)
+      expect(placeSpy).not.toHaveBeenCalled()
+      let rows = manager.getSignalSnapshots('filter-log', '2026-10-19')
+      expect(rows.length).toBeGreaterThan(0)
+      expect(rows[0].filterVerdict).toBe('vetoed')
+      expect(rows[0].entryEligible).toBe(false)
+      expect(rows[0].blockedReason).toBe('htf-veto')
+      expect(rows[0].higherTimeframeTrend).toBe('Sell')
+      expect(rows[0].unfilteredSignal.signal).toBe('BUY_CE')
+      expect(rows[0].userSignal.signal).toBe('NO_TRADE')
+      expect(rows[0].data.indicators.higherTimeframeTrend).toBe('Sell')
+
+      // Filter off: the same signal enters, and the row is attached to the
+      // resulting paper trade.
+      manager.updateConfig('filter-log', { useMultiTimeframe: false })
+      await (manager as any).handleMarketTick(tick)
+      expect(placeSpy).toHaveBeenCalledTimes(1)
+      rows = manager.getSignalSnapshots('filter-log', '2026-10-19')
+      expect(rows[0].filterVerdict).toBe('off')
+      expect(rows[0].entryEligible).toBe(true)
+      expect(rows[0].orderPlaced).toBe(true)
+      expect(rows[0].tradeId).toMatch(/^paper_tr_/)
+      expect(rows[0].instrumentKey).toBe('NSE_FO|CE1')
+      expect(rows[0].entryPrice).toBeGreaterThan(0)
+      placeSpy.mockRestore()
+    } finally {
+      store.close()
       vi.useRealTimers()
     }
   })

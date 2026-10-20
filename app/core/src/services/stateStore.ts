@@ -2,7 +2,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import type { DatabaseSync as DatabaseSyncType, StatementSync } from 'node:sqlite'
-import type { PaperAccount, PaperTradeRecord, UserBotState } from '../types'
+import type {
+  PaperAccount,
+  PaperTradeRecord,
+  SignalSnapshotRecord,
+  UserBotState,
+} from '../types'
 
 // `node:sqlite` is a prefixed-only builtin (Node >= 22.5) that some transform
 // pipelines predate — load it through createRequire so both the compiled CJS
@@ -20,6 +25,7 @@ const { DatabaseSync } = nodeRequire('node:sqlite') as typeof import('node:sqlit
  *   - bot_state        : per-user UserBotState (positions, trailing-SL peak, counters)
  *   - paper_accounts   : paper ledger balances
  *   - paper_trades     : paper ledger trade history
+ *   - signal_snapshots : replayable entry-evaluation telemetry (filter A/B)
  *   - daemon_settings  : window-managed settings (Upstox OAuth credentials, master token)
  *
  * The database file lives in DATA_DIR (default: ./data) and is created with
@@ -39,6 +45,8 @@ export class StateStore {
   private getSettingStmt: StatementSync
   private saveSettingStmt: StatementSync
   private deleteSettingStmt: StatementSync
+  private saveSignalSnapshotStmt: StatementSync
+  private updateSignalSnapshotStmt: StatementSync
 
   constructor(dataDir: string) {
     fs.mkdirSync(dataDir, { recursive: true })
@@ -106,6 +114,26 @@ export class StateStore {
          updated_at = excluded.updated_at`,
     )
     this.deleteSettingStmt = this.db.prepare('DELETE FROM daemon_settings WHERE key = ?')
+
+    this.saveSignalSnapshotStmt = this.db.prepare(
+      `INSERT INTO signal_snapshots (
+         user_id, symbol, captured_at, ist_date, execution_mode, bot_state,
+         spot_price, config_json, data_json, default_signal_json,
+         user_signal_json, unfiltered_signal_json, higher_timeframe_trend,
+         entry_eligible, filter_verdict, blocked_reason, context_json,
+         order_placed, trade_id, instrument_key, entry_price, sources_json,
+         created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    this.updateSignalSnapshotStmt = this.db.prepare(
+      `UPDATE signal_snapshots SET
+         order_placed = COALESCE(?, order_placed),
+         trade_id = COALESCE(?, trade_id),
+         instrument_key = COALESCE(?, instrument_key),
+         entry_price = COALESCE(?, entry_price),
+         blocked_reason = ?
+       WHERE id = ?`,
+    )
   }
 
   private migrate(): void {
@@ -146,6 +174,36 @@ export class StateStore {
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS signal_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        ist_date TEXT NOT NULL,
+        execution_mode TEXT NOT NULL,
+        bot_state TEXT NOT NULL,
+        spot_price REAL NOT NULL,
+        config_json TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        default_signal_json TEXT,
+        user_signal_json TEXT NOT NULL,
+        unfiltered_signal_json TEXT NOT NULL,
+        higher_timeframe_trend TEXT,
+        entry_eligible INTEGER NOT NULL DEFAULT 0,
+        filter_verdict TEXT NOT NULL,
+        blocked_reason TEXT,
+        context_json TEXT NOT NULL,
+        order_placed INTEGER NOT NULL DEFAULT 0,
+        trade_id TEXT,
+        instrument_key TEXT,
+        entry_price REAL,
+        sources_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_signal_snapshots_user_date
+        ON signal_snapshots(user_id, ist_date, id);
+      CREATE INDEX IF NOT EXISTS idx_signal_snapshots_symbol_time
+        ON signal_snapshots(symbol, captured_at);
     `)
   }
 
@@ -291,6 +349,152 @@ export class StateStore {
   /** Remove a window-managed setting. */
   public deleteSetting(key: string): void {
     this.deleteSettingStmt.run(key)
+  }
+
+  /**
+   * Persist one replayable signal evaluation.
+   *
+   * Telemetry only: callers must treat write failures as non-fatal. The
+   * returned id lets the entry path attach the resulting order/trade.
+   */
+  public saveSignalSnapshot(record: SignalSnapshotRecord): number {
+    const result = this.saveSignalSnapshotStmt.run(
+      record.userId,
+      record.symbol,
+      record.capturedAt,
+      record.istDate,
+      record.executionMode,
+      record.botState,
+      record.spotPrice,
+      JSON.stringify(record.config),
+      JSON.stringify(record.data),
+      record.defaultSignal ? JSON.stringify(record.defaultSignal) : null,
+      JSON.stringify(record.userSignal),
+      JSON.stringify(record.unfilteredSignal),
+      record.higherTimeframeTrend ?? null,
+      record.entryEligible ? 1 : 0,
+      record.filterVerdict,
+      record.blockedReason ?? null,
+      JSON.stringify(record.context),
+      record.orderPlaced ? 1 : 0,
+      record.tradeId ?? null,
+      record.instrumentKey ?? null,
+      record.entryPrice ?? null,
+      record.sources ? JSON.stringify(record.sources) : null,
+      record.createdAt ?? new Date().toISOString(),
+    )
+    return Number(result.lastInsertRowid)
+  }
+
+  /** Attach the resulting order (or failure reason) to a signal snapshot. */
+  public updateSignalSnapshot(
+    id: number,
+    patch: {
+      orderPlaced?: boolean
+      tradeId?: string | null
+      instrumentKey?: string | null
+      entryPrice?: number | null
+      blockedReason?: string | null
+    },
+  ): void {
+    this.updateSignalSnapshotStmt.run(
+      patch.orderPlaced === undefined ? null : patch.orderPlaced ? 1 : 0,
+      patch.tradeId ?? null,
+      patch.instrumentKey ?? null,
+      patch.entryPrice ?? null,
+      patch.blockedReason ?? null,
+      id,
+    )
+  }
+
+  /** Newest-first snapshots for one user, optionally filtered to an IST day. */
+  public loadSignalSnapshots(
+    userId: string,
+    istDate?: string,
+    limit = 200,
+  ): SignalSnapshotRecord[] {
+    const safeLimit = Math.min(Math.max(Math.trunc(limit) || 200, 1), 5000)
+    const rows = (
+      istDate
+        ? this.db
+            .prepare(
+              `SELECT * FROM signal_snapshots
+               WHERE user_id = ? AND ist_date = ?
+               ORDER BY id DESC LIMIT ?`,
+            )
+            .all(userId, istDate, safeLimit)
+        : this.db
+            .prepare(
+              `SELECT * FROM signal_snapshots
+               WHERE user_id = ?
+               ORDER BY id DESC LIMIT ?`,
+            )
+            .all(userId, safeLimit)
+    ) as Record<string, unknown>[]
+
+    const parse = <T>(value: unknown): T | undefined => {
+      if (typeof value !== 'string' || value.length === 0) return undefined
+      try {
+        return JSON.parse(value) as T
+      } catch {
+        return undefined
+      }
+    }
+
+    const records: SignalSnapshotRecord[] = []
+    for (const row of rows) {
+      const config = parse<SignalSnapshotRecord['config']>(row.config_json)
+      const data = parse<SignalSnapshotRecord['data']>(row.data_json)
+      const userSignal = parse<SignalSnapshotRecord['userSignal']>(
+        row.user_signal_json,
+      )
+      const unfilteredSignal = parse<SignalSnapshotRecord['unfilteredSignal']>(
+        row.unfiltered_signal_json,
+      )
+      const context = parse<SignalSnapshotRecord['context']>(row.context_json)
+      if (!config || !data || !userSignal || !unfilteredSignal || !context) {
+        continue
+      }
+      records.push({
+        id: Number(row.id),
+        userId: String(row.user_id),
+        symbol: row.symbol as SignalSnapshotRecord['symbol'],
+        capturedAt: String(row.captured_at),
+        istDate: String(row.ist_date),
+        executionMode:
+          row.execution_mode as SignalSnapshotRecord['executionMode'],
+        botState: row.bot_state as SignalSnapshotRecord['botState'],
+        spotPrice: Number(row.spot_price),
+        config,
+        data,
+        defaultSignal: parse<SignalSnapshotRecord['defaultSignal']>(
+          row.default_signal_json,
+        ),
+        userSignal,
+        unfilteredSignal,
+        higherTimeframeTrend:
+          (row.higher_timeframe_trend as
+            | SignalSnapshotRecord['higherTimeframeTrend']
+            | null) ?? undefined,
+        entryEligible: Number(row.entry_eligible) === 1,
+        filterVerdict:
+          row.filter_verdict as SignalSnapshotRecord['filterVerdict'],
+        blockedReason:
+          typeof row.blocked_reason === 'string' ? row.blocked_reason : undefined,
+        context,
+        orderPlaced: Number(row.order_placed) === 1,
+        tradeId: typeof row.trade_id === 'string' ? row.trade_id : undefined,
+        instrumentKey:
+          typeof row.instrument_key === 'string' ? row.instrument_key : undefined,
+        entryPrice:
+          row.entry_price === null || row.entry_price === undefined
+            ? undefined
+            : Number(row.entry_price),
+        sources: parse<SignalSnapshotRecord['sources']>(row.sources_json),
+        createdAt: String(row.created_at),
+      })
+    }
+    return records
   }
 
   public close(): void {
