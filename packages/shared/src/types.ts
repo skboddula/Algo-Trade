@@ -394,6 +394,7 @@ export const DEFAULT_CONFIG: StrategyConfig = {
   otmSkip: 3,
   executionMode: 'paper',
   tradeType: 'buying',
+  useMultiTimeframe: true,
   brentCrudeExtremeThreshold: 125,
   brentCrudeOverhangThreshold: 88,
 }

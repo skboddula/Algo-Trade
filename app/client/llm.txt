@@ -93,7 +93,10 @@ shared `buildHtfCandleHistory` (`packages/shared/src/candleHistory.ts`, trimmed 
 5-bar groups). Only `higherTimeframeTrend` consumes this series; `candles` and every
 1-minute indicator stay reference-identical. The daemon's `masterIngestor` fetches and
 composes the same series, so the 5-minute EMA 10/42 filter is warm from the open in both
-runtimes instead of abstaining until ~12:45 IST.
+runtimes instead of abstaining until ~12:45 IST. The veto is enabled by default
+(`useMultiTimeframe`), can be toggled in Strategy → Strategy Config → Signal Filters on
+both dashboards, and is persisted through `saveStrategyConfig` (browser) or
+`/api/bot/config` (daemon).
 
 ---
 

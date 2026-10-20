@@ -232,7 +232,12 @@ describe('fetchMarket multi-timeframe pre-seed', () => {
     )
   const run = async () => {
     const logs: BotLog[] = []
-    return fetchMarket('test-token', (log) => logs.push(log), vi.fn(), 'NIFTY 50')
+    return fetchMarket(
+      'test-token',
+      (log) => logs.push(log),
+      vi.fn(),
+      'NIFTY 50',
+    )
   }
 
   beforeEach(() => {
@@ -245,7 +250,9 @@ describe('fetchMarket multi-timeframe pre-seed', () => {
   })
 
   it('prepends the previous session to htfCandles and fetches it once per session', async () => {
-    const fetchMock = stubMarketFetch(() => json({ data: { candles: previousRows } }))
+    const fetchMock = stubMarketFetch(() =>
+      json({ data: { candles: previousRows } }),
+    )
 
     const first = await run()
     expect(first.candles).toHaveLength(4)

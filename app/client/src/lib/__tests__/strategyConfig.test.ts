@@ -48,6 +48,20 @@ describe('getStrategyConfig', () => {
     const { getStrategyConfig } = await import('../strategyConfig')
     expect(getStrategyConfig()).toEqual(DEFAULT_CONFIG)
   })
+
+  it('defaults the multi-timeframe filter to enabled', async () => {
+    const { getStrategyConfig } = await import('../strategyConfig')
+    expect(getStrategyConfig().useMultiTimeframe).toBe(true)
+  })
+
+  it('preserves an explicit multi-timeframe opt-out', async () => {
+    localStorage.setItem(
+      STORAGE_KEY_STRATEGY_CONFIG,
+      JSON.stringify({ useMultiTimeframe: false }),
+    )
+    const { getStrategyConfig } = await import('../strategyConfig')
+    expect(getStrategyConfig().useMultiTimeframe).toBe(false)
+  })
 })
 
 describe('saveStrategyConfig', () => {

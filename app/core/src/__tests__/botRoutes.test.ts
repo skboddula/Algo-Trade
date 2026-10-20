@@ -74,7 +74,11 @@ describe('Fastify Bot Routes & API Suite', () => {
       url: '/api/bot/config',
       payload: {
         userId: 'test_trader',
-        config: { strongThreshold: 20, maxTradesPerDay: 8 },
+        config: {
+          strongThreshold: 20,
+          maxTradesPerDay: 8,
+          useMultiTimeframe: false,
+        },
       },
     })
     expect(res.statusCode).toBe(200)
@@ -82,6 +86,7 @@ describe('Fastify Bot Routes & API Suite', () => {
     expect(json.success).toBe(true)
     expect(json.userState.config.strongThreshold).toBe(20)
     expect(json.userState.config.maxTradesPerDay).toBe(8)
+    expect(json.userState.config.useMultiTimeframe).toBe(false)
   })
 
   it('POST /api/bot/paper-reset resets account balance', async () => {

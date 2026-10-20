@@ -103,6 +103,35 @@ function Field({
   )
 }
 
+function Toggle({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean
+  onChange: (next: boolean) => void
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer focus:outline-none focus:ring-1 focus:ring-ring ${
+        checked ? 'border-primary bg-primary' : 'border-border bg-muted'
+      }`}
+    >
+      <span
+        className={`inline-block h-3.5 w-3.5 rounded-full bg-background shadow transition-transform ${
+          checked ? 'translate-x-[19px]' : 'translate-x-[3px]'
+        }`}
+      />
+    </button>
+  )
+}
+
 export function StrategyConfig({
   config,
   onSave,
@@ -112,27 +141,42 @@ export function StrategyConfig({
 }) {
   const [local, setLocal] = useState<StrategyConfig>(config)
   const [saved, setSaved] = useState(false)
+  const [dirty, setDirty] = useState(false)
+  const [prevConfig, setPrevConfig] = useState(config)
+
+  // Adopt config that loads after mount (e.g. the daemon status fetch) without
+  // clobbering unsaved edits while the status socket keeps polling.
+  if (config !== prevConfig) {
+    setPrevConfig(config)
+    if (!dirty) setLocal(config)
+  }
 
   function set<K extends keyof StrategyConfig>(k: K, v: StrategyConfig[K]) {
+    setDirty(true)
     setLocal((prev) => ({ ...prev, [k]: v }))
   }
 
   function handleSave() {
     saveStrategyConfig(local)
     onSave(local)
+    setDirty(false)
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
   }
 
   function handleReset() {
+    setDirty(true)
     setLocal(DEFAULT_CONFIG)
   }
 
   function applyPreset(key: string) {
     const preset = PRESETS[key]
     if (!preset) return
+    setDirty(true)
     setLocal((prev) => ({ ...prev, ...preset.values }))
   }
+
+  const mtfEnabled = local.useMultiTimeframe !== false
 
   const strongPct = Math.round((local.strongThreshold / APPROX_MAX) * 100)
   const modPct = Math.round((local.moderateThreshold / APPROX_MAX) * 100)
@@ -407,6 +451,45 @@ export function StrategyConfig({
               onChange={(v) => set('moderateGap', Number(v))}
               tooltip="Bull−bear score gap required for Moderate confidence."
               hint="Recommended: 2–4"
+            />
+          </div>
+        </div>
+
+        {/* ── Signal filters ─────────────────────────────────────────────── */}
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground font-medium flex items-center gap-1">
+            Signal Filters
+            <InfoTooltip content="Optional confluence gates applied to entry signals. Exits always remain on 1-minute data." />
+          </p>
+          <div
+            className={`flex items-start justify-between gap-3 p-3 rounded-lg border transition-colors ${
+              mtfEnabled
+                ? 'border-primary/25 bg-primary/5'
+                : 'border-amber-500/40 bg-amber-500/5'
+            }`}
+          >
+            <div className="space-y-1">
+              <p className="text-xs font-semibold flex items-center gap-1">
+                Multi-Timeframe Confluence
+                <InfoTooltip content="Resamples 1-min candles into 5-min bars and requires EMA 10/42 agreement. BUY_CE is vetoed while the 5-min trend is bearish; BUY_PE while bullish. Veto-only: a neutral (Hold) trend never blocks an entry. The previous session is pre-seeded so the filter is warm from 09:15 IST." />
+              </p>
+              <p className="text-[10px] text-muted-foreground">
+                5-min EMA 10/42 veto — pre-seeded from the previous session.
+              </p>
+              <p
+                className={`text-[10px] font-medium ${
+                  mtfEnabled ? 'text-primary' : 'text-amber-500'
+                }`}
+              >
+                {mtfEnabled
+                  ? 'On — counter-trend entries are vetoed'
+                  : 'Off — all 1-min entries pass the trend filter'}
+              </p>
+            </div>
+            <Toggle
+              checked={mtfEnabled}
+              onChange={(next) => set('useMultiTimeframe', next)}
+              label="Multi-timeframe confluence"
             />
           </div>
         </div>
