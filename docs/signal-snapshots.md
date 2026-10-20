@@ -41,6 +41,18 @@ same signal as before.
 
 ## Reading snapshots
 
+Quick daily report (both filter arms, veto count, actual orders):
+
+```bash
+cd app/core
+npx tsx scripts/snapshot-report.ts 2026-10-21 default_user
+```
+
+The table starts at the deploy that introduced it; earlier dates are not
+backfilled. `2026-10-19`/`2026-10-20` will be empty.
+
+Raw API:
+
 ```bash
 curl -s 'http://127.0.0.1:3000/api/bot/signal-snapshots?userId=default_user&date=2026-10-21&limit=200' \
   | jq '.count, .snapshots[0]'
