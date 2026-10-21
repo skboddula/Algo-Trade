@@ -1161,6 +1161,51 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
     expect(state?.lastEntryDirection).toBe('CE')
   })
 
+  it('lets a strong signal re-enter during the two-loss pause in the tick path', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    try {
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        gateway,
+      )
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+
+      manager.startBot('strong-pause', 'paper')
+      manager.updateConfig('strong-pause', {
+        underlyingMode: 'NIFTY 50',
+        lastEntryTime: '23:59',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+        maxTradesPerDay: 8,
+        maxTotalTradesPerDay: 18,
+        exitCooldownSec: 300,
+      })
+      const user = manager.getOrCreateUser('strong-pause')
+      user.reentry = {
+        'NIFTY 50': {
+          lastEntryScore: 13,
+          lastEntryDirection: 'CE',
+          lastExitNetPnlPaise: -1_000,
+          consecutiveLosses: 2,
+          pauseUntil: Date.now() + LOSS_PAUSE_MS,
+        },
+      }
+
+      const { tick } = buildEntryTick()
+      await (manager as any).handleMarketTick(tick)
+
+      expect(placeSpy).toHaveBeenCalledTimes(1)
+      expect(user.positions['NIFTY 50']).not.toBeNull()
+      expect(user.reentry?.['NIFTY 50']?.lastEntryScore).toBeDefined()
+      placeSpy.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('persists the re-entry guard across daemon restarts', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'algo-reentry-'))
     try {
