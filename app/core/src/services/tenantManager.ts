@@ -12,6 +12,7 @@ import type {
 } from '../types'
 import {
   DEFAULT_STRATEGY_CONFIG,
+  LIVE_ARM_ENV as DAEMON_LIVE_ARM_ENV,
   VIX_CRITICAL_ALERT_COOLDOWN_MS,
   VIX_CRITICAL_THRESHOLD,
   VIX_ELEVATED_THRESHOLD,
@@ -69,7 +70,12 @@ function extractUpstoxEquity(payload: unknown): number | null {
 
 export class TenantManager extends EventEmitter {
   /** Env var that arms live trading server-side (client confirms are only UX). */
-  static readonly LIVE_ARM_ENV = 'DAEMON_LIVE_ARMED'
+  static readonly LIVE_ARM_ENV = DAEMON_LIVE_ARM_ENV
+
+  /** Operator arm switch for new live entries; exits are never gated. */
+  public static isLiveArmed(): boolean {
+    return process.env[DAEMON_LIVE_ARM_ENV] === 'true'
+  }
 
   private users: Map<string, UserBotState> = new Map()
   private masterIngestor: MasterIngestionEngine
@@ -149,6 +155,33 @@ export class TenantManager extends EventEmitter {
           'bot',
           `Resumed ${user.userId} from persisted state — ${user.state} (${user.executionMode}` +
             `${openPositions > 0 ? `, ${openPositions} open position${openPositions > 1 ? 's' : ''}` : ''})`,
+        )
+      }
+    }
+
+    // A persisted live tenant must not resume trading live just because its
+    // old state says so. Keep the mode (exits must stay on the broker) but
+    // gate every new entry until the operator re-arms.
+    if (!TenantManager.isLiveArmed()) {
+      const activeLive = Array.from(this.users.values()).filter(
+        (user) =>
+          user.executionMode === 'live' &&
+          (user.state === 'RUNNING' || user.state === 'ORDERED'),
+      )
+      for (const user of activeLive) {
+        this.activityLog?.add(
+          'warn',
+          'risk',
+          `Live tenant ${user.userId} resumed without ${TenantManager.LIVE_ARM_ENV}=true — ` +
+            `new live entries blocked; open positions still managed/exited`,
+        )
+      }
+      if (activeLive.length > 0 && this.notifier) {
+        const count = activeLive.length
+        void this.notifier(
+          `⚠️ Algo-Trade: ${TenantManager.LIVE_ARM_ENV} is not set. ` +
+            `${count} live tenant${count > 1 ? 's' : ''} resumed — new live entries are blocked; ` +
+            `open positions will still be managed and exited.`,
         )
       }
     }
@@ -365,7 +398,7 @@ export class TenantManager extends EventEmitter {
 
   /** Throws unless live trading is explicitly armed on the daemon. */
   private requireLiveArmed(): void {
-    if (process.env[TenantManager.LIVE_ARM_ENV] !== 'true') {
+    if (!TenantManager.isLiveArmed()) {
       throw new Error(
         `Live trading is not armed: set ${TenantManager.LIVE_ARM_ENV}=true in the daemon environment to enable live orders`,
       )
@@ -824,6 +857,17 @@ export class TenantManager extends EventEmitter {
             continue
           }
 
+          // Live arm switch is checked per entry, not just at start: a
+          // persisted live tenant can resume after a restart with the flag
+          // unset. Exits stay active; only new live entries are blocked.
+          if (user.executionMode === 'live' && !TenantManager.isLiveArmed()) {
+            this.warnGate(
+              `${symbol}:live-arm`,
+              `[live-arm] [${symbol}] LIVE entry blocked — ${TenantManager.LIVE_ARM_ENV}=true is not set (exits unaffected)`,
+            )
+            continue
+          }
+
           // CR-15 (entry path): a failed state write means the persisted state
           // no longer matches reality. Block new LIVE entries until writes
           // recover; paper entries continue in-memory (the fault is surfaced).
@@ -990,6 +1034,9 @@ export class TenantManager extends EventEmitter {
     entryEligible: boolean,
     htfVetoed: boolean,
   ): string | undefined {
+    if (user.executionMode === 'live' && !TenantManager.isLiveArmed()) {
+      return 'live-arm'
+    }
     if (user.dailyLossTripped) return 'daily-loss'
     if (user.executionMode === 'live' && this.persistenceFault !== null) {
       return 'persistence-fault'

@@ -341,12 +341,16 @@ if (require.main === module) {
     // master token resolves (SQLite or env).
     const dataMode = masterIngestor.isMockMode() ? 'MOCK' : 'live feed'
     const executionMode = tenantManager.getExecutionModeSummary()
+    const executionLabel =
+      executionMode !== 'paper' && !TenantManager.isLiveArmed()
+        ? `${executionMode} (unarmed)`
+        : executionMode
     app.log.info(
-      `📡 Master Ingestion Engine started (Single 1-API fetch loop active; data: ${dataMode}; execution: ${executionMode})`,
+      `📡 Master Ingestion Engine started (Single 1-API fetch loop active; data: ${dataMode}; execution: ${executionLabel})`,
     )
     void notifier(
       `🟢 Algo-Trade daemon started at ${address} ` +
-        `(data: ${dataMode} · execution: ${executionMode}).`,
+        `(data: ${dataMode} · execution: ${executionLabel}).`,
     )
   })
 

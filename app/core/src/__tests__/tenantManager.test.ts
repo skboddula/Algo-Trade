@@ -176,6 +176,57 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
     }
   })
 
+  it('blocks new live entries per tick when the arm flag is removed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    const previousArm = process.env.DAEMON_LIVE_ARMED
+    process.env.DAEMON_LIVE_ARMED = 'true'
+    try {
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        gateway,
+      )
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+      manager.startBot('live-gated', 'live')
+      manager.updateConfig('live-gated', {
+        underlyingMode: 'NIFTY 50',
+        lastEntryTime: '23:59',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+      })
+
+      // Flag removed after the tenant started (e.g. restart with a persisted
+      // live state): entries must stay blocked on every tick.
+      delete process.env.DAEMON_LIVE_ARMED
+      const { tick } = buildEntryTick()
+      await (manager as any).handleMarketTick(tick)
+
+      const user = manager.getOrCreateUser('live-gated')
+      expect(placeSpy).not.toHaveBeenCalled()
+      expect(user.positions['NIFTY 50']).toBeNull()
+      expect(user.executionMode).toBe('live')
+
+      // Re-arming opens the per-tick gate again.
+      process.env.DAEMON_LIVE_ARMED = 'true'
+      placeSpy.mockResolvedValueOnce({
+        success: true,
+        tradeId: 'live_test_trade',
+        filledPrice: 100,
+        quantity: 75,
+      })
+      await (manager as any).handleMarketTick(tick)
+      expect(placeSpy).toHaveBeenCalledTimes(1)
+      expect(user.positions['NIFTY 50']).not.toBeNull()
+      placeSpy.mockRestore()
+    } finally {
+      vi.useRealTimers()
+      if (previousArm === undefined) delete process.env.DAEMON_LIVE_ARMED
+      else process.env.DAEMON_LIVE_ARMED = previousArm
+    }
+  })
+
   it('logs replayable filter verdicts and honors the per-user multi-timeframe toggle', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
@@ -806,6 +857,54 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
       expect(user.dailyLossTripped).toBe(false)
     } finally {
       warnSpy.mockRestore()
+    }
+  })
+
+  it('warns and keeps live mode when a live tenant resumes unarmed', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'algo-live-arm-'))
+    const store = new StateStore(dir)
+    const previousArm = process.env.DAEMON_LIVE_ARMED
+    process.env.DAEMON_LIVE_ARMED = 'true'
+    try {
+      const seeded = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        new OrderGateway(),
+        { store },
+      )
+      seeded.startBot('live-resume', 'live')
+
+      delete process.env.DAEMON_LIVE_ARMED
+      const activityLog = {
+        add: vi.fn(),
+        addCoalesced: vi.fn(),
+        clearCoalesced: vi.fn(),
+      } as any
+      const notifier = vi.fn(async () => undefined)
+      const resumed = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        new OrderGateway(),
+        { store, activityLog, notifier },
+      )
+
+      const user = resumed.getOrCreateUser('live-resume')
+      expect(user.executionMode).toBe('live')
+      expect(resumed.getExecutionModeSummary()).toBe('live')
+
+      const warned = activityLog.add.mock.calls.some(
+        (call: any[]) =>
+          call[0] === 'warn' &&
+          call[1] === 'risk' &&
+          String(call[2]).includes('DAEMON_LIVE_ARMED'),
+      )
+      expect(warned).toBe(true)
+      expect(notifier).toHaveBeenCalledWith(
+        expect.stringContaining('DAEMON_LIVE_ARMED'),
+      )
+    } finally {
+      if (previousArm === undefined) delete process.env.DAEMON_LIVE_ARMED
+      else process.env.DAEMON_LIVE_ARMED = previousArm
+      store.close()
+      fs.rmSync(dir, { recursive: true, force: true })
     }
   })
 })

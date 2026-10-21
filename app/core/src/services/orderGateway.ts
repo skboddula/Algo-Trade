@@ -4,7 +4,7 @@ import type {
   PaperAccount,
   PaperTradeRecord,
 } from '../types'
-import { DEFAULT_INITIAL_PAPER_BALANCE } from '../constants'
+import { DEFAULT_INITIAL_PAPER_BALANCE, LIVE_ARM_ENV } from '../constants'
 import type { StateStore } from './stateStore'
 
 export interface OrderPlacementRequest {
@@ -135,6 +135,17 @@ export class OrderGateway {
   }
 
   public async placeOrder(req: OrderPlacementRequest): Promise<OrderResult> {
+    // Defense in depth: new live entries require the operator arm switch on
+    // every call, not just at start. Exits are intentionally not gated.
+    if (req.executionMode === 'live' && process.env[LIVE_ARM_ENV] !== 'true') {
+      return {
+        success: false,
+        tradeId: '',
+        filledPrice: 0,
+        quantity: 0,
+        error: `Live trading is not armed: set ${LIVE_ARM_ENV}=true in the daemon environment to enable live orders`,
+      }
+    }
     if (req.executionMode === 'paper') {
       return this.placePaperOrder(req)
     }

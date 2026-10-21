@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { OrderGateway } from '../services/orderGateway'
 import type { ActivePosition } from '../types'
 import { DEFAULT_INITIAL_PAPER_BALANCE } from '../constants'
@@ -106,5 +106,34 @@ describe('Order Gateway Suite (Paper Ledger & Broker Gateway)', () => {
 
     const resetAcc = gateway.resetPaperAccount('user_reset')
     expect(resetAcc.balance).toBe(DEFAULT_INITIAL_PAPER_BALANCE)
+  })
+
+  it('refuses new live entries when DAEMON_LIVE_ARMED is not set', async () => {
+    const previousArm = process.env.DAEMON_LIVE_ARMED
+    const fetchMock = vi.fn().mockRejectedValue(new Error('network disabled'))
+    vi.stubGlobal('fetch', fetchMock)
+    delete process.env.DAEMON_LIVE_ARMED
+    try {
+      const gateway = new OrderGateway()
+      const result = await gateway.placeOrder({
+        userId: 'live_unarmed',
+        executionMode: 'live',
+        token: 'test-token',
+        instrumentKey: 'NSE_FO|OPT_LIVE',
+        direction: 'CE',
+        quantity: 75,
+        price: 100,
+        tradeType: 'buying',
+        underlyingSymbol: 'NIFTY 50',
+      })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('DAEMON_LIVE_ARMED')
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+      if (previousArm === undefined) delete process.env.DAEMON_LIVE_ARMED
+      else process.env.DAEMON_LIVE_ARMED = previousArm
+    }
   })
 })
