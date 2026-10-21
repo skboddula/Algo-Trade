@@ -747,16 +747,30 @@ export class TenantManager extends EventEmitter {
             entryEligible,
             htfVetoed,
           )
-          // Per-tick scoring trace (hidden behind the debug filter; dropped at
-          // the source when DAEMON_ACTIVITY_DEBUG=false).
-          this.activityLog?.add(
-            'debug',
-            'signal',
-            `${symbol}: ${userSignal.signal} conf=${userSignal.confidence} ` +
+          // Scoring trace (hidden behind the debug filter; dropped at the
+          // source when DAEMON_ACTIVITY_DEBUG=false). Coalesced: a line is
+          // emitted when the evaluation state changes or at most once per
+          // heartbeat, so a static scan does not spam the log — repeats fold
+          // into a "held / ×N ticks" suffix on the previous line.
+          this.activityLog?.addCoalesced({
+            key: `${userId}:${symbol}`,
+            fingerprint: [
+              userSignal.signal,
+              userSignal.confidence,
+              filterVerdict,
+              htfVetoed ? 'veto' : 'ok',
+              blockedReason ?? 'none',
+            ].join('|'),
+            source: 'signal',
+            buildMessage: ({ repeatCount, heldMs }) =>
+              `${symbol}: ${userSignal.signal} conf=${userSignal.confidence} ` +
               `bull=${userSignal.bullScore}/bear=${userSignal.bearScore} filter=${filterVerdict}` +
               `${htfVetoed ? ' htf=veto' : ''}${blockedReason ? ` block=${blockedReason}` : ''} ` +
-              `spot=${snapshot.spotPrice.toFixed(1)}`,
-          )
+              `spot=${snapshot.spotPrice.toFixed(1)}` +
+              (repeatCount > 0
+                ? ` — held ${Math.max(1, Math.round(heldMs / 1000))}s (×${repeatCount + 1} ticks)`
+                : ''),
+          })
           let signalSnapshotId: number | null = null
           if (candidate && entrySignalData) {
             signalSnapshotId = this.logSignalSnapshot({

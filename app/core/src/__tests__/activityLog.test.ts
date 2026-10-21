@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { ActivityLog } from '../services/activityLog'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { ActivityLog, type CoalesceInfo } from '../services/activityLog'
 
 describe('ActivityLog', () => {
   it('keeps a bounded activity ring with increasing seq', () => {
@@ -75,5 +75,162 @@ describe('ActivityLog', () => {
 
     expect(() => log.add('error', 'order', 'after explosion')).not.toThrow()
     expect(seen).toEqual(['after explosion'])
+  })
+
+  describe('addCoalesced', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    const msg = ({ repeatCount, heldMs }: CoalesceInfo) =>
+      `rc=${repeatCount};held=${heldMs}`
+
+    function startClock(): void {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-10-21T04:00:00.000Z'))
+    }
+
+    it('emits once and suppresses identical evaluations, updating the line in place', () => {
+      startClock()
+      const log = new ActivityLog({ coalesceHeartbeatMs: 60_000 })
+      const call = () =>
+        log.addCoalesced({
+          key: 'u:NIFTY 50',
+          fingerprint: 'NO_TRADE|none|not-applicable|ok|no-entry-signal',
+          source: 'signal',
+          buildMessage: msg,
+        })
+
+      call()
+      vi.advanceTimersByTime(2000)
+      call()
+      vi.advanceTimersByTime(2000)
+      call()
+
+      const entries = log.backlog(10)
+      expect(entries).toHaveLength(1)
+      expect(entries[0].repeatCount).toBe(2)
+      expect(entries[0].heldMs).toBe(4000)
+      expect(entries[0].msg).toBe('rc=2;held=4000')
+    })
+
+    it('emits immediately when the fingerprint changes', () => {
+      startClock()
+      const log = new ActivityLog()
+      log.addCoalesced({
+        key: 'k',
+        fingerprint: 'NO_TRADE',
+        source: 'signal',
+        buildMessage: msg,
+      })
+      vi.advanceTimersByTime(2000)
+      log.addCoalesced({
+        key: 'k',
+        fingerprint: 'NO_TRADE',
+        source: 'signal',
+        buildMessage: msg,
+      })
+      vi.advanceTimersByTime(2000)
+      log.addCoalesced({
+        key: 'k',
+        fingerprint: 'BUY_CE|moderate',
+        source: 'signal',
+        buildMessage: msg,
+      })
+
+      const entries = log.backlog(10)
+      expect(entries).toHaveLength(2)
+      expect(entries[0].repeatCount).toBe(1)
+      expect(entries[1].msg).toBe('rc=0;held=0')
+      expect(entries[1].repeatCount).toBe(0)
+    })
+
+    it('re-emits an unchanged state at the heartbeat', () => {
+      startClock()
+      const log = new ActivityLog({ coalesceHeartbeatMs: 60_000 })
+      const call = () =>
+        log.addCoalesced({
+          key: 'k',
+          fingerprint: 'same',
+          source: 'signal',
+          buildMessage: msg,
+        })
+
+      call() // t=0, emit
+      vi.advanceTimersByTime(30_000)
+      call() // suppressed
+      vi.advanceTimersByTime(31_000)
+      call() // t=61s, heartbeat emit
+
+      const entries = log.backlog(10)
+      expect(entries).toHaveLength(2)
+      expect(entries[1].msg).toBe('rc=1;held=61000')
+    })
+
+    it('heartbeat 0 emits only on change', () => {
+      startClock()
+      const log = new ActivityLog({ coalesceHeartbeatMs: 0 })
+      const call = () =>
+        log.addCoalesced({
+          key: 'k',
+          fingerprint: 'same',
+          source: 'signal',
+          buildMessage: msg,
+        })
+
+      call()
+      vi.advanceTimersByTime(10 * 60_000)
+      call()
+      expect(log.backlog(10)).toHaveLength(1)
+    })
+
+    it('full mode (coalesceDebug=false) emits every evaluation', () => {
+      startClock()
+      const log = new ActivityLog({ coalesceDebug: false })
+      for (let i = 0; i < 3; i++) {
+        log.addCoalesced({
+          key: 'k',
+          fingerprint: 'same',
+          source: 'signal',
+          buildMessage: msg,
+        })
+      }
+      expect(log.backlog(10)).toHaveLength(3)
+    })
+
+    it('stays silent while debug is disabled and emits after re-enabling', () => {
+      startClock()
+      const log = new ActivityLog({ debugEnabled: false })
+      const call = () =>
+        log.addCoalesced({
+          key: 'k',
+          fingerprint: 'same',
+          source: 'signal',
+          buildMessage: msg,
+        })
+
+      call()
+      expect(log.backlog(10)).toHaveLength(0)
+
+      log.setDebugEnabled(true)
+      call()
+      const entries = log.backlog(10)
+      expect(entries).toHaveLength(1)
+      expect(entries[0].repeatCount).toBe(0)
+    })
+
+    it('tracks coalescing state independently per key', () => {
+      startClock()
+      const log = new ActivityLog()
+      for (const key of ['u:NIFTY 50', 'u:BANKNIFTY']) {
+        log.addCoalesced({
+          key,
+          fingerprint: 'NO_TRADE',
+          source: 'signal',
+          buildMessage: msg,
+        })
+      }
+      expect(log.backlog(10)).toHaveLength(2)
+    })
   })
 })
