@@ -241,6 +241,44 @@ describe('UpstoxFeedV3Source', () => {
     expect(typeof after.quoteAtMs).toBe('number')
   })
 
+  it('reports per-symbol exchange-timestamp age, including stale upstream data', async () => {
+    const h = await startHarness()
+    activeHarness = h
+    await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't0', candles: sampleCandles(2), optionChain: [] })
+    await waitFor(() => h.source.getConnectionState() === 'open', 3000, 'ws open')
+    await waitFor(() => h.messages.length > 0, 3000, 'subscription sent')
+
+    expect(h.source.getStats().indexLttAgeMs).toEqual({
+      'NIFTY 50': null,
+      BANKNIFTY: null,
+      FINNIFTY: null,
+    })
+
+    const ltt = Date.now() - 5_000
+    sendToLatest(
+      h,
+      indexFeedFrame('NSE_INDEX|Nifty 50', 25100.5, {
+        open: 25010,
+        high: 25110,
+        low: 25000,
+        close: 25100.5,
+        vol: 1234,
+        ts: ltt,
+      }),
+    )
+
+    const age = await waitFor(
+      () => h.source.getStats().indexLttAgeMs['NIFTY 50'],
+      3000,
+      'index ltt age',
+    )
+    // The frame arrives now but carries a 5s-old exchange timestamp: the
+    // socket-level lastMessageAgeMs would look fresh, this must not.
+    expect(age).toBeGreaterThanOrEqual(4_800)
+    expect(age).toBeLessThan(10_000)
+    expect(h.source.getStats().indexLttAgeMs.BANKNIFTY).toBeNull()
+  })
+
   it('forces a reconnect when an open socket goes silent during market hours', async () => {
     const h = await startHarness({ source: { silenceReconnectMs: 60 } })
     activeHarness = h

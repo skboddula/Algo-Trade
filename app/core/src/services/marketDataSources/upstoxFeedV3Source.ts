@@ -70,6 +70,12 @@ export interface UpstoxFeedStats {
   chain: { calls: number; failures: number; lastLatencyMs: number | null; lastError?: string }
   expiry: { calls: number; failures: number }
   lastMessageAgeMs: number | null
+  /**
+   * Diagnostic: age (ms) of the newest index tick's exchange timestamp (ltt)
+   * per symbol. Unlike lastMessageAgeMs this detects frames that keep arriving
+   * with stale upstream prices. Null until a valid ltt is seen. Not a gate.
+   */
+  indexLttAgeMs: Record<UnderlyingSymbol, number | null>
 }
 
 type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed'
@@ -152,6 +158,8 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   private readonly lastChainFetchAt = new Map<UnderlyingSymbol, number>()
   // CR-11 freshness: per-symbol timestamps exposed to the entry gate (getters)
   private readonly lastIndexTickAt = new Map<UnderlyingSymbol, number>()
+  // Diagnostic: exchange timestamp (ltt) of the newest index tick, per symbol.
+  private readonly lastIndexLttMs = new Map<UnderlyingSymbol, number>()
   private readonly lastChainSuccessAt = new Map<UnderlyingSymbol, number>()
   private readonly expiryCache = new Map<UnderlyingSymbol, ExpiryCacheEntry>()
 
@@ -278,6 +286,11 @@ export class UpstoxFeedV3Source implements MarketDataSource {
       },
       expiry: { calls: this.statExpiry.calls, failures: this.statExpiry.failures },
       lastMessageAgeMs: this.lastMessageAt ? now - this.lastMessageAt : null,
+      indexLttAgeMs: {
+        'NIFTY 50': this.getLastIndexLttAgeMs('NIFTY 50'),
+        BANKNIFTY: this.getLastIndexLttAgeMs('BANKNIFTY'),
+        FINNIFTY: this.getLastIndexLttAgeMs('FINNIFTY'),
+      },
     }
   }
 
@@ -288,6 +301,19 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   public getLastIndexTickAgeMs(symbol: UnderlyingSymbol): number | null {
     const at = this.lastIndexTickAt.get(symbol)
     return at === undefined ? null : Date.now() - at
+  }
+
+  /**
+   * Diagnostic: age (ms) of the newest index tick's exchange timestamp.
+   * Clamps small negative skew to 0 and rejects implausible timestamps so a
+   * bad unit/provider field shows as null instead of a bogus latency number.
+   */
+  public getLastIndexLttAgeMs(symbol: UnderlyingSymbol): number | null {
+    const lttMs = this.lastIndexLttMs.get(symbol)
+    if (lttMs === undefined) return null
+    const age = Date.now() - lttMs
+    if (age < 0) return age >= -5_000 ? 0 : null
+    return age <= 3_600_000 ? age : null
   }
 
   /**
@@ -448,6 +474,11 @@ export class UpstoxFeedV3Source implements MarketDataSource {
         if (tick) {
           this.indexCache.set(symbol, tick)
           this.lastIndexTickAt.set(symbol, Date.now())
+          const lttMs = normalizeLttMs(tick.ltt)
+          // If a tick lacks a usable exchange timestamp, report unknown rather
+          // than keeping an older ltt and showing false staleness.
+          if (lttMs === null) this.lastIndexLttMs.delete(symbol)
+          else this.lastIndexLttMs.set(symbol, lttMs)
           this.statIndexTicks += 1
         }
         continue
@@ -702,6 +733,16 @@ export class UpstoxFeedV3Source implements MarketDataSource {
 }
 
 // -- helpers -------------------------------------------------------------------
+
+/**
+ * Upstox documents `ltt` as epoch milliseconds; tolerate epoch seconds from
+ * older payloads. Returns null for absent/invalid values.
+ */
+function normalizeLttMs(ltt: number): number | null {
+  if (!Number.isFinite(ltt) || ltt <= 0) return null
+  const ms = ltt < 1_000_000_000_000 ? ltt * 1000 : ltt
+  return Number.isFinite(ms) ? ms : null
+}
 
 function extractIndexTick(feed: DecodedFeed): IndexTick | null {
   const ltpc = feed.ltpc ?? feed.fullFeed?.indexFF?.ltpc ?? feed.fullFeed?.marketFF?.ltpc
