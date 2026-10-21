@@ -242,6 +242,15 @@ export class MasterIngestionEngine extends EventEmitter {
     return { source: this.resolveSource().name, ws: this.wsSource.getStats() }
   }
 
+  /**
+   * Effective data mode the engine is actually running in. This is derived
+   * from the resolved master token (server.ts), not the legacy MOCK_MODE env
+   * var — use it for any user-facing mode label.
+   */
+  public isMockMode(): boolean {
+    return this.config.mockMode ?? false
+  }
+
   private async runTick() {
     if (!this.isRunning) return
 

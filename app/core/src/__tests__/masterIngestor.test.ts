@@ -6,6 +6,13 @@ import { DEFAULT_STRATEGY_CONFIG } from '../constants'
 import type { AllSignalData, Candle } from '../types'
 
 describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
+  it('reports the effective data mode for labels (independent of legacy env)', () => {
+    const live = new MasterIngestionEngine({ primaryUpstoxToken: 'test-token' })
+    const mock = new MasterIngestionEngine({ mockMode: true })
+    expect(live.isMockMode()).toBe(false)
+    expect(mock.isMockMode()).toBe(true)
+  })
+
   it('initializes and computes snapshots for all tracked underlying symbols in mock mode', async () => {
     const ingestor = new MasterIngestionEngine({ mockMode: true, pollingIntervalMs: 1000 })
     await ingestor.fetchAndComputeMarketData()

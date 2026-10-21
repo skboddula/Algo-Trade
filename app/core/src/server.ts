@@ -336,10 +336,13 @@ if (require.main === module) {
       )
     }
     masterIngestor.start()
-    app.log.info(`📡 Master Ingestion Engine started (Single 1-API fetch loop active)`)
+    // Report the engine's effective mode, not the legacy MOCK_MODE env flag:
+    // the engine goes live whenever a master token resolves (SQLite or env).
+    const dataMode = masterIngestor.isMockMode() ? 'MOCK' : 'live feed'
+    app.log.info(`📡 Master Ingestion Engine started (Single 1-API fetch loop active; mode: ${dataMode})`)
     void notifier(
       `🟢 Algo-Trade daemon started at ${address} ` +
-        `(mode: ${process.env.MOCK_MODE === 'true' ? 'MOCK' : 'live feed'}).`,
+        `(mode: ${dataMode}).`,
     )
   })
 
