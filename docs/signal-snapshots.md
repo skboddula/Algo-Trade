@@ -85,6 +85,27 @@ Because both the input and config are stored, the replay uses the same
 scoring code as the daemon and browser. It is still a model of the decision:
 fills, option premium paths and exit rules are not part of this table.
 
+## Parity check (exact-replay trust gate)
+
+Before trusting any replay derived from this table, prove that the stored
+inputs reproduce the daemon's own decisions:
+
+```bash
+cd app/core
+npx tsx scripts/snapshot-parity.ts 2026-10-21 default_user [--all]
+```
+
+It re-runs `getFinalSignal` from `data_json`/`config_json` and diffs the result
+against the stored `user_signal_json`, `unfiltered_signal_json` and
+`default_signal_json` arms field by field, prints a JSON summary, and exits
+non-zero on any mismatch or parse error. On the 2026-10-21 tape (1,358 rows,
+3 symbols) all 4,074 arm comparisons matched bit-for-bit.
+
+Parity is only meaningful against the same scoring build that captured the
+rows. The table has no engine-version column, so after a scoring change older
+rows will (correctly) report mismatches — pin the build or re-derive the rows.
+The unit-level companion is `src/__tests__/snapshotParity.test.ts`.
+
 ## Retention
 
 There is no automatic pruning. A capture-mode switch and automated retention
