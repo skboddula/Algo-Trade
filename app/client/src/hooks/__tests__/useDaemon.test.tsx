@@ -9,6 +9,7 @@ import type { MarketSnapshot, UserBotState } from '@/lib/types'
 const daemonMocks = vi.hoisted(() => ({
   status: vi.fn(),
   health: vi.fn(),
+  logs: vi.fn(),
   start: vi.fn(),
   stop: vi.fn(),
   saveConfig: vi.fn(),
@@ -107,6 +108,7 @@ describe('useDaemon', () => {
     vi.stubGlobal('WebSocket', MockWebSocket)
     daemonMocks.status.mockReset()
     daemonMocks.health.mockReset()
+    daemonMocks.logs.mockReset()
     daemonMocks.start.mockReset()
     daemonMocks.stop.mockReset()
     daemonMocks.saveConfig.mockReset()
@@ -114,6 +116,7 @@ describe('useDaemon', () => {
     daemonMocks.exitPosition.mockReset()
     daemonMocks.status.mockResolvedValue(makeStatus())
     daemonMocks.health.mockResolvedValue(makeHealth())
+    daemonMocks.logs.mockResolvedValue({ entries: [], debugEnabled: true })
   })
 
   afterEach(() => {
@@ -138,6 +141,69 @@ describe('useDaemon', () => {
       MockWebSocket.instances[0].onopen?.()
     })
     await waitFor(() => expect(result.current.connected).toBe(true))
+  })
+
+  it('merges the daemon activity backlog and live LOG frames without duplicates', async () => {
+    daemonMocks.logs.mockResolvedValue({
+      entries: [
+        {
+          seq: 1,
+          ts: '2026-10-21T04:00:00.000Z',
+          level: 'info',
+          source: 'daemon',
+          msg: 'Daemon ready',
+        },
+      ],
+      debugEnabled: true,
+    })
+    const { result } = renderHook(() => useDaemon())
+    const socket = MockWebSocket.instances[0]
+
+    act(() => {
+      socket.onopen?.()
+    })
+    await waitFor(() =>
+      expect(result.current.logs.some((l) => l.id === 'daemon-1')).toBe(true),
+    )
+
+    // Live frame for the same seq (backlog overlap) must not duplicate.
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'LOG',
+          data: {
+            seq: 1,
+            ts: '2026-10-21T04:00:00.000Z',
+            level: 'info',
+            source: 'daemon',
+            msg: 'Daemon ready',
+          },
+        }),
+      })
+    })
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'LOG',
+          data: {
+            seq: 2,
+            ts: '2026-10-21T04:00:02.000Z',
+            level: 'info',
+            source: 'entry',
+            msg: 'NIFTY 50 BUY_CE @ ₹145.20',
+          },
+        }),
+      })
+    })
+
+    await waitFor(() =>
+      expect(result.current.logs.some((l) => l.id === 'daemon-2')).toBe(true),
+    )
+    expect(result.current.logs.filter((l) => l.id === 'daemon-1')).toHaveLength(
+      1,
+    )
+    // Window-side socket events are merged alongside daemon entries.
+    expect(result.current.logs.some((l) => l.source === 'window')).toBe(true)
   })
 
   it('applies INITIAL_STATE, MARKET_TICK and USER_STATE_UPDATE frames', async () => {

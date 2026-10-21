@@ -37,12 +37,16 @@ export function LogPanel({
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const visible = (
-    filter === 'all' ? logs : logs.filter((l) => l.level === filter)
+    filter === 'all'
+      ? // Per-tick debug traces only surface under the explicit debug filter.
+        logs.filter((l) => l.level !== 'debug')
+      : logs.filter((l) => l.level === filter)
   )
     .slice()
     .reverse()
   const errorCount = logs.filter((l) => l.level === 'error').length
   const warnCount = logs.filter((l) => l.level === 'warn').length
+  const debugCount = logs.filter((l) => l.level === 'debug').length
 
   // Newest-first list: only follow new entries while the user is already
   // viewing the top. Never yank the viewport mid-read.
@@ -73,6 +77,11 @@ export function LogPanel({
           {warnCount > 0 && (
             <span className="inline-flex items-center rounded-full bg-warning/20 text-warning px-2 py-0.5 text-xs font-medium">
               {warnCount} warn
+            </span>
+          )}
+          {debugCount > 0 && (
+            <span className="inline-flex items-center rounded-full bg-muted text-muted-foreground px-2 py-0.5 text-xs font-medium">
+              {debugCount} dbg
             </span>
           )}
           <span className="ml-auto flex items-center gap-2">

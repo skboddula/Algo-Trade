@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { daemonApi, type DaemonHealth, type DaemonStatus } from '@/lib/daemon'
+import {
+  daemonApi,
+  type DaemonActivityEntry,
+  type DaemonHealth,
+  type DaemonStatus,
+} from '@/lib/daemon'
 import type { BotLog } from '@/lib/marketService'
 import type {
   StrategyConfig,
@@ -25,7 +30,7 @@ export interface DaemonController {
   connected: boolean
   status: DaemonStatus | null
   health: DaemonHealth | null
-  /** Client-side activity log (connections, actions, errors). */
+  /** Merged activity log: window actions + daemon events streamed over /ws. */
   logs: BotLog[]
   busy: boolean
   lastTickAt: string | null
@@ -87,6 +92,32 @@ export function useDaemon(): DaemonController {
   )
 
   const clearLogs = useCallback(() => setLogs([]), [])
+
+  /**
+   * Merge daemon activity entries (backlog + live LOG frames) into the panel
+   * log. Entries are deduped by their server-assigned `seq` so the initial
+   * backlog fetch and in-flight WS frames cannot double up.
+   */
+  const mergeServerLogs = useCallback((entries: DaemonActivityEntry[]) => {
+    if (entries.length === 0) return
+    setLogs((prev) => {
+      const seen = new Set(prev.map((log) => log.id))
+      const next = [...prev]
+      for (const entry of entries) {
+        const id = `daemon-${entry.seq}`
+        if (seen.has(id)) continue
+        seen.add(id)
+        next.push({
+          id,
+          ts: entry.ts,
+          level: entry.level,
+          source: entry.source,
+          msg: entry.msg,
+        })
+      }
+      return next.slice(-MAX_LOGS)
+    })
+  }, [])
 
   const refreshStatus = useCallback(async () => {
     const startedAt = Date.now()
@@ -172,6 +203,15 @@ export function useDaemon(): DaemonController {
         if (disposed) return
         attempts = 0
         setConnected(true)
+        addLog('info', 'Daemon socket connected')
+        // Backfill the daemon's activity backlog; live LOG frames stream from
+        // here on and are deduped against these by sequence id.
+        void daemonApi
+          .logs()
+          .then((res) => mergeServerLogs(res.entries))
+          .catch(() => {
+            // Backlog is best-effort — live frames still arrive.
+          })
       }
 
       socket.onmessage = (evt) => {
@@ -206,6 +246,8 @@ export function useDaemon(): DaemonController {
           } else if (msg.type === 'USER_STATE_UPDATE') {
             const userState = msg.data as UserBotState
             setStatus((prev) => (prev ? { ...prev, userState } : prev))
+          } else if (msg.type === 'LOG') {
+            mergeServerLogs([msg.data as DaemonActivityEntry])
           }
         } catch {
           // Ignore malformed frames.
@@ -215,6 +257,7 @@ export function useDaemon(): DaemonController {
       socket.onclose = () => {
         if (disposed) return
         setConnected(false)
+        addLog('warn', 'Daemon socket closed — reconnecting')
         const delay =
           RECONNECT_DELAYS_MS[
             Math.min(attempts, RECONNECT_DELAYS_MS.length - 1)
@@ -244,7 +287,7 @@ export function useDaemon(): DaemonController {
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
       socket?.close()
     }
-  }, [addLog, refreshStatus, refreshHealth, feedTickLog])
+  }, [addLog, mergeServerLogs, refreshStatus, refreshHealth, feedTickLog])
 
   // ── Actions ───────────────────────────────────────────────────────────────
   const runAction = useCallback(

@@ -28,6 +28,7 @@ import {
 } from './strategyEngine'
 import { getIndiaTime } from '../utils/timeUtils'
 import type { StateStore } from './stateStore'
+import type { ActivityLog } from './activityLog'
 import type { Notifier } from './notifier'
 import {
   buildDailyLossAlertMessage,
@@ -75,6 +76,7 @@ export class TenantManager extends EventEmitter {
   private orderGateway: OrderGateway
   private store: StateStore | null
   private notifier?: Notifier
+  private activityLog: ActivityLog | null
   private lastPersistAt: Map<string, number> = new Map()
   private vixWarningLevel: 'none' | 'elevated' | 'critical' = 'none'
   private lastVixAlertAt = 0
@@ -101,12 +103,17 @@ export class TenantManager extends EventEmitter {
     if (Date.now() - last < 30_000) return
     this.lastGateWarnAtMs.set(key, Date.now())
     console.warn(message)
+    this.activityLog?.add('warn', 'gate', message)
   }
 
   constructor(
     masterIngestor: MasterIngestionEngine,
     orderGateway: OrderGateway,
-    opts: { store?: StateStore | null; notifier?: Notifier } = {},
+    opts: {
+      store?: StateStore | null
+      notifier?: Notifier
+      activityLog?: ActivityLog | null
+    } = {},
   ) {
     super()
     this.setMaxListeners(100)
@@ -114,6 +121,7 @@ export class TenantManager extends EventEmitter {
     this.orderGateway = orderGateway
     this.store = opts.store ?? null
     this.notifier = opts.notifier
+    this.activityLog = opts.activityLog ?? null
     // Persisted so an EOD-summary re-send cannot happen after a restart.
     this.dailySummaryDate = this.store?.getSetting('daily_summary_date') ?? null
 
@@ -127,6 +135,21 @@ export class TenantManager extends EventEmitter {
       // position the daemon no longer knows about.
       for (const error of this.store.getLoadErrors()) {
         console.error(`[persistence] skipped unreadable bot_state row — ${error}`)
+        this.activityLog?.add('error', 'persistence', `Skipped unreadable bot_state row: ${error}`)
+      }
+    }
+
+    // Surface restart recovery in the daemon window's activity log: a bot
+    // that comes back RUNNING after a reboot must be visible, not silent.
+    for (const user of this.users.values()) {
+      if (user.state === 'RUNNING' || user.state === 'ORDERED') {
+        const openPositions = Object.values(user.positions).filter((p) => p !== null).length
+        this.activityLog?.add(
+          'info',
+          'bot',
+          `Resumed ${user.userId} from persisted state — ${user.state} (${user.executionMode}` +
+            `${openPositions > 0 ? `, ${openPositions} open position${openPositions > 1 ? 's' : ''}` : ''})`,
+        )
       }
     }
 
@@ -313,6 +336,11 @@ export class TenantManager extends EventEmitter {
     user.updatedAt = new Date().toISOString()
     this.emitUserUpdate(user)
     this.persistUser(user, true)
+    this.activityLog?.add(
+      'info',
+      'bot',
+      `Start requested for ${userId} — ${user.state} (${user.executionMode})`,
+    )
     return user
   }
 
@@ -331,6 +359,7 @@ export class TenantManager extends EventEmitter {
     user.updatedAt = new Date().toISOString()
     this.emitUserUpdate(user)
     this.persistUser(user, true)
+    this.activityLog?.add('info', 'bot', `Stop requested for ${userId} — bot stopped`)
     return user
   }
 
@@ -356,8 +385,20 @@ export class TenantManager extends EventEmitter {
           position.tradeType === 'selling'
             ? position.entryPrice - fillPrice
             : fillPrice - position.entryPrice
-        user.realizedPnlToday =
-          (user.realizedPnlToday || 0) + Math.round(pnlPerUnit * position.quantity * 100)
+        const pnlPaise = Math.round(pnlPerUnit * position.quantity * 100)
+        user.realizedPnlToday = (user.realizedPnlToday || 0) + pnlPaise
+        this.activityLog?.add(
+          'info',
+          'exit',
+          `${symbol} ${position.direction} exit @ ₹${fillPrice.toFixed(2)} — ${reason} ` +
+            `(P&L ₹${(pnlPaise / 100).toFixed(2)})`,
+        )
+      } else {
+        this.activityLog?.add(
+          'error',
+          'exit',
+          `${symbol} ${position.direction} exit FAILED — ${exitRes.error ?? 'unknown error'} (${reason})`,
+        )
       }
 
       user.positions[symbol] = null
@@ -438,6 +479,11 @@ export class TenantManager extends EventEmitter {
       `[daily-loss] ${user.userId}: MTM day P&L ₹${(dayPnlPaise / 100).toFixed(2)} hit the ` +
         `−${pct}% limit (base ₹${(user.dayStartEquity / 100).toFixed(2)}, ` +
         `source ${user.dayStartEquitySource}) — entries blocked for the day`,
+    )
+    this.activityLog?.add(
+      'warn',
+      'risk',
+      `Daily loss limit hit for ${user.userId}: MTM ₹${(dayPnlPaise / 100).toFixed(2)} ≤ −${pct}% — entries blocked for the day`,
     )
     this.sendDailyLossAlert(user, dayPnlPaise)
   }
@@ -701,6 +747,16 @@ export class TenantManager extends EventEmitter {
             entryEligible,
             htfVetoed,
           )
+          // Per-tick scoring trace (hidden behind the debug filter; dropped at
+          // the source when DAEMON_ACTIVITY_DEBUG=false).
+          this.activityLog?.add(
+            'debug',
+            'signal',
+            `${symbol}: ${userSignal.signal} conf=${userSignal.confidence} ` +
+              `bull=${userSignal.bullScore}/bear=${userSignal.bearScore} filter=${filterVerdict}` +
+              `${htfVetoed ? ' htf=veto' : ''}${blockedReason ? ` block=${blockedReason}` : ''} ` +
+              `spot=${snapshot.spotPrice.toFixed(1)}`,
+          )
           let signalSnapshotId: number | null = null
           if (candidate && entrySignalData) {
             signalSnapshotId = this.logSignalSnapshot({
@@ -843,6 +899,13 @@ export class TenantManager extends EventEmitter {
                   strikePrice: selectedContract.strike,
                   expiry,
                 })
+                this.activityLog?.add(
+                  'info',
+                  'entry',
+                  `${symbol} ${direction === 'CE' ? 'BUY_CE' : 'BUY_PE'} ` +
+                    `${selectedContract.strike ?? ''} @ ₹${orderRes.filledPrice.toFixed(2)} — ` +
+                    `${user.executionMode}, ${userSignal.confidence} (qty ${orderRes.quantity})`,
+                )
               } else {
                 this.updateSignalSnapshotOutcome(signalSnapshotId, {
                   orderPlaced: false,
@@ -851,12 +914,21 @@ export class TenantManager extends EventEmitter {
                 user.error = orderRes.error
                 this.emitUserUpdate(user)
                 this.persistUser(user)
+                this.activityLog?.add(
+                  'error',
+                  'order',
+                  `${symbol} ${userSignal.signal} entry FAILED — ${orderRes.error ?? 'unknown error'}`,
+                )
               }
             } else {
               this.updateSignalSnapshotOutcome(signalSnapshotId, {
                 orderPlaced: false,
                 blockedReason: 'no-contract',
               })
+              this.warnGate(
+                `${symbol}:no-contract`,
+                `[order] [${symbol}] Actionable ${userSignal.signal} but no tradable contract with a price was found`,
+              )
             }
           }
         }
@@ -1021,6 +1093,7 @@ export class TenantManager extends EventEmitter {
       if (this.persistenceFault !== null) {
         this.persistenceFault = null
         console.info('[persistence] user-state writes healthy again')
+        this.activityLog?.add('info', 'persistence', 'User-state writes healthy again')
       }
     } catch (err) {
       const message = (err as Error).message
@@ -1028,6 +1101,11 @@ export class TenantManager extends EventEmitter {
       if (this.persistenceFault === null) {
         console.error(
           `[persistence] CRITICAL: user-state save FAILED — live entries blocked until resolved: ${message}`,
+        )
+        this.activityLog?.add(
+          'error',
+          'persistence',
+          `User-state save FAILED — live entries blocked until resolved: ${message}`,
         )
       }
       this.persistenceFault = `user-state save failed: ${message}`

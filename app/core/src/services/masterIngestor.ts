@@ -23,6 +23,7 @@ import { MockMarketDataSource } from './marketDataSources/mockMarketDataSource'
 import { RestMarketDataSource } from './marketDataSources/restMarketDataSource'
 import { UpstoxFeedV3Source, type UpstoxFeedStats } from './marketDataSources/upstoxFeedV3Source'
 import { DAEMON_SETTING_KEYS, type SettingsStore } from './daemonSettings'
+import type { ActivityLog } from './activityLog'
 
 export interface MasterIngestorConfig {
   pollingIntervalMs: number
@@ -55,6 +56,8 @@ export interface MasterIngestorConfig {
    * via OAuth) survives daemon restarts and reboots.
    */
   settingsStore?: SettingsStore | null
+  /** Optional in-memory activity log surfaced in the daemon window. */
+  activityLog?: ActivityLog | null
 }
 
 /**
@@ -103,6 +106,9 @@ export class MasterIngestionEngine extends EventEmitter {
   private consecutiveFailedTicks = 0
   private feedDownAlerted = false
   private lastFeedError = ''
+  private readonly activityLog: ActivityLog | null
+  /** Last observed WS transport state, for connect/disconnect activity logs. */
+  private lastWsState: UpstoxFeedStats['state'] | null = null
   private readonly mockSource: MockMarketDataSource
   private readonly restSource: RestMarketDataSource
   private readonly wsSource: UpstoxFeedV3Source
@@ -121,7 +127,9 @@ export class MasterIngestionEngine extends EventEmitter {
       notifier: config?.notifier,
       settingsStore: config?.settingsStore ?? null,
       useRealVrd: config?.useRealVrd ?? true,
+      activityLog: config?.activityLog ?? null,
     }
+    this.activityLog = this.config.activityLog ?? null
 
     this.sentimentIngestor = new SentimentIngestor({
       upstoxApiBaseUrl: this.config.upstoxApiBaseUrl,
@@ -166,6 +174,12 @@ export class MasterIngestionEngine extends EventEmitter {
     } catch {
       // Ignore — settings persistence is a convenience, not the source of truth.
     }
+
+    this.activityLog?.add(
+      'info',
+      'token',
+      token ? 'Master token updated — market feed reconnecting' : 'Master token cleared',
+    )
   }
 
   /** Current master ingestion token (undefined when unset). */
@@ -306,16 +320,26 @@ export class MasterIngestionEngine extends EventEmitter {
           vrdSource = status.live && this.vixValue !== null ? 'live' : 'fallback'
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
-          this.sentimentFault = `sentiment assembly failed: ${message}`
+          this.setSentimentFault(`sentiment assembly failed: ${message}`)
           vrdData = this.buildFallbackVrd(spotPrice, indicators, timestamp)
         }
       } else {
         vrdData = this.buildFallbackVrd(spotPrice, indicators, timestamp)
       }
+      const previousVrdSource = this.lastVrdSource
       this.lastVrdSource = vrdSource
       this.updateSentimentFault(liveVrdEnabled)
       if (liveVrdEnabled && vrdSource !== 'live' && this.sentimentFault === null) {
-        this.sentimentFault = 'live VRD unavailable'
+        this.setSentimentFault('live VRD unavailable')
+      }
+      if (vrdSource !== previousVrdSource) {
+        this.activityLog?.add(
+          vrdSource === 'live' ? 'info' : 'warn',
+          'vrd',
+          vrdSource === 'live'
+            ? `VRD source live — VIX ${this.vixValue?.toFixed(2) ?? 'n/a'}`
+            : `VRD source fallback${this.sentimentFault ? ` — ${this.sentimentFault}` : ''}`,
+        )
       }
 
       // V3 macro signal (reference/browser parity): global sentiment +
@@ -378,6 +402,7 @@ export class MasterIngestionEngine extends EventEmitter {
     if (!this.config.mockMode && this.config.primaryUpstoxToken) {
       this.trackFeedHealth(liveFetchFailures, symbols.length)
     }
+    this.trackWsFeedState()
 
     // Emit tick event to all listeners (TenantManager & WebSockets)
     this.emit('marketTick', {
@@ -396,6 +421,7 @@ export class MasterIngestionEngine extends EventEmitter {
       this.consecutiveFailedTicks = 0
       if (this.feedDownAlerted) {
         this.feedDownAlerted = false
+        this.activityLog?.add('info', 'feed', 'Market feed recovered — quotes are flowing again')
         this.fireAlert('🟢 Algo-Trade: market feed recovered — quotes are flowing again.')
       }
       return
@@ -404,10 +430,38 @@ export class MasterIngestionEngine extends EventEmitter {
     this.consecutiveFailedTicks++
     if (!this.feedDownAlerted && this.consecutiveFailedTicks >= 5) {
       this.feedDownAlerted = true
+      this.activityLog?.add(
+        'error',
+        'feed',
+        `Market feed DOWN — ${this.lastFeedError || 'unknown error'} (token may have expired)`,
+      )
       this.fireAlert(
         `🔴 Algo-Trade: market feed DOWN (last error: ${this.lastFeedError || 'unknown'}). ` +
           'The Upstox access token may have expired — refresh it and restart the daemon.',
       )
+    }
+  }
+
+  /**
+   * Records Upstox WS transport transitions (open/closed) in the activity
+   * log. Sampled once per market tick — cheap, and only on state changes.
+   */
+  private trackWsFeedState(): void {
+    if (this.config.mockMode || this.config.liveSource !== 'ws') return
+    const state = this.wsSource.getStats().state
+    if (state === this.lastWsState) return
+    const previous = this.lastWsState
+    this.lastWsState = state
+    if (state === 'open') {
+      this.activityLog?.add(
+        'info',
+        'feed',
+        previous === null || previous === 'idle'
+          ? 'Market feed connected (Upstox WS v3)'
+          : `Market feed reconnected (was ${previous})`,
+      )
+    } else if (state === 'closed' && previous !== null && previous !== 'idle') {
+      this.activityLog?.add('warn', 'feed', 'Market feed disconnected — reconnecting')
     }
   }
 
@@ -581,26 +635,44 @@ export class MasterIngestionEngine extends EventEmitter {
    */
   private updateSentimentFault(liveVrdEnabled: boolean): void {
     if (!liveVrdEnabled) {
-      this.sentimentFault = this.config.mockMode
-        ? null
-        : 'live VRD disabled (useRealVrd=false)'
+      this.setSentimentFault(
+        this.config.mockMode ? null : 'live VRD disabled (useRealVrd=false)',
+      )
       return
     }
     const status = this.sentimentIngestor.getStatus()
     if (!status.live) {
-      this.sentimentFault = status.lastError ?? 'live VRD stale or unavailable'
+      this.setSentimentFault(status.lastError ?? 'live VRD stale or unavailable')
       return
     }
     if (this.vixValue === null) {
-      this.sentimentFault = 'India VIX unavailable'
+      this.setSentimentFault('India VIX unavailable')
       return
     }
     const vixAgeMs = this.lastVixAtMs > 0 ? Date.now() - this.lastVixAtMs : null
     if (vixAgeMs === null || vixAgeMs > VIX_FRESHNESS_WINDOW_MS) {
-      this.sentimentFault = 'India VIX stale'
+      this.setSentimentFault('India VIX stale')
       return
     }
-    this.sentimentFault = null
+    this.setSentimentFault(null)
+  }
+
+  /**
+   * Assigns the sentiment fault and records transitions in the activity log
+   * so the window shows exactly when live entries started or stopped being
+   * blocked, and why.
+   */
+  private setSentimentFault(next: string | null): void {
+    const previous = this.sentimentFault
+    this.sentimentFault = next
+    if (next === previous) return
+    if (next === null) {
+      this.activityLog?.add('info', 'vrd', 'VRD/VIX fault cleared — sentiment inputs live')
+    } else if (previous === null) {
+      this.activityLog?.add('warn', 'vrd', `VRD/VIX fault: ${next}`)
+    } else {
+      this.activityLog?.add('warn', 'vrd', `VRD/VIX fault changed: ${next}`)
+    }
   }
 
   /** Public fail-closed sentiment status for health endpoints/tests. */

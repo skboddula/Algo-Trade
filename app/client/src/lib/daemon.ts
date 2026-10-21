@@ -126,12 +126,28 @@ function post<T>(path: string, payload: unknown): Promise<T> {
   return request<T>(path, { method: 'POST', body: JSON.stringify(payload) })
 }
 
+/** One daemon activity entry streamed over /ws (type "LOG") or fetched from
+ * the /api/bot/logs backlog. `seq` dedupes backlog + live frames. */
+export interface DaemonActivityEntry {
+  seq: number
+  ts: string
+  level: 'info' | 'warn' | 'error' | 'debug'
+  source: string
+  msg: string
+}
+
 /** Same-origin calls into the daemon's bot API. */
 export const daemonApi = {
   status: (): Promise<DaemonStatus> =>
     request<DaemonStatus>(`/api/bot/status?userId=${DAEMON_USER_ID}`),
 
   health: (): Promise<DaemonHealth> => request<DaemonHealth>('/health'),
+
+  /** Daemon activity backlog — Bot Logs backfill before live LOG frames. */
+  logs: (
+    limit = 200,
+  ): Promise<{ entries: DaemonActivityEntry[]; debugEnabled: boolean }> =>
+    request(`/api/bot/logs?limit=${limit}`),
 
   start: (executionMode: 'paper' | 'live'): Promise<unknown> =>
     post('/api/bot/start', { userId: DAEMON_USER_ID, executionMode }),

@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify'
 import type { MasterIngestionEngine } from '../services/masterIngestor'
 import type { TenantManager } from '../services/tenantManager'
 import type { OrderGateway } from '../services/orderGateway'
+import type { ActivityLog } from '../services/activityLog'
 import type { UnderlyingSymbol, UserBotState } from '../types'
 import type { WebSocket } from 'ws'
 
@@ -15,13 +16,15 @@ export interface BotRoutesOptions {
   masterIngestor: MasterIngestionEngine
   tenantManager: TenantManager
   orderGateway: OrderGateway
+  /** In-memory daemon activity log streamed to the window (optional). */
+  activityLog?: ActivityLog | null
 }
 
 export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
   fastify,
   opts,
 ) => {
-  const { masterIngestor, tenantManager, orderGateway } = opts
+  const { masterIngestor, tenantManager, orderGateway, activityLog = null } = opts
 
   // Connected WebSocket clients: Map<userId, Set<WebSocket>>
   const activeSockets = new Map<string, Set<WebSocket>>()
@@ -250,6 +253,22 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     return reply.send({ success: true, userState: sanitizeUserState(userState) })
   })
 
+  // In-memory daemon activity log for the window's Bot Logs panel. A freshly
+  // loaded window fetches this backlog, then receives live LOG frames over /ws
+  // (deduped client-side by `seq`).
+  fastify.get('/api/bot/logs', async (request, reply) => {
+    if (!activityLog) return reply.send({ entries: [], debugEnabled: false })
+    const query = request.query as { limit?: string }
+    const parsed = Number(query.limit)
+    const limit = Number.isFinite(parsed)
+      ? Math.min(Math.max(Math.trunc(parsed), 1), 500)
+      : 200
+    return reply.send({
+      entries: activityLog.backlog(limit),
+      debugEnabled: activityLog.isDebugEnabled(),
+    })
+  })
+
   // ── WebSocket /ws ──────────────────────────────────────────────────────────
   fastify.get('/ws', { websocket: true }, (connection, req) => {
     const query = req.query as { userId?: string }
@@ -260,6 +279,17 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
       activeSockets.set(userId, new Set())
     }
     activeSockets.get(userId)!.add(ws)
+
+    // Stream daemon activity entries to this window as LOG frames. Entries are
+    // deduped client-side by `seq` against the /api/bot/logs backlog.
+    const unsubscribeLogs = activityLog?.subscribe((entry) => {
+      if (ws.readyState !== 1) return
+      try {
+        ws.send(JSON.stringify({ type: 'LOG', data: entry }))
+      } catch {
+        // Dead socket — the close handler unsubscribes.
+      }
+    })
 
     // Send immediate initial sync
     const initialSnapshots = masterIngestor.getAllSnapshots()
@@ -275,6 +305,7 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     )
 
     ws.on('close', () => {
+      unsubscribeLogs?.()
       const set = activeSockets.get(userId)
       if (set) {
         set.delete(ws)
@@ -283,6 +314,7 @@ export const botRoutes: FastifyPluginAsync<BotRoutesOptions> = async (
     })
 
     ws.on('error', () => {
+      unsubscribeLogs?.()
       const set = activeSockets.get(userId)
       if (set) {
         set.delete(ws)
