@@ -192,6 +192,7 @@ export function useDaemon(): DaemonController {
     let disposed = false
     let reconnectTimer: number | null = null
     let attempts = 0
+    let hasConnected = false
     let socket: WebSocket | null = null
 
     const connect = () => {
@@ -201,9 +202,16 @@ export function useDaemon(): DaemonController {
 
       socket.onopen = () => {
         if (disposed) return
+        const isReconnect = hasConnected
+        hasConnected = true
         attempts = 0
         setConnected(true)
-        addLog('info', 'Daemon socket connected')
+        addLog(
+          'info',
+          isReconnect
+            ? 'Daemon socket reconnected — live updates resumed'
+            : 'Daemon socket connected',
+        )
         // Backfill the daemon's activity backlog; live LOG frames stream from
         // here on and are deduped against these by sequence id.
         void daemonApi

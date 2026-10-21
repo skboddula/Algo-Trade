@@ -143,6 +143,38 @@ describe('useDaemon', () => {
     await waitFor(() => expect(result.current.connected).toBe(true))
   })
 
+  it('logs an explicit info line when the socket reconnects', async () => {
+    const { result } = renderHook(() => useDaemon())
+    act(() => {
+      MockWebSocket.instances[0].onopen?.()
+    })
+    await waitFor(() =>
+      expect(
+        result.current.logs.some((l) => l.msg === 'Daemon socket connected'),
+      ).toBe(true),
+    )
+
+    // Drop the link; the hook schedules a reconnect (1s first backoff).
+    act(() => {
+      MockWebSocket.instances[0].onclose?.()
+    })
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2), {
+      timeout: 2500,
+    })
+    act(() => {
+      MockWebSocket.instances[1].onopen?.()
+    })
+    await waitFor(() =>
+      expect(
+        result.current.logs.some(
+          (l) =>
+            l.msg === 'Daemon socket reconnected — live updates resumed' &&
+            l.level === 'info',
+        ),
+      ).toBe(true),
+    )
+  })
+
   it('merges the daemon activity backlog and live LOG frames without duplicates', async () => {
     daemonMocks.logs.mockResolvedValue({
       entries: [
