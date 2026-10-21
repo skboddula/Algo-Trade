@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { daemonApi, DAEMON_MODE, DAEMON_USER_ID } from '@/lib/daemon'
 
+/** Obviously fake credentials — never put real secrets in test fixtures. */
+const TEST_BOT_TOKEN = '123456789:TESTTOKEN_fake_for_unit_tests_only_0000'
+const TEST_CHAT_ID = '123456789'
+
 describe('daemon API client', () => {
   const fetchMock = vi.fn()
 
@@ -132,18 +136,18 @@ describe('daemon API client', () => {
       success: true,
       telegram: {
         hasBotToken: true,
-        botTokenHint: '89849437…',
+        botTokenHint: `${TEST_BOT_TOKEN.slice(0, 8)}…`,
         hasChatId: true,
-        chatIdHint: '•••••6003',
+        chatIdHint: `•••••${TEST_CHAT_ID.slice(-4)}`,
       },
     })
     okJson({ success: true })
 
     const saved = await daemonApi.saveTelegramSettings({
-      botToken: '8984943700:AAGJKFAtc8yC8uT5xFbEfmxOTDuP-q07bxo',
-      chatId: '643696003',
+      botToken: TEST_BOT_TOKEN,
+      chatId: TEST_CHAT_ID,
     })
-    expect(saved.telegram.botTokenHint).toBe('89849437…')
+    expect(saved.telegram.botTokenHint).toBe(`${TEST_BOT_TOKEN.slice(0, 8)}…`)
 
     await daemonApi.testTelegram()
 
@@ -154,8 +158,8 @@ describe('daemon API client', () => {
     expect(savePath).toBe('/api/daemon/settings/telegram')
     expect(saveInit.method).toBe('POST')
     expect(JSON.parse(saveInit.body as string)).toEqual({
-      botToken: '8984943700:AAGJKFAtc8yC8uT5xFbEfmxOTDuP-q07bxo',
-      chatId: '643696003',
+      botToken: TEST_BOT_TOKEN,
+      chatId: TEST_CHAT_ID,
     })
 
     const [testPath, testInit] = fetchMock.mock.calls[1] as [

@@ -9,6 +9,10 @@ import { MasterIngestionEngine } from '../services/masterIngestor'
 import { buildServer } from '../server'
 import { DAEMON_SETTING_KEYS } from '../services/daemonSettings'
 
+/** Obviously fake credentials — never put real secrets in test fixtures. */
+const TEST_BOT_TOKEN = '123456789:TESTTOKEN_fake_for_unit_tests_only_0000'
+const TEST_CHAT_ID = '123456789'
+
 const ENV_KEYS = [
   'UPSTOX_API_KEY',
   'UPSTOX_API_SECRET',
@@ -215,8 +219,8 @@ describe('Daemon settings routes', () => {
       method: 'POST',
       url: '/api/daemon/settings/telegram',
       payload: {
-        botToken: '8984943700:AAGJKFAtc8yC8uT5xFbEfmxOTDuP-q07bxo',
-        chatId: '643696003',
+        botToken: TEST_BOT_TOKEN,
+        chatId: TEST_CHAT_ID,
       },
     })
     expect(saved.statusCode).toBe(200)
@@ -224,13 +228,13 @@ describe('Daemon settings routes', () => {
     expect(body.success).toBe(true)
     expect(body.telegram).toEqual({
       hasBotToken: true,
-      botTokenHint: '89849437…',
+      botTokenHint: `${TEST_BOT_TOKEN.slice(0, 8)}…`,
       hasChatId: true,
-      chatIdHint: '•••••6003',
+      chatIdHint: `•••••${TEST_CHAT_ID.slice(-4)}`,
     })
     // The full token and the chat id must never leave the daemon.
-    expect(saved.body).not.toContain('AAGJKFAtc8yC8uT5xFbEfmxOTDuP')
-    expect(saved.body).not.toContain('643696003')
+    expect(saved.body).not.toContain(TEST_BOT_TOKEN.split(':')[1])
+    expect(saved.body).not.toContain(TEST_CHAT_ID)
 
     const got = await app.inject({ method: 'GET', url: '/api/daemon/settings' })
     expect(got.json().telegram).toEqual(body.telegram)
@@ -240,9 +244,9 @@ describe('Daemon settings routes', () => {
     // Round-trip: a fresh store on the same DATA_DIR still has the settings.
     const reopened = new StateStore(dir)
     expect(reopened.getSetting(DAEMON_SETTING_KEYS.telegramBotToken)).toBe(
-      '8984943700:AAGJKFAtc8yC8uT5xFbEfmxOTDuP-q07bxo',
+      TEST_BOT_TOKEN,
     )
-    expect(reopened.getSetting(DAEMON_SETTING_KEYS.telegramChatId)).toBe('643696003')
+    expect(reopened.getSetting(DAEMON_SETTING_KEYS.telegramChatId)).toBe(TEST_CHAT_ID)
     reopened.close()
     rmTemp(dir)
   })
@@ -298,8 +302,8 @@ describe('Daemon settings routes', () => {
     expect(missing.statusCode).toBe(400)
     expect(unsetFetch).not.toHaveBeenCalled()
 
-    store.setSetting(DAEMON_SETTING_KEYS.telegramBotToken, '8984943700:AA-token')
-    store.setSetting(DAEMON_SETTING_KEYS.telegramChatId, '643696003')
+    store.setSetting(DAEMON_SETTING_KEYS.telegramBotToken, TEST_BOT_TOKEN)
+    store.setSetting(DAEMON_SETTING_KEYS.telegramChatId, TEST_CHAT_ID)
 
     const fetchSpy = vi.fn(async (_url: string | URL, _init?: RequestInit) => ({
       ok: true,
@@ -313,8 +317,8 @@ describe('Daemon settings routes', () => {
     expect(sent.statusCode).toBe(200)
     expect(sent.json().success).toBe(true)
     const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit]
-    expect(url).toBe('https://api.telegram.org/bot8984943700:AA-token/sendMessage')
-    expect(JSON.parse(String(init.body)).chat_id).toBe('643696003')
+    expect(url).toBe(`https://api.telegram.org/bot${TEST_BOT_TOKEN}/sendMessage`)
+    expect(JSON.parse(String(init.body)).chat_id).toBe(TEST_CHAT_ID)
 
     // Telegram rejects → surfaced as 502 with the upstream error.
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401 })))

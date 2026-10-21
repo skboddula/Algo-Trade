@@ -1507,7 +1507,7 @@ function DaemonTelegramInline({
             placeholder={
               settings.hasChatId
                 ? `Chat id saved (${settings.chatIdHint}) — type to replace`
-                : 'Chat id (e.g. 643696003)'
+                : 'Chat id (e.g. 123456789)'
             }
             autoComplete="off"
             className="h-8 px-3 rounded-md border border-border bg-background text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono"
