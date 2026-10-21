@@ -315,7 +315,7 @@ if (require.main === module) {
   }
 
   const dashboardDir = resolveDashboardDir()
-  const { app, masterIngestor, notifier, activityLog } = buildServer({
+  const { app, masterIngestor, notifier, activityLog, tenantManager } = buildServer({
     store,
     ...(dashboardDir ? { dashboardDir } : {}),
   })
@@ -336,13 +336,17 @@ if (require.main === module) {
       )
     }
     masterIngestor.start()
-    // Report the engine's effective mode, not the legacy MOCK_MODE env flag:
-    // the engine goes live whenever a master token resolves (SQLite or env).
+    // Report the engine's effective data mode and the tenants' execution mode
+    // (not the legacy MOCK_MODE env flag): the engine goes live whenever a
+    // master token resolves (SQLite or env).
     const dataMode = masterIngestor.isMockMode() ? 'MOCK' : 'live feed'
-    app.log.info(`📡 Master Ingestion Engine started (Single 1-API fetch loop active; mode: ${dataMode})`)
+    const executionMode = tenantManager.getExecutionModeSummary()
+    app.log.info(
+      `📡 Master Ingestion Engine started (Single 1-API fetch loop active; data: ${dataMode}; execution: ${executionMode})`,
+    )
     void notifier(
       `🟢 Algo-Trade daemon started at ${address} ` +
-        `(mode: ${dataMode}).`,
+        `(data: ${dataMode} · execution: ${executionMode}).`,
     )
   })
 

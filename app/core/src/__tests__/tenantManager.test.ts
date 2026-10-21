@@ -43,6 +43,35 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
     expect(user.state).toBe('STOPPED')
   })
 
+  it('summarizes execution mode for the startup banner', () => {
+    const manager = new TenantManager(
+      new MasterIngestionEngine({ mockMode: true }),
+      new OrderGateway(),
+    )
+    expect(manager.getExecutionModeSummary()).toBe('paper')
+
+    manager.startBot('paper_user', 'paper')
+    expect(manager.getExecutionModeSummary()).toBe('paper')
+    manager.stopBot('paper_user')
+
+    const previousArm = process.env.DAEMON_LIVE_ARMED
+    process.env.DAEMON_LIVE_ARMED = 'true'
+    try {
+      manager.startBot('live_user', 'live')
+      expect(manager.getExecutionModeSummary()).toBe('mixed')
+
+      const liveOnly = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        new OrderGateway(),
+      )
+      liveOnly.startBot('live_only', 'live')
+      expect(liveOnly.getExecutionModeSummary()).toBe('live')
+    } finally {
+      if (previousArm === undefined) delete process.env.DAEMON_LIVE_ARMED
+      else process.env.DAEMON_LIVE_ARMED = previousArm
+    }
+  })
+
   it('automatically enters position on valid signal during market tick and supervises position', async () => {
     const ingestor = new MasterIngestionEngine({ mockMode: true })
     const gateway = new OrderGateway()

@@ -169,6 +169,22 @@ export class TenantManager extends EventEmitter {
     return this.persistenceFault
   }
 
+  /**
+   * Startup/status summary of persisted execution modes. The daemon enforces a
+   * single active trader but may hold multiple tenants, so report `mixed`
+   * rather than guessing. Defaults to paper when no tenant is loaded.
+   */
+  public getExecutionModeSummary(): 'paper' | 'live' | 'mixed' {
+    let live = 0
+    let paper = 0
+    for (const user of this.users.values()) {
+      if (user.executionMode === 'live') live += 1
+      else paper += 1
+    }
+    if (live > 0 && paper > 0) return 'mixed'
+    return live > 0 ? 'live' : 'paper'
+  }
+
   /** Newest-first replayable signal snapshots for the analysis/A-B window. */
   public getSignalSnapshots(
     userId: string,
