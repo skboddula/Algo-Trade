@@ -232,5 +232,29 @@ describe('ActivityLog', () => {
       }
       expect(log.backlog(10)).toHaveLength(2)
     })
+
+    it('clearCoalesced(prefix) forgets only matching keys', () => {
+      startClock()
+      const log = new ActivityLog()
+      const call = (key: string) =>
+        log.addCoalesced({
+          key,
+          fingerprint: 'same',
+          source: 'signal',
+          buildMessage: msg,
+        })
+
+      call('u1:NIFTY 50')
+      call('u2:NIFTY 50')
+      expect(log.backlog(10)).toHaveLength(2)
+
+      log.clearCoalesced('u1:')
+      call('u1:NIFTY 50') // state was cleared → fresh emit
+      call('u2:NIFTY 50') // still suppressed
+
+      const entries = log.backlog(10)
+      expect(entries).toHaveLength(3)
+      expect(entries[2].repeatCount).toBe(0)
+    })
   })
 })

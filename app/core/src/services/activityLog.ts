@@ -93,6 +93,17 @@ export class ActivityLog {
   }
 
   /**
+   * Forget coalescing state for keys starting with `prefix` (e.g. "user:").
+   * The next evaluation for those keys emits a fresh line immediately — used
+   * on manual start/stop so a restarted bot never waits for a heartbeat.
+   */
+  public clearCoalesced(prefix: string): void {
+    for (const key of this.coalesceState.keys()) {
+      if (key.startsWith(prefix)) this.coalesceState.delete(key)
+    }
+  }
+
+  /**
    * Append an entry and fan it out to subscribers. Never throws.
    * Returns the stored entry, or null when the entry was dropped.
    */

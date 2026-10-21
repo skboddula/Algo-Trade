@@ -334,6 +334,9 @@ export class TenantManager extends EventEmitter {
     user.state = hasOpenPosition ? 'ORDERED' : 'RUNNING'
     user.error = undefined
     user.updatedAt = new Date().toISOString()
+    // Fresh scoring line on the first evaluation after a manual start — do not
+    // wait for the heartbeat while an identical coalesced line still matches.
+    this.activityLog?.clearCoalesced(`${userId}:`)
     this.emitUserUpdate(user)
     this.persistUser(user, true)
     this.activityLog?.add(
@@ -357,6 +360,7 @@ export class TenantManager extends EventEmitter {
     const user = this.getOrCreateUser(userId)
     user.state = 'STOPPED'
     user.updatedAt = new Date().toISOString()
+    this.activityLog?.clearCoalesced(`${userId}:`)
     this.emitUserUpdate(user)
     this.persistUser(user, true)
     this.activityLog?.add('info', 'bot', `Stop requested for ${userId} — bot stopped`)
