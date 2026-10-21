@@ -87,7 +87,11 @@ fills, option premium paths and exit rules are not part of this table.
 
 ## Retention
 
-There is no automatic pruning. Export the period you need, then prune, e.g.:
+There is no automatic pruning. A capture-mode switch and automated retention
+lifecycle (sampled vs full capture, auto-downgrade, pruning) is designed but
+**deferred** to avoid critical-path changes; see
+[Deferred: snapshot capture lifecycle](options-replay.md#deferred-snapshot-capture-lifecycle-telemetry).
+Export the period you need, then prune, e.g.:
 
 ```sql
 DELETE FROM signal_snapshots WHERE ist_date < '2026-07-21';

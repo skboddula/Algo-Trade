@@ -215,10 +215,108 @@ and it is not enough to change production exits on its own.
    vs a wider/no trail) and do not arm live during it.
 4. **Build the exact snapshot replay** when `signal_snapshots` has several
    weeks of data. This replay's `signalFor` hook is the integration point; the
-   table was empty when this run was made.
+   table was empty when this run was made. The capture-mode/retention lifecycle
+   that will feed it is designed but deferred — see
+   [Deferred: snapshot capture lifecycle](#deferred-snapshot-capture-lifecycle-telemetry).
 5. **Refresh Upstox credentials** and use official/Upstox data for
    out-of-sample confirmation before any live decision. HF data is third-party
    research data with no bid/ask and partial far-strike coverage.
+
+## Deferred: snapshot capture lifecycle (telemetry)
+
+**Status: deferred (2026-10-21).** Exact live-VRD parity replay needs
+decision-time snapshots, but the capture lifecycle below is deliberately parked
+so nothing in the scoring/order path changes while `signal_snapshots` is empty
+and the Upstox feed/token is unhealthy. It is not a prerequisite for paper
+trading or for the replay verdict above.
+
+Capture today is all-or-nothing: always-on, best-effort, deduped to one row per
+minute per user+symbol. There is no supported way to raise density for a
+pre-registered tuning window and then turn it back down.
+
+### Capture modes (recommended, when resumed)
+
+| Mode         | Behavior                                                                      | Use                               |
+| ------------ | ----------------------------------------------------------------------------- | --------------------------------- |
+| `off`        | No new snapshot rows                                                          | Emergency only                    |
+| `signal`     | Actionable + vetoed + blocked candidates; one row per minute or state change  | Default after tuning              |
+| `full`       | Every evaluation / every N seconds, including neutral evaluations             | Pre-registered tuning window only |
+| `trade-only` | Only order/trade-linked rows                                                  | Long-term minimal audit           |
+
+### Control surface
+
+```text
+DAEMON_SNAPSHOT_MODE=off|signal|full|trade-only
+DAEMON_SNAPSHOT_UNTIL=2026-11-15T15:30:00+05:30   # auto-downgrade full -> signal
+DAEMON_SNAPSHOT_FULL_RETENTION_DAYS=45
+DAEMON_SNAPSHOT_SIGNAL_RETENTION_DAYS=365
+```
+
+- Environment variables are the default; a restart is required to change them.
+- A runtime override in `daemon_settings` only with an authenticated admin route
+  and an audit log — not in the browser UI initially.
+- `SNAPSHOT_UNTIL` downgrades `full` to `signal` automatically; "tuning
+  complete" must not mean "capture off".
+- Do not reuse `DAEMON_USE_REAL_VRD` or `useMultiTimeframe` for capture; those
+  change signals.
+
+### Critical-path safety rules
+
+- Keep candidate/trade-linked writes synchronous; the returned row id attaches
+  order outcomes.
+- Add a bounded async queue only for high-volume `full` rows: batch inserts,
+  drop snapshots rather than orders, expose queue-depth/latency/drop metrics.
+- Capture failure must never throw into `handleMarketTick` or block an order.
+- If all writes later become async, add a generated `snapshot_key` UUID and
+  attach orders by key (larger migration; not phase one).
+
+### Provenance to record
+
+- decision timestamp and `capturedAt`
+- `vrdSource` (`live` vs `fallback`), `vrdFetchedAt`, `dataAgeMs`
+- strategy version / config hash and capture mode
+- `userSignal`, `unfilteredSignal`, filter verdict
+- blocked reasons and gate failures
+- selected expiry/strike plus contract quote if execution parity matters
+
+Record this before data accumulates; afterwards live and degraded inputs are
+indistinguishable.
+
+### Turn-down lifecycle
+
+1. `full` during the pre-registered tuning window.
+2. Auto-downgrade to `signal` at `SNAPSHOT_UNTIL`.
+3. Keep `full` rows 30–60 days; export to Parquet before purge if needed.
+4. Keep `signal` rows 6–12 months.
+5. Keep trade-linked rows longer (ideally permanent / two years).
+6. `off` only for emergencies (DB growth, write latency).
+
+### Rollout phases
+
+- **Phase 0 — observe only:** status endpoint (mode, rows today, DB size, write
+  latency, drops). No behavior change.
+- **Phase 1 — `signal` mode:** gate `logSignalSnapshot`; verify a full session;
+  confirm orders work with capture disabled or a failing DB write.
+- **Phase 2 — `full` mode:** bounded async capture for neutral/every-tick rows;
+  candidate rows stay synchronous; add retention and auto-downgrade.
+- **Phase 3 — runtime control:** authenticated admin switch with audit logging.
+
+### Verification before trusting it
+
+- Replay 100 stored snapshots through `signalFor`; stored `userSignal` and
+  `unfilteredSignal` must match exactly.
+- Confirm live rows carry `vrdSource=live`; fallback rows are labeled.
+- Compare signal latency with capture on and off.
+- Simulate DB full/read-only; entries must still execute.
+- Confirm retention deletes only old snapshots — never trades or bot state.
+
+### Non-goals
+
+- No changes to `handleMarketTick`, `getFinalSignal`, `buildSymbolVrd`, scoring,
+  entries, exits or order placement.
+- No change to live-VRD enablement or the multi-timeframe filter.
+- Not a prerequisite for paper/live decisions; exact snapshot replay stays
+  blocked until capture is proven.
 
 ## Reproduce
 
