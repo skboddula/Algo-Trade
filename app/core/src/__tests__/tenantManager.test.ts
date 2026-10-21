@@ -316,7 +316,7 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
         moderateThreshold: 1,
         minConfidence: 'moderate',
         maxTradesPerDay: 5,
-        maxTotalTradesPerDay: 18,
+        maxTotalTradesPerDay: 24,
         useMultiTimeframe: true,
       })
 
@@ -1104,7 +1104,7 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
     ).toBeUndefined()
   })
 
-  it('never raises the pre-registered 8/18 hard caps', () => {
+  it('never raises the pre-registered 8/24 hard caps', () => {
     const manager = new TenantManager(
       new MasterIngestionEngine({ mockMode: true }),
       new OrderGateway(),
@@ -1115,10 +1115,15 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
     const { snapshot } = buildEntryTick()
     const strong = buildSignal('strong', 'CE', 17)
 
-    user.tradesCountToday = 18
+    user.tradesCountToday = 24
     expect(
       (manager as any).describeEntryBlock(user, snapshot, true, false, strong),
     ).toBe('total-cap')
+
+    user.tradesCountToday = 23
+    expect(
+      (manager as any).describeEntryBlock(user, snapshot, true, false, strong),
+    ).toBeUndefined()
 
     user.tradesCountToday = 0
     user.tradesCountPerSymbol['NIFTY 50'] = 8
@@ -1180,7 +1185,7 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
         moderateThreshold: 1,
         minConfidence: 'moderate',
         maxTradesPerDay: 8,
-        maxTotalTradesPerDay: 18,
+        maxTotalTradesPerDay: 24,
         exitCooldownSec: 300,
       })
       const user = manager.getOrCreateUser('strong-pause')

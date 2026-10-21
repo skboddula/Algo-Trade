@@ -22,8 +22,12 @@ export const LOSS_PAUSE_MS = 30 * 60_000
 export const MAX_CONSECUTIVE_LOSSES = 3
 
 /**
- * Hard risk caps. Strategy config may lower these, but never raise them:
- * the 2026-10-21 pre-registration froze the cap at 8 per symbol / 18 total.
+ * Hard risk caps. Strategy config may lower these, but never raise them.
+ *
+ * Pre-registered 2026-10-21 as 8 per symbol / 18 total, then amended the same
+ * evening before the first session under the policy: total 18 → 24 so the
+ * envelope equals the full three-symbol sweep (3 × 8). The amendment is
+ * arithmetic (symmetry), not evidence-driven; see docs/reentry-policy.md.
  */
 export const HARD_MAX_TRADES_PER_SYMBOL = 8
-export const HARD_MAX_TOTAL_TRADES = 18
+export const HARD_MAX_TOTAL_TRADES = 24

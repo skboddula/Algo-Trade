@@ -560,7 +560,7 @@ export class TenantManager extends EventEmitter {
     return Math.max(0, Math.min(value, HARD_MAX_TRADES_PER_SYMBOL))
   }
 
-  /** Total cap defaults to the hard 18 and can only be lowered by config. */
+  /** Total cap defaults to the hard 24 and can only be lowered by config. */
   private totalTradeCap(user: UserBotState): number {
     const configured = user.config.maxTotalTradesPerDay ?? HARD_MAX_TOTAL_TRADES
     const value = Number.isFinite(configured)
@@ -690,7 +690,7 @@ export class TenantManager extends EventEmitter {
     }
 
     // Strong signals are intentionally exempt from the score/novelty gate.
-    // The 8/18 cap, five-minute cooldown, and rest-of-day stop still apply.
+    // The 8/24 cap, five-minute cooldown, and rest-of-day stop still apply.
     if (strong) return undefined
 
     const score = this.signalScore(signal)
@@ -1114,7 +1114,7 @@ export class TenantManager extends EventEmitter {
           }
 
           // CR-14: global cap across all symbols for the day, clamped to the
-          // pre-registered 8/18 hard risk limits. Per-symbol max applies below.
+          // pre-registered 8/24 hard risk limits. Per-symbol max applies below.
           const totalCap = this.totalTradeCap(user)
           if ((user.tradesCountToday || 0) >= totalCap) continue
 

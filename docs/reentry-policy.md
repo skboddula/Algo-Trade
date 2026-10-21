@@ -5,9 +5,15 @@ live remains disarmed. This policy was chosen after the 2026-10-21 NIFTY
 symbol-cap exhaustion: six NIFTY slots were consumed by score-10/13 entries
 before the score-17 strong cluster at 12:34–12:35.
 
-The 8/18 caps and the 5-minute all-exit cooldown are hard limits. Strategy
+**Revision (2026-10-21 evening, before the first session under this policy):**
+the total cap was amended 18 → 24 so the envelope equals the full three-symbol
+sweep (3 × 8). No session had run under the policy yet, so the pre-registration
+stays clean; the change is arithmetic (symmetry), not evidence-driven. The
+per-symbol cap is unchanged at 8.
+
+The 8/24 caps and the 5-minute all-exit cooldown are hard limits. Strategy
 config may lower a cap but the daemon will not allow it to rise above 8 per
-symbol or 18 total.
+symbol or 24 total.
 
 ## Entry ladder
 
@@ -33,7 +39,7 @@ symbol or 18 total.
 | 2 consecutive net losses | Moderate entries paused for 30 minutes; strong allowed |
 | 3 consecutive net losses | Symbol rests for the rest of the IST day; strong included |
 | 8 entries per symbol in the IST day | No further entries for that symbol |
-| 18 entries total in the IST day | No further entries for any symbol |
+| 24 entries total in the IST day | No further entries for any symbol |
 
 The 30-minute pause blocks all moderate entries, including improved scores.
 After the pause, the normal +2/flip gate applies. A strong entry during the

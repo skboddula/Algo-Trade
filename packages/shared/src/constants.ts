@@ -48,7 +48,7 @@ export const DEFAULT_STRATEGY_CONFIG = {
   /** Trailing stop percentage from peak favorable premium (default 5). */
   trailPct: 5,
   maxTradesPerDay: 8,
-  maxTotalTradesPerDay: 18,
+  maxTotalTradesPerDay: 24,
   lastEntryTime: '15:15',
   squareOffTime: '15:35',
   /** 5-min EMA 10/42 confluence gate (default: enabled). */
