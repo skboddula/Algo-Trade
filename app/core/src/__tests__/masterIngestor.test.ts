@@ -257,6 +257,22 @@ describe('Master Ingestion Engine Suite (1-Fetch Shared Ingestor)', () => {
     }
   })
 
+  it('binds entry freshness to the acquired spot, not a later tick', () => {
+    const ws = new MasterIngestionEngine({ liveSource: 'ws', primaryUpstoxToken: 'test-token' })
+    const feed = (ws as any).wsSource
+    feed.getLastIndexTickAgeMs = () => 5 // a tick lands later in the same cycle
+    feed.getLastChainSuccessAgeMs = () => 5
+    ;(ws as any).lastCandlesAtMs.set('BANKNIFTY', Date.now())
+
+    // acquire() backed the spot with a fallback (boot seed) — no live quote.
+    ;(ws as any).acquiredQuoteAtMs.set('BANKNIFTY', null)
+    expect(ws.getEntryBlockers('BANKNIFTY')).toEqual(['underlying quote stale or missing'])
+
+    // A real acquired tick timestamp wins over the lagging feed getter.
+    ;(ws as any).acquiredQuoteAtMs.set('BANKNIFTY', Date.now())
+    expect(ws.getEntryBlockers('BANKNIFTY')).toEqual([])
+  })
+
   it('stamps snapshot.sources on every tick (empty blocker list in mock mode)', async () => {
     const mock = new MasterIngestionEngine({ mockMode: true })
     await mock.fetchAndComputeMarketData()

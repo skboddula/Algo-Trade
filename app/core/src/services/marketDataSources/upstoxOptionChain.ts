@@ -32,7 +32,7 @@ function authHeaders(token: string): Record<string, string> {
 export async function fetchNearestExpiry(opts: UpstoxOptionsRequest): Promise<string | null> {
   const res = await fetch(
     `${opts.restApiBaseUrl}/option/contract?instrument_key=${encodeURIComponent(opts.instrumentKey)}`,
-    { headers: authHeaders(opts.token) },
+    { headers: authHeaders(opts.token), signal: AbortSignal.timeout(10_000) },
   )
   if (!res.ok) throw new Error(`option/contract HTTP ${res.status}`)
 
@@ -56,7 +56,7 @@ export async function fetchOptionChain(
 ): Promise<OptionData[]> {
   const res = await fetch(
     `${opts.restApiBaseUrl}/option/chain?instrument_key=${encodeURIComponent(opts.instrumentKey)}&expiry_date=${encodeURIComponent(opts.expiry)}`,
-    { headers: authHeaders(opts.token) },
+    { headers: authHeaders(opts.token), signal: AbortSignal.timeout(10_000) },
   )
   if (!res.ok) throw new Error(`option/chain HTTP ${res.status}`)
 

@@ -35,6 +35,7 @@ export class MockMarketDataSource implements MarketDataSource {
       spotPrice,
       candles: [...candles.slice(-99), newCandle],
       optionChain: optionChain.length ? optionChain : this.generateMockOptionChain(spotPrice),
+      quoteAtMs: Date.now(),
     }
   }
 

@@ -203,6 +203,64 @@ describe('UpstoxFeedV3Source', () => {
     expect(res.candles[2][5]).toBe(1234)
   })
 
+  it('fails closed until the first live index tick backs the spot', async () => {
+    const h = await startHarness()
+    activeHarness = h
+    const candles = sampleCandles(2)
+
+    const before = await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't0', candles, optionChain: [] })
+    expect(before.fetchFailed).toBe(true)
+    expect(before.fetchError).toMatch(/no live index tick/)
+    expect(before.quoteAtMs).toBeNull()
+    // The candle close is still surfaced for display, but never stamped as a
+    // live quote (this is the boot-seed 24,483 case).
+    expect(before.spotPrice).toBe(candles[candles.length - 1][4])
+
+    await waitFor(() => h.source.getConnectionState() === 'open', 3000, 'ws open')
+    sendToLatest(
+      h,
+      indexFeedFrame('NSE_INDEX|Nifty 50', 25100.5, {
+        open: 25010,
+        high: 25110,
+        low: 25000,
+        close: 25100.5,
+        vol: 1234,
+        ts: Date.now(),
+      }),
+    )
+
+    const after = await waitFor(
+      async () => {
+        const snapshot = await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't1', candles, optionChain: [] })
+        return snapshot.spotPrice === 25100.5 && snapshot.quoteAtMs !== null ? snapshot : null
+      },
+      3000,
+      'live tick backing spot',
+    )
+    expect(after.fetchFailed).toBeUndefined()
+    expect(typeof after.quoteAtMs).toBe('number')
+  })
+
+  it('forces a reconnect when an open socket goes silent during market hours', async () => {
+    const h = await startHarness({ source: { silenceReconnectMs: 60 } })
+    activeHarness = h
+    const candles = sampleCandles(2)
+
+    await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't0', candles, optionChain: [] })
+    await waitFor(() => h.source.getConnectionState() === 'open', 3000, 'ws open')
+
+    await waitFor(
+      async () => {
+        await h.source.acquire({ symbol: 'NIFTY 50', timestamp: 't1', candles, optionChain: [] })
+        return h.connections.length >= 2
+      },
+      3000,
+      'silent socket forced reconnect',
+    )
+
+    expect(h.logs.some((line) => line.includes('forcing reconnect'))).toBe(true)
+  })
+
   it('updates the open candle in place when the I1 bucket is unchanged', async () => {
     const h = await startHarness()
     activeHarness = h
@@ -467,6 +525,34 @@ describe('UpstoxFeedV3Source', () => {
     expect(res.optionChain[0].put_options.market_data.ltp).toBe(90.25)
     expect(urls.some((url) => url.includes(`expiry_date=${nearExpiry}`))).toBe(true)
     expect(urls.some((url) => url.includes('NSE_INDEX%7CNifty%2050'))).toBe(true)
+
+    // A live index tick keeps the quote arm valid while the chain REST fails:
+    // chain failures must not flag the index feed.
+    await waitFor(() => h.source.getConnectionState() === 'open', 3000, 'ws open')
+    sendToLatest(
+      h,
+      indexFeedFrame('NSE_INDEX|Nifty 50', 25010, {
+        open: 25000,
+        high: 25020,
+        low: 24990,
+        close: 25010,
+        vol: 10,
+        ts: Date.now(),
+      }),
+    )
+    await waitFor(
+      async () => {
+        const snapshot = await h.source.acquire({
+          symbol: 'NIFTY 50',
+          timestamp: 'warm',
+          candles: sampleCandles(2),
+          optionChain: res.optionChain,
+        })
+        return snapshot.spotPrice === 25010 ? snapshot : null
+      },
+      3000,
+      'index tick applied',
+    )
 
     // Network failure afterwards: previous chain is preserved, index feed is not flagged.
     vi.stubGlobal(

@@ -1,5 +1,6 @@
 import { UNDERLYING_INSTRUMENT_KEYS } from '../../types'
 import type { MarketDataSource, SymbolDataRequest, SymbolMarketData } from '../marketDataSource'
+import { fetchWithRetry } from '../../utils/http/fetchRetry'
 
 export interface RestMarketDataSourceOptions {
   upstoxApiBaseUrl: string
@@ -31,7 +32,7 @@ export class RestMarketDataSource implements MarketDataSource {
 
     try {
       const instrumentKey = UNDERLYING_INSTRUMENT_KEYS[symbol]
-      const quoteRes = await fetch(
+      const quoteRes = await fetchWithRetry(
         `${this.apiBaseUrl}/market-quote/quotes?instrument_key=${encodeURIComponent(instrumentKey)}`,
         {
           headers: {
@@ -39,6 +40,7 @@ export class RestMarketDataSource implements MarketDataSource {
             Accept: 'application/json',
           },
         },
+        { timeoutMs: 10_000 },
       )
 
       if (quoteRes.ok) {
@@ -46,7 +48,7 @@ export class RestMarketDataSource implements MarketDataSource {
         const quote =
           data?.data?.[instrumentKey.replace('|', ':')] || (Object.values(data?.data || {})[0] as any)
         if (quote?.last_price) {
-          return { spotPrice: quote.last_price, candles, optionChain }
+          return { spotPrice: quote.last_price, candles, optionChain, quoteAtMs: Date.now() }
         }
       }
 
@@ -54,6 +56,7 @@ export class RestMarketDataSource implements MarketDataSource {
         spotPrice: fallbackPrice,
         candles,
         optionChain,
+        quoteAtMs: null,
         fetchFailed: true,
         fetchError: quoteRes.ok ? 'response missing last_price' : `HTTP ${quoteRes.status}`,
       }
@@ -62,6 +65,7 @@ export class RestMarketDataSource implements MarketDataSource {
         spotPrice: fallbackPrice,
         candles,
         optionChain,
+        quoteAtMs: null,
         fetchFailed: true,
         fetchError: (err as Error).message || 'network error',
       }

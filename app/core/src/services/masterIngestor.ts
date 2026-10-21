@@ -91,6 +91,13 @@ export class MasterIngestionEngine extends EventEmitter {
   private previousSessionFetchMs: Map<UnderlyingSymbol, number> = new Map()
   /** REST-mode stamp: last successful per-symbol quote acquire (CR-11). */
   private lastQuoteAtMs: Map<UnderlyingSymbol, number> = new Map()
+  /**
+   * Timestamp of the quote that actually backed the current snapshot's spot
+   * (null = fallback/synthetic quote). Binding freshness to the acquired spot
+   * prevents a later tick in the same cycle from laundering a boot-seed close
+   * into an entry-eligible quote.
+   */
+  private acquiredQuoteAtMs: Map<UnderlyingSymbol, number | null> = new Map()
   private readonly sentimentIngestor: SentimentIngestor
   private vixValue: number | null = null
   private lastVixAtMs = 0
@@ -275,6 +282,9 @@ export class MasterIngestionEngine extends EventEmitter {
         candles: this.candleBuffer.get(symbol) || [],
         optionChain: this.latestOptionChains.get(symbol) || [],
       })
+      if (acquired.quoteAtMs !== undefined) {
+        this.acquiredQuoteAtMs.set(symbol, acquired.quoteAtMs)
+      }
 
       const spotPrice = acquired.spotPrice
       const optionChain = acquired.optionChain
@@ -508,7 +518,7 @@ export class MasterIngestionEngine extends EventEmitter {
     this.lastCandleFetchMs.set(symbol, nowMs)
     try {
       const instrumentKey = UNDERLYING_INSTRUMENT_KEYS[symbol]
-      const res = await fetch(
+      const res = await fetchWithRetry(
         `${this.config.upstoxApiBaseUrl}/historical-candle/intraday/${encodeURIComponent(instrumentKey)}/1minute`,
         {
           headers: {
@@ -516,6 +526,7 @@ export class MasterIngestionEngine extends EventEmitter {
             Accept: 'application/json',
           },
         },
+        { timeoutMs: 10_000 },
       )
       if (!res.ok) return fallback
       const data = (await res.json()) as { data?: { candles?: unknown[] } }
@@ -539,7 +550,7 @@ export class MasterIngestionEngine extends EventEmitter {
   ): Promise<Candle[]> {
     try {
       const instrumentKey = UNDERLYING_INSTRUMENT_KEYS[symbol]
-      const res = await fetch(
+      const res = await fetchWithRetry(
         `${this.config.upstoxApiBaseUrl}/historical-candle/${encodeURIComponent(instrumentKey)}/1minute/${date}/${date}`,
         {
           headers: {
@@ -547,6 +558,7 @@ export class MasterIngestionEngine extends EventEmitter {
             Accept: 'application/json',
           },
         },
+        { timeoutMs: 10_000 },
       )
       if (!res.ok) return []
       const data = (await res.json()) as { data?: { candles?: unknown[] } }
@@ -772,12 +784,16 @@ export class MasterIngestionEngine extends EventEmitter {
     }
 
     const usingWs = this.config.liveSource === 'ws'
-    const quoteAt = usingWs ? undefined : this.lastQuoteAtMs.get(symbol)
-    const quoteAgeMs = usingWs
-      ? this.wsSource.getLastIndexTickAgeMs(symbol)
-      : quoteAt === undefined
-        ? null
-        : now - quoteAt
+    let quoteAgeMs: number | null
+    if (this.acquiredQuoteAtMs.has(symbol)) {
+      const acquiredAt = this.acquiredQuoteAtMs.get(symbol)
+      quoteAgeMs = acquiredAt == null ? null : now - acquiredAt
+    } else if (usingWs) {
+      quoteAgeMs = this.wsSource.getLastIndexTickAgeMs(symbol)
+    } else {
+      const quoteAt = this.lastQuoteAtMs.get(symbol)
+      quoteAgeMs = quoteAt === undefined ? null : now - quoteAt
+    }
     const chainAgeMs = usingWs ? this.wsSource.getLastChainSuccessAgeMs(symbol) : null
     const candlesAgeMs = this.getCandlesAgeMs(symbol)
 

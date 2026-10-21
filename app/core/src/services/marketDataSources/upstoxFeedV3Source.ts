@@ -20,6 +20,7 @@ import { getIndiaTime, isMarketOpen } from '../../utils/timeUtils'
 import type { MarketDataSource, SymbolDataRequest, SymbolMarketData } from '../marketDataSource'
 import { decodeFeedResponse, type DecodedFeed, type DecodedFeedResponse, type DecodedOhlc } from './upstoxFeedV3Proto'
 import { fetchNearestExpiry, fetchOptionChain } from './upstoxOptionChain'
+import { fetchWithRetry } from '../../utils/http/fetchRetry'
 
 export interface UpstoxFeedV3SourceOptions {
   /** REST base for the option-chain fallback, e.g. https://api.upstox.com/v2 */
@@ -34,6 +35,12 @@ export interface UpstoxFeedV3SourceOptions {
   wsUrlOverride?: string
   /** Silence after which an open feed counts as stale (default 15000 ms). */
   staleMs?: number
+  /**
+   * Silence after which the socket is torn down and reconnected (default
+   * 45000 ms, market hours only). Guards against a half-open TCP connection
+   * that still reports `open` but delivers no frames.
+   */
+  silenceReconnectMs?: number
   /** Grace period for a connection attempt before it counts as failed (default 20000 ms). */
   connectGraceMs?: number
   /** Reconnect backoff bounds (default 3000–30000 ms). */
@@ -80,6 +87,7 @@ interface ExpiryCacheEntry {
 }
 
 const DEFAULT_STALE_MS = 15_000
+const DEFAULT_SILENCE_RECONNECT_MS = 45_000
 const DEFAULT_CONNECT_GRACE_MS = 20_000
 const DEFAULT_RECONNECT_MIN_MS = 3_000
 const DEFAULT_RECONNECT_MAX_MS = 30_000
@@ -109,6 +117,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   private readonly wsUrlOverride?: string
   private readonly getToken: () => string | undefined
   private readonly staleMs: number
+  private readonly silenceReconnectMs: number
   private readonly connectGraceMs: number
   private readonly reconnectMinMs: number
   private readonly reconnectMaxMs: number
@@ -126,6 +135,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   private connectStartedAt = 0
   private lastConnectAttemptAt = 0
   private lastMessageAt = 0
+  private lastSilenceReconnectAt = 0
 
   // Calibration counters (see getStats)
   private statsTimer: NodeJS.Timeout | null = null
@@ -158,6 +168,7 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     this.wsUrlOverride = opts.wsUrlOverride
     this.getToken = opts.getToken
     this.staleMs = opts.staleMs ?? DEFAULT_STALE_MS
+    this.silenceReconnectMs = opts.silenceReconnectMs ?? DEFAULT_SILENCE_RECONNECT_MS
     this.connectGraceMs = opts.connectGraceMs ?? DEFAULT_CONNECT_GRACE_MS
     this.reconnectMinMs = opts.reconnectMinMs ?? DEFAULT_RECONNECT_MIN_MS
     this.reconnectMaxMs = opts.reconnectMaxMs ?? DEFAULT_RECONNECT_MAX_MS
@@ -176,7 +187,13 @@ export class UpstoxFeedV3Source implements MarketDataSource {
     this.ensureConnection()
 
     const marketOpen = this.isMarketOpenFn()
+    // A half-open socket still reports `open` but never delivers frames. Tear
+    // it down and reconnect after a bounded silence instead of staying dark
+    // until TCP itself gives up (observed 11 minutes on 2026-10-21).
+    if (marketOpen) this.recoverSilentSocket()
+
     const cached = this.indexCache.get(symbol)
+    const quoteAtMs = cached ? this.lastIndexTickAt.get(symbol) ?? null : null
     const fallbackPrice = candles.length ? candles[candles.length - 1][4] : 24500
     const spotPrice = cached?.ltp ?? fallbackPrice
     const mergedCandles = cached?.ohlcI1 ? mergeOhlcIntoCandles(candles, cached.ohlcI1) : candles
@@ -189,9 +206,31 @@ export class UpstoxFeedV3Source implements MarketDataSource {
 
     const staleReason = this.stalenessIssue(marketOpen)
     if (staleReason) {
-      return { spotPrice, candles: mergedCandles, optionChain: nextChain, fetchFailed: true, fetchError: staleReason }
+      return {
+        spotPrice,
+        candles: mergedCandles,
+        optionChain: nextChain,
+        fetchFailed: true,
+        fetchError: staleReason,
+        quoteAtMs,
+      }
     }
-    return { spotPrice, candles: mergedCandles, optionChain: nextChain }
+
+    // No live tick yet: the price above is a candle close (possibly the boot
+    // seed) and must never be presented as a fresh quote. Fail closed so the
+    // entry gate cannot trade a synthetic spot after a restart.
+    if (marketOpen && quoteAtMs === null) {
+      return {
+        spotPrice,
+        candles: mergedCandles,
+        optionChain: nextChain,
+        fetchFailed: true,
+        fetchError: `no live index tick for ${symbol}`,
+        quoteAtMs: null,
+      }
+    }
+
+    return { spotPrice, candles: mergedCandles, optionChain: nextChain, quoteAtMs }
   }
 
   /**
@@ -341,9 +380,13 @@ export class UpstoxFeedV3Source implements MarketDataSource {
 
   private async authorizeUrl(token: string): Promise<string | null> {
     try {
-      const res = await fetch(`${this.feedApiBaseUrl}/feed/market-data-feed/authorize`, {
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      })
+      const res = await fetchWithRetry(
+        `${this.feedApiBaseUrl}/feed/market-data-feed/authorize`,
+        {
+          headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        },
+        { timeoutMs: 10_000 },
+      )
       if (!res.ok) return null
       const payload = (await res.json()) as {
         data?: { authorized_redirect_uri?: unknown; authorizedRedirectUri?: unknown }
@@ -465,6 +508,25 @@ export class UpstoxFeedV3Source implements MarketDataSource {
   }
 
   // -- watchdog --------------------------------------------------------------
+
+  /**
+   * Force a clean reconnect when an open socket has been silent for too long.
+   * Runs from acquire() (per tick), not a timer, so it is naturally paused
+   * when ingestion pauses. Guarded by lastSilenceReconnectAt so a socket that
+   * reconnects into another silent state is retried at most once per window.
+   */
+  private recoverSilentSocket(): void {
+    if (this.state !== 'open' || !this.socket) return
+    const now = Date.now()
+    const silentFor = now - this.lastMessageAt
+    if (silentFor < this.silenceReconnectMs) return
+    if (now - this.lastSilenceReconnectAt < this.silenceReconnectMs) return
+    this.lastSilenceReconnectAt = now
+    this.statReconnects += 1
+    this.log(`ws silent for ${Math.round(silentFor / 1000)}s — forcing reconnect`)
+    this.teardownSocket()
+    this.ensureConnection()
+  }
 
   private stalenessIssue(marketOpen: boolean): string | null {
     if (!marketOpen) return null // overnight/weekend silence is expected

@@ -23,6 +23,13 @@ export interface SymbolMarketData {
   candles: Candle[]
   /** Option chain after this acquisition (sources may synthesize or refresh it). */
   optionChain: OptionData[]
+  /**
+   * Timestamp (ms) of the live quote backing `spotPrice`, or null when the
+   * spot is a fallback (no live quote). The entry gate must use this — not a
+   * later re-read — so a tick arriving between acquire and snapshot assembly
+   * can never launder a synthetic/fallback spot (e.g. a boot seed close).
+   */
+  quoteAtMs?: number | null
   /** Set when a *live* acquisition failed this tick (feeds the feed-health watchdog). */
   fetchFailed?: boolean
   /** Human-readable reason for the failure, surfaced in feed-down alerts. */
