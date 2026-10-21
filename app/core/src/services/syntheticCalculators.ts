@@ -3,6 +3,7 @@ import type {
   OptionData,
   ActivePosition,
   IndicatorsResult,
+  UnderlyingSymbol,
 } from '../types'
 
 export function clamp(value: number, min: number, max: number): number {
@@ -45,13 +46,15 @@ export function getLotSizeForSymbol(
   const upper = symbol.toUpperCase()
 
   // 1. Index Options & Futures
+  // Current NSE index lots (revised Nov 2024). Keep in sync with
+  // app/core/src/backtest/contracts.ts and the broker's contract metadata.
   if (upper.includes('BANKNIFTY') || upper.includes('NIFTY BANK')) return 30
   if (
     upper.includes('FINNIFTY') ||
     upper.includes('NIFTY FIN SERVICE') ||
     upper.includes('FIN SERVICE')
   )
-    return 60
+    return 65
   if (
     upper.includes('MIDCPNIFTY') ||
     upper.includes('NIFTY MID SELECT') ||
@@ -61,7 +64,7 @@ export function getLotSizeForSymbol(
   if (upper.includes('NIFTYNXT50') || upper.includes('NEXT50')) return 10
   if (upper.includes('SENSEX') || upper.includes('BSX')) return 10
   if (upper.includes('BANKEX')) return 15
-  if (upper.includes('NIFTY 50') || upper.includes('NIFTY')) return 65
+  if (upper.includes('NIFTY 50') || upper.includes('NIFTY')) return 75
 
   // 2. High-volume NSE Stock F&O Symbols
   if (upper.includes('RELIANCE')) return 250
@@ -156,9 +159,15 @@ export function computeMMI(
   return { score, label }
 }
 
+/**
+ * Select the ATM/OTM contract for an index. `underlyingSymbol` is required so
+ * order quantity comes from that index's lot, never from a hard-coded NIFTY
+ * lot.
+ */
 export function pickBestOptionContract(
   chain: OptionData[],
   direction: 'CE' | 'PE',
+  underlyingSymbol: UnderlyingSymbol,
   otmSkip = 0,
 ): {
   strike: number
@@ -207,7 +216,7 @@ export function pickBestOptionContract(
     tradingSymbol:
       opt.trading_symbol || `${direction}_${selectedRow.strike_price}`,
     price: opt.market_data?.ltp || 0,
-    lotSize: getLotSizeForSymbol('NIFTY 50'),
+    lotSize: getLotSizeForSymbol(underlyingSymbol),
   }
 }
 

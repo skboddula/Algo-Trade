@@ -10,9 +10,8 @@ export function lotSizeForSymbol(
 ): number {
   switch (symbol) {
     case 'NIFTY 50':
-      // NSE revised NIFTY from 50 to 75 effective Nov 2024. The daemon's
-      // historical constant is still 65; the replay deliberately uses the
-      // actual contract lot size so premium P&L is not understated.
+      // NSE revised NIFTY from 50 to 75 effective Nov 2024. The daemon uses
+      // the same current contract lot so paper and replay P&L reconcile.
       return date >= '2024-11-20' ? 75 : 50
     case 'BANKNIFTY':
       return date >= '2024-11-20' ? 30 : 15

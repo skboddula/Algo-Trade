@@ -351,7 +351,7 @@ ${comparisonSection(result)}
 - **Option data quality:** far strikes are sparse. Contract selection refuses a strike more than ${pct(
     result.options.maxStrikeDistancePct,
   )} from spot rather than substituting an unrealistic far strike. ATM/near-ATM contracts are the usable region.
-- **Expiry:** nearest strictly future expiry; same-day 0-DTE contracts are skipped. NIFTY lot size is ${result.options.lotSize}. The current daemon constant is 65, so compare per-unit premium P&L rather than absolute paper-ledger P&L.
+- **Expiry:** nearest strictly future expiry; same-day 0-DTE contracts are skipped. NIFTY lot size is ${result.options.lotSize}; the daemon uses 75. If the replay is run with a different lot size, compare per-unit premium P&L rather than absolute paper-ledger P&L.
 - **No look-ahead convention:** a signal at minute t uses candles and chain OI up to t, and fills at t+1 open. Daily macro uses the previous completed session; VIX uses the current daily open or previous close. Stops are assumed to hit before targets inside the same bar.
 - **Cost model:** ₹20 brokerage/order, 0.1% STT on sell premium, 0.03503% exchange fee, 0.003% stamp duty on buy, SEBI turnover fee in \`statutory\` mode, 18% GST. No DP charges, no margin/interest, no impact beyond the configured slippage.
 - **This is not a live-trading green light.** Use it to reject or refine hypotheses, then confirm with exact \`signal_snapshots\` replay as the snapshot table accumulates.

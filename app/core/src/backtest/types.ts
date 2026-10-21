@@ -142,7 +142,7 @@ export interface ReplayRunOptions {
   symbol: UnderlyingSymbol
   initialCapital: number
   lots: number
-  /** Actual NIFTY lot size. NIFTY was 75 in 2026; production still uses 65. */
+  /** Actual NIFTY lot size (75 for the 2026 contract). */
   lotSize: number
   /** Slippage applied to the next bar open, per side. */
   slippageBps: number

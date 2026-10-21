@@ -36,6 +36,41 @@ describe('Order Gateway Suite (Paper Ledger & Broker Gateway)', () => {
     expect(trades[0].instrumentKey).toBe('NSE_FO|OPT_24000_CE')
   })
 
+  it('rejects orders that are not a whole multiple of the contract lot', async () => {
+    const gateway = new OrderGateway()
+    const rejected = await gateway.placeOrder({
+      userId: 'user_lot',
+      executionMode: 'paper',
+      instrumentKey: 'NSE_FO|BANKNIFTY_PE',
+      direction: 'PE',
+      quantity: 65,
+      lotSize: 30,
+      price: 100,
+      tradeType: 'buying',
+      underlyingSymbol: 'BANKNIFTY',
+    })
+
+    expect(rejected.success).toBe(false)
+    expect(rejected.error).toContain('positive multiple of the contract lot size')
+    expect(gateway.getPaperTrades('user_lot')).toHaveLength(0)
+
+    const accepted = await gateway.placeOrder({
+      userId: 'user_lot',
+      executionMode: 'paper',
+      instrumentKey: 'NSE_FO|BANKNIFTY_PE',
+      direction: 'PE',
+      quantity: 60,
+      lotSize: 30,
+      price: 100,
+      tradeType: 'buying',
+      underlyingSymbol: 'BANKNIFTY',
+    })
+
+    expect(accepted.success).toBe(true)
+    expect(accepted.quantity).toBe(60)
+    expect(gateway.getPaperTrades('user_lot')).toHaveLength(1)
+  })
+
   it('rejects paper order if balance is insufficient', async () => {
     const gateway = new OrderGateway()
     const account = gateway.getOrCreatePaperAccount('user_broke')

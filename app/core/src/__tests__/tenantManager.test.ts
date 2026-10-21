@@ -176,6 +176,58 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
     }
   })
 
+  it('sizes BANKNIFTY entries from the BANKNIFTY lot, not NIFTY', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    try {
+      const gateway = new OrderGateway()
+      const manager = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        gateway,
+      )
+      const placeSpy = vi.spyOn(gateway, 'placeOrder')
+
+      manager.startBot('bn-lot', 'paper')
+      manager.updateConfig('bn-lot', {
+        underlyingMode: 'BANKNIFTY',
+        lastEntryTime: '23:59',
+        strongThreshold: 1,
+        moderateThreshold: 1,
+        minConfidence: 'moderate',
+      })
+
+      const { snapshot } = buildEntryTick()
+      const bankSnapshot = {
+        ...snapshot,
+        underlyingSymbol: 'BANKNIFTY' as const,
+        spotPrice: 55_000,
+        optionChain: [
+          {
+            ...snapshot.optionChain[0],
+            strike_price: 55_000,
+            underlying_spot_price: 55_000,
+          },
+        ],
+      }
+      const tick = {
+        timestamp: new Date().toISOString(),
+        snapshots: { BANKNIFTY: bankSnapshot } as any,
+      }
+
+      await (manager as any).handleMarketTick(tick)
+
+      expect(placeSpy).toHaveBeenCalledTimes(1)
+      expect(placeSpy.mock.calls[0][0]).toMatchObject({
+        quantity: 30,
+        lotSize: 30,
+        underlyingSymbol: 'BANKNIFTY',
+      })
+      placeSpy.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('blocks new live entries per tick when the arm flag is removed', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST

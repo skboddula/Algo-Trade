@@ -914,7 +914,12 @@ export class TenantManager extends EventEmitter {
             }
             const direction = userSignal.signal === 'BUY_CE' ? 'CE' : 'PE'
             const optionChain = snapshot.optionChain || []
-            const selectedContract = pickBestOptionContract(optionChain, direction, user.config.otmSkip)
+            const selectedContract = pickBestOptionContract(
+              optionChain,
+              direction,
+              symbol,
+              user.config.otmSkip,
+            )
 
             if (selectedContract && selectedContract.price > 0) {
               const orderRes = await this.orderGateway.placeOrder({
@@ -924,6 +929,7 @@ export class TenantManager extends EventEmitter {
                 instrumentKey: selectedContract.instrumentKey,
                 direction,
                 quantity: selectedContract.lotSize,
+                lotSize: selectedContract.lotSize,
                 price: selectedContract.price,
                 tradeType: user.config.tradeType === 'selling' ? 'selling' : 'buying',
                 underlyingSymbol: symbol,

@@ -851,9 +851,9 @@ export async function runReplay(input: ReplayRunInput): Promise<ReplayResult> {
   warnings.push(
     'Reconstructed replay, not live-VRD parity: breadth, FII, MMI, Nifty PE, straddle IV, GIFT Nifty and news layers were unavailable and are neutral/null.',
   )
-  if (options.lotSize !== 65) {
+  if (options.lotSize !== 75) {
     warnings.push(
-      `Replay uses NIFTY lot size ${options.lotSize}; the daemon's current constant is 65. Normalize per-unit before comparing to the paper ledger.`,
+      `Replay uses NIFTY lot size ${options.lotSize}; the daemon uses 75. Normalize per-unit before comparing to the paper ledger.`,
     )
   }
 

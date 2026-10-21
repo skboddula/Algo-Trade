@@ -101,8 +101,8 @@ Useful overrides:
 --cost-model paper-parity    # browser ledger fee parity (no SEBI fee)
 ```
 
-`--lot-size 75` is the 2026 NIFTY contract lot. The current daemon constant is
-65, so compare **per-unit** P&L when reconciling against the paper ledger.
+`--lot-size 75` is the 2026 NIFTY contract lot. The daemon now uses the same
+current lot, so absolute paper and replay P&L reconcile (before costs/slippage).
 
 ## Compare arms
 

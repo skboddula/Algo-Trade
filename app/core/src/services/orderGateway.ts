@@ -14,6 +14,8 @@ export interface OrderPlacementRequest {
   instrumentKey: string
   direction: 'CE' | 'PE'
   quantity: number
+  /** Contract lot size; when present, quantity must be an exact multiple. */
+  lotSize?: number
   price: number
   tradeType: 'buying' | 'selling'
   underlyingSymbol?: string
@@ -146,6 +148,35 @@ export class OrderGateway {
         error: `Live trading is not armed: set ${LIVE_ARM_ENV}=true in the daemon environment to enable live orders`,
       }
     }
+
+    // Defense in depth: never send an order whose quantity is not a whole
+    // number of contracts. This catches symbol/lot mismatches before paper
+    // fills or broker rejects.
+    if (req.lotSize !== undefined) {
+      if (!Number.isInteger(req.lotSize) || req.lotSize <= 0) {
+        return {
+          success: false,
+          tradeId: '',
+          filledPrice: 0,
+          quantity: 0,
+          error: `Invalid contract lot size: ${req.lotSize}`,
+        }
+      }
+      if (
+        !Number.isInteger(req.quantity) ||
+        req.quantity <= 0 ||
+        req.quantity % req.lotSize !== 0
+      ) {
+        return {
+          success: false,
+          tradeId: '',
+          filledPrice: 0,
+          quantity: 0,
+          error: `Order quantity ${req.quantity} is not a positive multiple of the contract lot size ${req.lotSize}`,
+        }
+      }
+    }
+
     if (req.executionMode === 'paper') {
       return this.placePaperOrder(req)
     }
