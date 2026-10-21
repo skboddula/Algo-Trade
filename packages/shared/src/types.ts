@@ -233,6 +233,10 @@ export interface ActivePosition {
   strikePrice?: number
   /** Contract expiry as selected at entry (alerting / display). */
   expiry?: string
+  /** Directional score at entry — used by the re-entry quality gate. */
+  entrySignalScore?: number
+  /** Confidence at entry — strong signals are exempt from the re-entry block. */
+  entrySignalConfidence?: FinalSignal['confidence']
 }
 
 export interface StrategyConfig {
@@ -247,7 +251,8 @@ export interface StrategyConfig {
   /** Trailing stop percentage from peak favorable price (default 5). */
   trailPct?: number
   maxTradesPerDay: number
-  /** Optional global cap across ALL symbols per IST day (CR-14). Unset = off. */
+  /** Global cap across ALL symbols per IST day. Defaults to 18; the daemon
+   *  clamps it to the pre-registered hard ceiling of 18. */
   maxTotalTradesPerDay?: number
   /**
    * Daily loss kill switch (IST day): when mark-to-market day P&L (realized
@@ -496,6 +501,27 @@ export interface MarketSnapshot {
   }
 }
 
+/**
+ * Per-symbol re-entry guard state. Persisted with the bot state so an
+ * intraday restart cannot reset the cooldown, loss pause, or score baseline.
+ *
+ * - `lastEntryScore` is the directional score at the last valid fill.
+ * - `lastExitNetPnlPaise` is net of statutory charges and simulated/actual
+ *   slippage; it decides win/loss/scratch for the next re-entry.
+ * - `consecutiveLosses` counts consecutive net-loss exits for this symbol.
+ * - `pauseUntil` is epoch ms for the two-loss pause (moderate entries only).
+ * - `blockedForDay` is the hard stop after three consecutive net losses.
+ */
+export interface ReentryState {
+  lastEntryScore?: number
+  lastEntryConfidence?: FinalSignal['confidence']
+  lastEntryDirection?: 'CE' | 'PE'
+  lastExitNetPnlPaise?: number
+  consecutiveLosses?: number
+  pauseUntil?: number
+  blockedForDay?: boolean
+}
+
 export interface UserBotState {
   userId: string
   state: 'IDLE' | 'RUNNING' | 'ORDERED' | 'STOPPED'
@@ -507,6 +533,8 @@ export interface UserBotState {
   tradesCountPerSymbol: Partial<Record<UnderlyingSymbol, number>>
   lastTradeDate: string
   lastExitTimes: Record<string, number>
+  /** Per-symbol entry-quality and loss-streak guard (optional for old rows). */
+  reentry?: Partial<Record<UnderlyingSymbol, ReentryState>>
   totalRealizedPnl: number
   paperBalance: number
   /** Realized P&L for the current IST day, in paise (reset at day rollover). */

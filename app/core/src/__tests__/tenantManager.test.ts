@@ -6,8 +6,8 @@ import { TenantManager } from '../services/tenantManager'
 import { MasterIngestionEngine } from '../services/masterIngestor'
 import { OrderGateway } from '../services/orderGateway'
 import { StateStore } from '../services/stateStore'
-import { DEFAULT_STRATEGY_CONFIG } from '../constants'
-import type { UserBotState } from '../types'
+import { DEFAULT_STRATEGY_CONFIG, LOSS_PAUSE_MS } from '../constants'
+import type { FinalSignal, UserBotState } from '../types'
 
 describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
   it('isolates user bot instances and configurations independently', () => {
@@ -137,6 +137,21 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
     const tick = { timestamp: new Date().toISOString(), snapshots: { 'NIFTY 50': snapshot } }
     return { snapshot, tick }
   }
+
+  const buildSignal = (
+    confidence: FinalSignal['confidence'],
+    direction: 'CE' | 'PE',
+    score: number,
+  ): FinalSignal => ({
+    signal: direction === 'CE' ? 'BUY_CE' : 'BUY_PE',
+    confidence,
+    positionSize: confidence === 'strong' ? 'full' : 'half',
+    v3: 'buy',
+    v4: direction === 'CE' ? 'Buy' : 'Sell',
+    bullScore: direction === 'CE' ? score : 0,
+    bearScore: direction === 'PE' ? score : 0,
+    scoreMax: 20,
+  })
 
   it('gates new entries on snapshot source freshness (CR-11 arms)', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
@@ -850,6 +865,15 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
       user.realizedPnlToday = -5_00_000
       user.dayStartEquity = 10_000_000
       user.tradesCountToday = 4
+      user.reentry = {
+        'NIFTY 50': {
+          lastEntryScore: 13,
+          lastEntryDirection: 'CE',
+          lastExitNetPnlPaise: -1_000,
+          consecutiveLosses: 2,
+          pauseUntil: Date.now() + 60_000,
+        },
+      }
       user.lastTradeDate = '2026-10-18' // previous IST day
 
       const refreshed = manager.getOrCreateUser('rollover')
@@ -859,6 +883,7 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
       expect(refreshed.dayStartEquity).toBeNull()
       expect(refreshed.dayStartEquitySource).toBeNull()
       expect(refreshed.tradesCountToday).toBe(0)
+      expect(refreshed.reentry).toEqual({})
     } finally {
       vi.useRealTimers()
     }
@@ -956,6 +981,226 @@ describe('Tenant Manager Suite (Multi-User Headless Bot Supervisor)', () => {
       if (previousArm === undefined) delete process.env.DAEMON_LIVE_ARMED
       else process.env.DAEMON_LIVE_ARMED = previousArm
       store.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('allows unlimited strong repeats while gating moderate re-entries', () => {
+    const manager = new TenantManager(
+      new MasterIngestionEngine({ mockMode: true }),
+      new OrderGateway(),
+    )
+    const user = manager.getOrCreateUser('reentry-quality')
+    const gate = (
+      confidence: FinalSignal['confidence'],
+      direction: 'CE' | 'PE',
+      score: number,
+    ) =>
+      (manager as any).describeReentryBlock(
+        user,
+        'NIFTY 50',
+        buildSignal(confidence, direction, score),
+      )
+
+    // After a net loss: same score and +1 are stale; +2 or a flip is new info.
+    user.reentry = {
+      'NIFTY 50': {
+        lastEntryScore: 13,
+        lastEntryDirection: 'CE',
+        lastExitNetPnlPaise: -1_000,
+        consecutiveLosses: 1,
+      },
+    }
+    expect(gate('moderate', 'CE', 13)).toBe('no-new-information')
+    expect(gate('moderate', 'CE', 14)).toBe('no-new-information')
+    expect(gate('moderate', 'CE', 15)).toBeUndefined()
+    expect(gate('moderate', 'PE', 13)).toBeUndefined()
+    expect(gate('strong', 'CE', 13)).toBeUndefined()
+
+    // After a net win: same or higher is allowed, lower is stale — unless strong.
+    user.reentry = {
+      'NIFTY 50': {
+        lastEntryScore: 13,
+        lastEntryDirection: 'CE',
+        lastExitNetPnlPaise: 1_000,
+        consecutiveLosses: 0,
+      },
+    }
+    expect(gate('moderate', 'CE', 13)).toBeUndefined()
+    expect(gate('moderate', 'CE', 12)).toBe('no-new-information')
+    expect(gate('strong', 'CE', 12)).toBeUndefined()
+  })
+
+  it('pauses moderate entries after two net losses and rests the symbol after three', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-19T04:30:00.000Z')) // Monday 10:00 IST
+    try {
+      const manager = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        new OrderGateway(),
+      )
+      const user = manager.getOrCreateUser('loss-ladder')
+      const position = {
+        instrumentKey: 'NSE_FO|OPT_24000_CE',
+        direction: 'CE' as const,
+        entryPrice: 100,
+        quantity: 65,
+        entryTime: new Date().toISOString(),
+        tradeId: Date.now(),
+        tradeType: 'buying' as const,
+        entrySignalScore: 13,
+        entrySignalConfidence: 'moderate' as const,
+      }
+      const gate = (confidence: FinalSignal['confidence'], score: number) =>
+        (manager as any).describeReentryBlock(
+          user,
+          'NIFTY 50',
+          buildSignal(confidence, 'CE', score),
+        )
+
+      ;(manager as any).recordExitOutcome(user, 'NIFTY 50', position, -1_000)
+      expect(user.reentry?.['NIFTY 50']?.consecutiveLosses).toBe(1)
+      expect(user.reentry?.['NIFTY 50']?.pauseUntil).toBeUndefined()
+
+      const secondLossAt = Date.now()
+      ;(manager as any).recordExitOutcome(user, 'NIFTY 50', position, -1_000)
+      expect(user.reentry?.['NIFTY 50']?.consecutiveLosses).toBe(2)
+      expect(user.reentry?.['NIFTY 50']?.pauseUntil).toBe(
+        secondLossAt + LOSS_PAUSE_MS,
+      )
+      // The 30-minute pause blocks even an improved moderate signal; strong
+      // signals are the only exception.
+      expect(gate('moderate', 20)).toBe('loss-pause')
+      expect(gate('strong', 20)).toBeUndefined()
+
+      ;(manager as any).recordExitOutcome(user, 'NIFTY 50', position, -1_000)
+      expect(user.reentry?.['NIFTY 50']?.consecutiveLosses).toBe(3)
+      expect(user.reentry?.['NIFTY 50']?.blockedForDay).toBe(true)
+      expect(gate('moderate', 20)).toBe('rest-of-day')
+      expect(gate('strong', 20)).toBe('rest-of-day')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the five-minute all-exit cooldown above the strong exemption', () => {
+    const manager = new TenantManager(
+      new MasterIngestionEngine({ mockMode: true }),
+      new OrderGateway(),
+    )
+    const user = manager.getOrCreateUser('cooldown-policy')
+    user.config.exitCooldownSec = 300
+    const { snapshot } = buildEntryTick()
+    const strong = buildSignal('strong', 'CE', 17)
+
+    user.lastExitTimes['NIFTY 50'] = Date.now() - 60_000
+    expect(
+      (manager as any).describeEntryBlock(user, snapshot, true, false, strong),
+    ).toBe('cooldown')
+
+    user.lastExitTimes['NIFTY 50'] = Date.now() - 301_000
+    expect(
+      (manager as any).describeEntryBlock(user, snapshot, true, false, strong),
+    ).toBeUndefined()
+  })
+
+  it('never raises the pre-registered 8/18 hard caps', () => {
+    const manager = new TenantManager(
+      new MasterIngestionEngine({ mockMode: true }),
+      new OrderGateway(),
+    )
+    const user = manager.getOrCreateUser('hard-caps')
+    user.config.maxTradesPerDay = 99
+    user.config.maxTotalTradesPerDay = 99
+    const { snapshot } = buildEntryTick()
+    const strong = buildSignal('strong', 'CE', 17)
+
+    user.tradesCountToday = 18
+    expect(
+      (manager as any).describeEntryBlock(user, snapshot, true, false, strong),
+    ).toBe('total-cap')
+
+    user.tradesCountToday = 0
+    user.tradesCountPerSymbol['NIFTY 50'] = 8
+    expect(
+      (manager as any).describeEntryBlock(user, snapshot, true, false, strong),
+    ).toBe('symbol-cap')
+  })
+
+  it('records cost-aware net exit P&L and opens the loss ladder', async () => {
+    const gateway = new OrderGateway()
+    const manager = new TenantManager(
+      new MasterIngestionEngine({ mockMode: true }),
+      gateway,
+    )
+    manager.startBot('net-exit', 'paper')
+    const user = manager.getOrCreateUser('net-exit')
+    user.positions['NIFTY 50'] = {
+      instrumentKey: 'NSE_FO|OPT_24000_CE',
+      direction: 'CE',
+      entryPrice: 100,
+      quantity: 65,
+      entryTime: new Date().toISOString(),
+      tradeId: Date.now(),
+      executionMode: 'paper',
+      currentPrice: 90,
+      tradeType: 'buying',
+      underlyingSymbol: 'NIFTY 50',
+      entrySignalScore: 13,
+      entrySignalConfidence: 'moderate',
+    }
+    user.state = 'ORDERED'
+
+    await manager.manualExit('net-exit', 'NIFTY 50', 'test exit')
+
+    const state = user.reentry?.['NIFTY 50']
+    expect(user.realizedPnlToday).toBeLessThan(0)
+    expect(state?.lastExitNetPnlPaise).toBeLessThan(user.realizedPnlToday ?? 0)
+    expect(state?.consecutiveLosses).toBe(1)
+    expect(state?.lastEntryScore).toBe(13)
+    expect(state?.lastEntryDirection).toBe('CE')
+  })
+
+  it('persists the re-entry guard across daemon restarts', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'algo-reentry-'))
+    try {
+      const store = new StateStore(dir)
+      const manager = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        new OrderGateway(),
+        { store },
+      )
+      const user = manager.getOrCreateUser('restart-guard')
+      user.reentry = {
+        'NIFTY 50': {
+          lastEntryScore: 13,
+          lastEntryDirection: 'CE',
+          lastExitNetPnlPaise: -1_000,
+          consecutiveLosses: 2,
+          pauseUntil: Date.now() + LOSS_PAUSE_MS,
+          blockedForDay: false,
+        },
+      }
+      manager.updateConfig('restart-guard', { exitCooldownSec: 300 })
+      store.close()
+
+      const reloadedStore = new StateStore(dir)
+      const reloaded = new TenantManager(
+        new MasterIngestionEngine({ mockMode: true }),
+        new OrderGateway(),
+        { store: reloadedStore },
+      ).getOrCreateUser('restart-guard')
+      expect(reloaded.reentry?.['NIFTY 50']).toMatchObject({
+        lastEntryScore: 13,
+        lastEntryDirection: 'CE',
+        lastExitNetPnlPaise: -1_000,
+        consecutiveLosses: 2,
+      })
+      expect(reloaded.reentry?.['NIFTY 50']?.pauseUntil).toBeGreaterThan(
+        Date.now(),
+      )
+      reloadedStore.close()
+    } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
   })

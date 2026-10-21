@@ -8,16 +8,23 @@ import type {
   AllSignalData,
   FinalSignal,
   PaperTradeRecord,
+  ReentryState,
   SignalSnapshotRecord,
 } from '../types'
 import {
   DEFAULT_STRATEGY_CONFIG,
+  HARD_MAX_TOTAL_TRADES,
+  HARD_MAX_TRADES_PER_SYMBOL,
   LIVE_ARM_ENV as DAEMON_LIVE_ARM_ENV,
+  LOSS_PAUSE_MS,
+  MAX_CONSECUTIVE_LOSSES,
+  REENTRY_SCORE_IMPROVEMENT,
   VIX_CRITICAL_ALERT_COOLDOWN_MS,
   VIX_CRITICAL_THRESHOLD,
   VIX_ELEVATED_THRESHOLD,
   VIX_HARD_STOP_MAX,
 } from '../constants'
+import { calculateOptionCharges } from '../backtest/costs'
 import { MasterIngestionEngine } from './masterIngestor'
 import { OrderGateway } from './orderGateway'
 import { pickBestOptionContract } from './syntheticCalculators'
@@ -134,6 +141,8 @@ export class TenantManager extends EventEmitter {
     // Rehydrate persisted bot states first (restart / reboot recovery)
     if (this.store) {
       for (const persisted of this.store.loadUserStates()) {
+        this.normalizeDailyRisk(persisted)
+        this.normalizeReentryState(persisted)
         this.users.set(persisted.userId, persisted)
       }
       // CR-15: unreadable rows are skipped rather than failing startup, but
@@ -246,6 +255,7 @@ export class TenantManager extends EventEmitter {
         tradesCountPerSymbol: {},
         lastTradeDate: istInfo.dateString,
         lastExitTimes: {},
+        reentry: {},
         totalRealizedPnl: 0,
         paperBalance: paperAccount.balance,
         realizedPnlToday: 0,
@@ -260,6 +270,7 @@ export class TenantManager extends EventEmitter {
     } else {
       // Rows persisted before the daily-loss switch lack these fields.
       this.normalizeDailyRisk(user)
+      this.normalizeReentryState(user)
       // Date rollover check: reset daily counts if new IST trading day
       if (user.lastTradeDate !== istInfo.dateString) {
         user.lastTradeDate = istInfo.dateString
@@ -439,14 +450,30 @@ export class TenantManager extends EventEmitter {
             ? position.entryPrice - fillPrice
             : fillPrice - position.entryPrice
         const pnlPaise = Math.round(pnlPerUnit * position.quantity * 100)
+        const netPnlPaise = this.netExitPnlPaise(position, fillPrice)
         user.realizedPnlToday = (user.realizedPnlToday || 0) + pnlPaise
+        this.recordExitOutcome(user, symbol, position, netPnlPaise)
         this.activityLog?.add(
           'info',
           'exit',
           `${symbol} ${position.direction} exit @ ₹${fillPrice.toFixed(2)} — ${reason} ` +
-            `(P&L ₹${(pnlPaise / 100).toFixed(2)})`,
+            `(gross ₹${(pnlPaise / 100).toFixed(2)}, net ₹${(netPnlPaise / 100).toFixed(2)})`,
         )
       } else {
+        // Unknown exit outcome: keep the entry baseline but do not credit a
+        // win. Treating it as a scratch makes the next moderate entry require
+        // a score improvement while strong signals remain governed by the cap.
+        const state = this.getReentryState(user, symbol)
+        if (position.entrySignalScore !== undefined) {
+          state.lastEntryScore = position.entrySignalScore
+        }
+        if (position.entrySignalConfidence !== undefined) {
+          state.lastEntryConfidence = position.entrySignalConfidence
+        }
+        state.lastEntryDirection = position.direction
+        state.lastExitNetPnlPaise = 0
+        state.consecutiveLosses = 0
+        state.pauseUntil = undefined
         this.activityLog?.add(
           'error',
           'exit',
@@ -486,15 +513,201 @@ export class TenantManager extends EventEmitter {
     if (user.dailyLossTrippedAt === undefined) user.dailyLossTrippedAt = null
   }
 
-  /** Reset IST-day counters and the daily-risk baseline (date rollover). */
+  /** Backfill the per-symbol re-entry guard for rows written before it existed. */
+  private normalizeReentryState(user: UserBotState): void {
+    if (!user.reentry || typeof user.reentry !== 'object') {
+      user.reentry = {}
+    }
+    for (const symbol of Object.keys(
+      user.positions ?? {},
+    ) as UnderlyingSymbol[]) {
+      if (!user.reentry[symbol]) user.reentry[symbol] = {}
+    }
+  }
+
+  /** Reset IST-day counters and risk state, including re-entry guards. */
   private resetDailyState(user: UserBotState): void {
     user.tradesCountToday = 0
     user.tradesCountPerSymbol = {}
+    user.reentry = {}
     user.realizedPnlToday = 0
     user.dayStartEquity = null
     user.dayStartEquitySource = null
     user.dailyLossTripped = false
     user.dailyLossTrippedAt = null
+  }
+
+  /** Get (and lazily create) the persisted per-symbol re-entry guard. */
+  private getReentryState(
+    user: UserBotState,
+    symbol: UnderlyingSymbol,
+  ): ReentryState {
+    this.normalizeReentryState(user)
+    let state = user.reentry![symbol]
+    if (!state) {
+      state = {}
+      user.reentry![symbol] = state
+    }
+    return state
+  }
+
+  /** Configured per-symbol cap, clamped to the pre-registered hard cap. */
+  private symbolTradeCap(user: UserBotState): number {
+    const configured = user.config.maxTradesPerDay
+    const value = Number.isFinite(configured)
+      ? Math.trunc(configured)
+      : HARD_MAX_TRADES_PER_SYMBOL
+    return Math.max(0, Math.min(value, HARD_MAX_TRADES_PER_SYMBOL))
+  }
+
+  /** Total cap defaults to the hard 18 and can only be lowered by config. */
+  private totalTradeCap(user: UserBotState): number {
+    const configured = user.config.maxTotalTradesPerDay ?? HARD_MAX_TOTAL_TRADES
+    const value = Number.isFinite(configured)
+      ? Math.trunc(configured)
+      : HARD_MAX_TOTAL_TRADES
+    return Math.max(0, Math.min(value, HARD_MAX_TOTAL_TRADES))
+  }
+
+  /**
+   * Directional score for the signal that is about to be filled. CE reads
+   * bullScore; PE reads bearScore. Non-actionable signals return null.
+   */
+  private signalScore(
+    signal: FinalSignal,
+  ): { score: number; direction: 'CE' | 'PE' } | null {
+    if (signal.signal === 'BUY_CE') {
+      return {
+        score: Number.isFinite(signal.bullScore) ? signal.bullScore : 0,
+        direction: 'CE',
+      }
+    }
+    if (signal.signal === 'BUY_PE') {
+      return {
+        score: Number.isFinite(signal.bearScore) ? signal.bearScore : 0,
+        direction: 'PE',
+      }
+    }
+    return null
+  }
+
+  /**
+   * Net realized P&L for an option round trip, in paise. The paper gateway
+   * already applies its 0.1% per-side fill slippage; this subtracts the
+   * statutory/brokerage cost model so "net win" does not mean gross ledger P&L.
+   */
+  private netExitPnlPaise(position: ActivePosition, fillPrice: number): number {
+    const selling = position.tradeType === 'selling'
+    const grossPerUnit = selling
+      ? position.entryPrice - fillPrice
+      : fillPrice - position.entryPrice
+    const grossPaise = Math.round(grossPerUnit * position.quantity * 100)
+    const entryValue = position.entryPrice * position.quantity
+    const exitValue = fillPrice * position.quantity
+    const entryCharges = calculateOptionCharges(
+      entryValue,
+      selling ? 'sell' : 'buy',
+    )
+    const exitCharges = calculateOptionCharges(
+      exitValue,
+      selling ? 'buy' : 'sell',
+    )
+    return grossPaise - entryCharges.totalPaise - exitCharges.totalPaise
+  }
+
+  /**
+   * Record a valid exit's net outcome and update the loss-streak ladder.
+   * Scratch trades reset the consecutive-loss counter but still require
+   * moderate entries to improve (lastExitNetPnlPaise = 0 is non-win).
+   */
+  private recordExitOutcome(
+    user: UserBotState,
+    symbol: UnderlyingSymbol,
+    position: ActivePosition,
+    netPnlPaise: number,
+  ): void {
+    const state = this.getReentryState(user, symbol)
+    // Preserve the entry score even if this is a legacy open position being
+    // closed after a restart (the guard map may have been lost).
+    if (position.entrySignalScore !== undefined) {
+      state.lastEntryScore = position.entrySignalScore
+    }
+    if (position.entrySignalConfidence !== undefined) {
+      state.lastEntryConfidence = position.entrySignalConfidence
+    }
+    state.lastEntryDirection = position.direction
+    state.lastExitNetPnlPaise = netPnlPaise
+
+    if (netPnlPaise > 0) {
+      state.consecutiveLosses = 0
+      state.pauseUntil = undefined
+      return
+    }
+    if (netPnlPaise === 0) {
+      // A scratch breaks the loss streak but is not a win; the gate still
+      // requires score improvement for moderate re-entries.
+      state.consecutiveLosses = 0
+      state.pauseUntil = undefined
+      return
+    }
+
+    const losses = (state.consecutiveLosses ?? 0) + 1
+    state.consecutiveLosses = losses
+    if (losses >= MAX_CONSECUTIVE_LOSSES) {
+      state.blockedForDay = true
+      state.pauseUntil = undefined
+    } else if (losses === 2) {
+      state.pauseUntil = Date.now() + LOSS_PAUSE_MS
+    }
+  }
+
+  /**
+   * New-entry quality gate. This is deliberately separate from the hard
+   * caps/cooldown and never gates exits.
+   *
+   * - Three consecutive net losses: hard rest-of-day stop (strong included).
+   * - Two-loss pause: blocks moderate entries for 30 minutes; strong bypasses.
+   * - Strong signals: unlimited repeats (bypass the score-improvement gate).
+   * - Moderate after a net win: same or higher score is allowed.
+   * - Moderate after a net loss/scratch: +2 score or a direction flip.
+   */
+  private describeReentryBlock(
+    user: UserBotState,
+    symbol: UnderlyingSymbol,
+    signal: FinalSignal,
+  ): string | undefined {
+    const state = user.reentry?.[symbol]
+    if (!state) return undefined
+    if (state.blockedForDay) return 'rest-of-day'
+
+    const strong = signal.confidence === 'strong'
+    if (
+      !strong &&
+      state.pauseUntil !== undefined &&
+      Date.now() < state.pauseUntil
+    ) {
+      return 'loss-pause'
+    }
+
+    // Strong signals are intentionally exempt from the score/novelty gate.
+    // The 8/18 cap, five-minute cooldown, and rest-of-day stop still apply.
+    if (strong) return undefined
+
+    const score = this.signalScore(signal)
+    if (!score || state.lastEntryScore === undefined) return undefined
+    if (state.lastEntryDirection !== score.direction) return undefined
+    if (state.lastExitNetPnlPaise === undefined) return undefined
+
+    if (state.lastExitNetPnlPaise > 0) {
+      return score.score >= state.lastEntryScore
+        ? undefined
+        : 'no-new-information'
+    }
+
+    // Net loss or scratch: require a meaningful score improvement.
+    return score.score >= state.lastEntryScore + REENTRY_SCORE_IMPROVEMENT
+      ? undefined
+      : 'no-new-information'
   }
 
   /**
@@ -780,7 +993,14 @@ export class TenantManager extends EventEmitter {
             unfilteredSignal.confidence !== 'none'
 
           const lastExit = user.lastExitTimes[symbol] || 0
-          const cooldownMs = (user.config.exitCooldownSec || 60) * 1000
+          const cooldownMs =
+            (user.config.exitCooldownSec ??
+              DEFAULT_STRATEGY_CONFIG.exitCooldownSec) * 1000
+          const reentry = user.reentry?.[symbol]
+          const pauseRemainingMs =
+            reentry?.pauseUntil !== undefined
+              ? Math.max(0, reentry.pauseUntil - Date.now())
+              : 0
           const context: SignalSnapshotRecord['context'] = {
             tradesCountToday: user.tradesCountToday || 0,
             tradesCountPerSymbol: user.tradesCountPerSymbol[symbol] || 0,
@@ -789,6 +1009,12 @@ export class TenantManager extends EventEmitter {
               0,
               cooldownMs - (Date.now() - lastExit),
             ),
+            lastEntryScore: reentry?.lastEntryScore,
+            lastEntryConfidence: reentry?.lastEntryConfidence,
+            lastExitNetPnlPaise: reentry?.lastExitNetPnlPaise,
+            consecutiveLosses: reentry?.consecutiveLosses ?? 0,
+            lossPauseRemainingMs: pauseRemainingMs,
+            blockedForDay: reentry?.blockedForDay === true,
             entryBlockedReasons:
               snapshot.sources?.entryBlockedReasons ?? [],
             sentimentFault: snapshot.sources?.sentimentFault ?? null,
@@ -799,6 +1025,7 @@ export class TenantManager extends EventEmitter {
             snapshot,
             entryEligible,
             htfVetoed,
+            userSignal,
           )
           // Scoring trace (hidden behind the debug filter; dropped at the
           // source when DAEMON_ACTIVITY_DEBUG=false). Coalesced: a line is
@@ -886,10 +1113,10 @@ export class TenantManager extends EventEmitter {
             }
           }
 
-          // CR-14: optional GLOBAL cap across all symbols for the day
-          // (unset = off; per-symbol maxTradesPerDay still applies below).
-          const totalCap = user.config.maxTotalTradesPerDay
-          if (totalCap !== undefined && (user.tradesCountToday || 0) >= totalCap) continue
+          // CR-14: global cap across all symbols for the day, clamped to the
+          // pre-registered 8/18 hard risk limits. Per-symbol max applies below.
+          const totalCap = this.totalTradeCap(user)
+          if ((user.tradesCountToday || 0) >= totalCap) continue
 
           // CR-11: never enter on stale data — the ingestor stamps
           // snapshot.sources each tick (quote / candles / chain freshness)
@@ -897,7 +1124,7 @@ export class TenantManager extends EventEmitter {
           const blockers = snapshot.sources?.entryBlockedReasons
           if (blockers && blockers.length > 0) continue
           const tradesCount = user.tradesCountPerSymbol[symbol] || 0
-          if (tradesCount >= user.config.maxTradesPerDay) continue
+          if (tradesCount >= this.symbolTradeCap(user)) continue
 
           if (Date.now() - lastExit < cooldownMs) continue
 
@@ -909,6 +1136,20 @@ export class TenantManager extends EventEmitter {
               this.warnGate(
                 `${symbol}:hard-stop`,
                 `[hard-stop] [${symbol}] Entry blocked: ${hardStop.reasons.join('; ')}`,
+              )
+              continue
+            }
+            const reentryBlock = this.describeReentryBlock(
+              user,
+              symbol,
+              userSignal,
+            )
+            if (reentryBlock) {
+              this.warnGate(
+                `${symbol}:${reentryBlock}`,
+                `[reentry] [${symbol}] Entry blocked — ${reentryBlock} ` +
+                  `(score=${this.signalScore(userSignal)?.score ?? 'n/a'}, ` +
+                  `conf=${userSignal.confidence})`,
               )
               continue
             }
@@ -959,6 +1200,8 @@ export class TenantManager extends EventEmitter {
                   underlyingSymbol: symbol,
                   strikePrice: selectedContract.strike,
                   expiry,
+                  entrySignalScore: this.signalScore(userSignal)?.score,
+                  entrySignalConfidence: userSignal.confidence,
                 }
 
                 user.positions[symbol] = newPos
@@ -966,6 +1209,13 @@ export class TenantManager extends EventEmitter {
                 this.syncWatchedOptionContracts()
                 user.tradesCountToday = (user.tradesCountToday || 0) + 1
                 user.tradesCountPerSymbol[symbol] = (user.tradesCountPerSymbol[symbol] || 0) + 1
+                const reentry = this.getReentryState(user, symbol)
+                const entryScore = this.signalScore(userSignal)
+                if (entryScore) {
+                  reentry.lastEntryScore = entryScore.score
+                  reentry.lastEntryDirection = entryScore.direction
+                }
+                reentry.lastEntryConfidence = userSignal.confidence
                 user.paperBalance = this.orderGateway.getOrCreatePaperAccount(userId).balance
                 user.updatedAt = new Date().toISOString()
                 this.emitUserUpdate(user)
@@ -1039,6 +1289,7 @@ export class TenantManager extends EventEmitter {
     snapshot: MarketSnapshot,
     entryEligible: boolean,
     htfVetoed: boolean,
+    userSignal: FinalSignal,
   ): string | undefined {
     if (user.executionMode === 'live' && !TenantManager.isLiveArmed()) {
       return 'live-arm'
@@ -1050,8 +1301,8 @@ export class TenantManager extends EventEmitter {
     if (user.executionMode === 'live' && snapshot.sources?.sentimentFault) {
       return 'sentiment-fault'
     }
-    const totalCap = user.config.maxTotalTradesPerDay
-    if (totalCap !== undefined && (user.tradesCountToday || 0) >= totalCap) {
+    const totalCap = this.totalTradeCap(user)
+    if ((user.tradesCountToday || 0) >= totalCap) {
       return 'total-cap'
     }
     const blockers = snapshot.sources?.entryBlockedReasons
@@ -1060,16 +1311,18 @@ export class TenantManager extends EventEmitter {
     }
     const symbol = snapshot.underlyingSymbol
     const tradesCount = user.tradesCountPerSymbol[symbol] || 0
-    if (tradesCount >= user.config.maxTradesPerDay) return 'symbol-cap'
+    if (tradesCount >= this.symbolTradeCap(user)) return 'symbol-cap'
     const lastExit = user.lastExitTimes[symbol] || 0
-    const cooldownMs = (user.config.exitCooldownSec || 60) * 1000
+    const cooldownMs =
+      (user.config.exitCooldownSec ?? DEFAULT_STRATEGY_CONFIG.exitCooldownSec) *
+      1000
     if (Date.now() - lastExit < cooldownMs) return 'cooldown'
     if (!entryEligible) return htfVetoed ? 'htf-veto' : 'no-entry-signal'
     const hardStop = runHardStopChecks(snapshot.vrdData ?? null)
     if (hardStop.blocked) {
       return `hard-stop: ${hardStop.reasons.join('; ')}`
     }
-    return undefined
+    return this.describeReentryBlock(user, symbol, userSignal)
   }
 
   /**

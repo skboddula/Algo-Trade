@@ -47,7 +47,8 @@ export const DEFAULT_STRATEGY_CONFIG = {
   maxLossPct: 15,
   /** Trailing stop percentage from peak favorable premium (default 5). */
   trailPct: 5,
-  maxTradesPerDay: 5,
+  maxTradesPerDay: 8,
+  maxTotalTradesPerDay: 18,
   lastEntryTime: '15:15',
   squareOffTime: '15:35',
   /** 5-min EMA 10/42 confluence gate (default: enabled). */
@@ -59,7 +60,7 @@ export const DEFAULT_STRATEGY_CONFIG = {
   tradeType: 'buying' as const,
   brentCrudeExtremeThreshold: 90,
   brentCrudeOverhangThreshold: 85,
-  exitCooldownSec: 60,
+  exitCooldownSec: 300,
 }
 
 // ─── VIX thresholds (alerting) ────────────────────────────────────────────

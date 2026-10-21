@@ -21,6 +21,18 @@ export interface SignalSnapshotContext {
   tradesCountPerSymbol: number
   dailyLossTripped: boolean
   cooldownRemainingMs: number
+  /** Directional score at the last valid fill for this symbol. */
+  lastEntryScore?: number
+  /** Confidence at the last valid fill for this symbol. */
+  lastEntryConfidence?: 'strong' | 'moderate' | 'weak' | 'none'
+  /** Net realized P&L of the last valid exit (paise, after costs). */
+  lastExitNetPnlPaise?: number
+  /** Consecutive net-loss exits for this symbol. */
+  consecutiveLosses?: number
+  /** Remaining two-loss pause (moderate entries only). */
+  lossPauseRemainingMs?: number
+  /** True after three consecutive net losses for the symbol. */
+  blockedForDay?: boolean
   entryBlockedReasons: string[]
   sentimentFault: string | null
   persistenceFault: string | null
