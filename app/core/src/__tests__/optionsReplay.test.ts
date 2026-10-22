@@ -528,6 +528,44 @@ describe('replay execution', () => {
     expect(result.trades).toHaveLength(1)
     expect(result.signals.cooldownBlocked).toBe(1)
   })
+
+  it('blocks entries before the configured warm-up time', async () => {
+    const fixture = makeFixture({
+      signalMinutes: [560],
+      optionBars: [makeOptionBar(DATE, 561, 100, 130, 99, 125)],
+    })
+
+    const blocked = await runFixture(fixture, { firstEntryTime: '09:25' })
+    expect(blocked.trades).toHaveLength(0)
+    expect(blocked.signals.warmupBlocked).toBe(1)
+    expect(blocked.signals.entries).toBe(0)
+
+    const allowed = await runFixture(fixture, { firstEntryTime: '09:20' })
+    expect(allowed.trades).toHaveLength(1)
+    expect(allowed.signals.warmupBlocked).toBe(0)
+  })
+
+  it('skips an entry when the next bar opens above the chase guard', async () => {
+    const fixture = makeFixture({
+      signalMinutes: [560],
+      optionBars: [
+        makeOptionBar(DATE, 560, 100, 101, 99, 100),
+        makeOptionBar(DATE, 561, 103, 105, 102, 104),
+      ],
+    })
+
+    const blocked = await runFixture(fixture, {
+      maxEntryPremiumMovePct: 2,
+    })
+    expect(blocked.trades).toHaveLength(0)
+    expect(blocked.signals.premiumMoveBlocked).toBe(1)
+
+    const allowed = await runFixture(fixture, {
+      maxEntryPremiumMovePct: 5,
+    })
+    expect(allowed.trades).toHaveLength(1)
+    expect(allowed.signals.premiumMoveBlocked).toBe(0)
+  })
 })
 
 describe('macro as-of reconstruction', () => {

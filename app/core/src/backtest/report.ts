@@ -315,6 +315,8 @@ ${coverage.notes.map((note) => `- ${note}`).join('\n')}
 | Blocked by daily trade caps | ${result.signals.capBlocked} |
 | Blocked by exit cooldown | ${result.signals.cooldownBlocked} |
 | Blocked by entry-time cutoff | ${result.signals.entryCutoff} |
+| Blocked by entry warm-up | ${result.signals.warmupBlocked} |
+| Blocked by premium-move guard | ${result.signals.premiumMoveBlocked} |
 | No strictly-future expiry | ${result.signals.noExpiry} |
 | No selectable contract | ${result.signals.noContract} |
 | No entry option bar | ${result.signals.noOptionBar} |

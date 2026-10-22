@@ -106,6 +106,8 @@ export function emptySignalCounters(): SignalCounters {
     capBlocked: 0,
     cooldownBlocked: 0,
     entryCutoff: 0,
+    warmupBlocked: 0,
+    premiumMoveBlocked: 0,
     noExpiry: 0,
     noContract: 0,
     noOptionBar: 0,
@@ -299,6 +301,7 @@ export async function runReplay(input: ReplayRunInput): Promise<ReplayResult> {
   const dayResults: ReplayDayResult[] = []
   const totalCounters = emptySignalCounters()
   const lastEntryMinute = parseHm(strategy.lastEntryTime, 14 * 60 + 30)
+  const firstEntryMinute = parseHm(strategy.firstEntryTime ?? '09:15', 9 * 60 + 15)
   const effectiveSquareOff = Math.min(
     parseHm(strategy.squareOffTime, MARKET_CLOSE_MINUTE),
     MARKET_CLOSE_MINUTE,
@@ -631,6 +634,10 @@ export async function runReplay(input: ReplayRunInput): Promise<ReplayResult> {
         counters.noExpiry += 1
         continue
       }
+      if (minute < firstEntryMinute) {
+        counters.warmupBlocked += 1
+        continue
+      }
       if (minute >= lastEntryMinute) {
         counters.entryCutoff += 1
         continue
@@ -688,6 +695,25 @@ export async function runReplay(input: ReplayRunInput): Promise<ReplayResult> {
       if (!entryBar || entryBar.minute >= effectiveSquareOff) {
         counters.noOptionBar += 1
         continue
+      }
+
+      // Chase guard (buying): the signal was evaluated at the completed
+      // minute bar; if the next bar already gapped above the signal-bar
+      // close by more than the configured percentage, skip rather than chase.
+      const signalBar = series.byMinute.get(minute)
+      const maxPremiumMovePct = strategy.maxEntryPremiumMovePct
+      if (
+        maxPremiumMovePct !== undefined &&
+        maxPremiumMovePct > 0 &&
+        signalBar &&
+        signalBar.close > 0
+      ) {
+        const premiumMovePct =
+          ((entryBar.open - signalBar.close) / signalBar.close) * 100
+        if (premiumMovePct > maxPremiumMovePct) {
+          counters.premiumMoveBlocked += 1
+          continue
+        }
       }
 
       const quantity = options.lots * contract.lotSize

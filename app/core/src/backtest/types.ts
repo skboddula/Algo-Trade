@@ -167,6 +167,8 @@ export interface SignalCounters {
   capBlocked: number
   cooldownBlocked: number
   entryCutoff: number
+  warmupBlocked: number
+  premiumMoveBlocked: number
   noExpiry: number
   noContract: number
   noOptionBar: number

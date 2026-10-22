@@ -92,6 +92,10 @@ Options:
   --max-daily-loss-pct N       Stop new entries after this daily loss
   --exit-cooldown-sec N        Re-entry cooldown after an exit
   --last-entry-time HH:MM      Entry cutoff
+  --first-entry-time HH:MM     No entries before this time (warm-up; default 09:15)
+  --max-entry-premium-move-pct N
+                               Skip a buying entry when the next bar opens more
+                               than N% above the signal-bar close (default off)
   --square-off-time HH:MM      EOD square-off
   --capital N                  Initial capital (default 100000)
   --lots N                     Lots per trade (default 1)
@@ -168,6 +172,13 @@ Options:
     )
   }
   if (args['last-entry-time']) strategy.lastEntryTime = args['last-entry-time']
+  if (args['first-entry-time']) strategy.firstEntryTime = args['first-entry-time']
+  if (args['max-entry-premium-move-pct'] !== undefined) {
+    strategy.maxEntryPremiumMovePct = Math.max(
+      0,
+      numberArg(args['max-entry-premium-move-pct'], 0),
+    )
+  }
   if (args['square-off-time']) strategy.squareOffTime = args['square-off-time']
 
   const filterLabel =

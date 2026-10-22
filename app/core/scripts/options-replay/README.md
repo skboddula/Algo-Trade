@@ -95,6 +95,8 @@ Useful overrides:
 --otm-skip 0                 # ATM instead of the baseline OTM-3
 --trail-pct 0                # disable trailing stop (diagnostic)
 --max-profit-pct 20 --max-loss-pct 15
+--first-entry-time 09:20      # warm-up gate: no entries before 09:20
+--max-entry-premium-move-pct 2 # skip a buy if the next bar opens >2% above signal close
 --max-total-trades-per-day 18 --max-daily-loss-pct 10
 --exit-cooldown-sec 60
 --capital 100000 --lots 1 --lot-size 75
@@ -150,8 +152,8 @@ yarn typecheck
 
 The tests cover cost parity, contract/expiry selection, session filtering,
 stop-first priority, next-bar fills, same-bar trailing ordering, entry-delay
-waiting, filter veto accounting, daily caps, exit cooldown, macro as-of
-reconstruction and report output.
+waiting, warm-up gating, chase-guard blocking, filter veto accounting, daily
+caps, exit cooldown, macro as-of reconstruction and report output.
 
 ## Important limitations
 
@@ -172,6 +174,13 @@ reconstruction and report output.
   future `signalFor` source backed by `signal_snapshots`; the table was empty
   when this replay was built. Until it accumulates, this reconstructed replay
   is evidence, not proof of live-system parity.
+- **Opening-time parity gap.** The reconstructed HF replay starts actionable
+  entries around **09:57 IST** (indicator/HTF warm-up), and its next option
+  bar rarely gaps more than 2%. It therefore cannot exercise a 09:20/09:30
+  warm-up gate or the live 09:15 stale-gate race. A 2025-07..08 run with
+  `--first-entry-time` and `--max-entry-premium-move-pct` was identical to
+  baseline (`warmupBlocked: 0`, `premiumMoveBlocked: 0`). Use the snapshot
+  replay for opening-window questions.
 - **Do not arm live on this alone.** The committed evidence is negative /
   fragile; see `docs/options-replay.md`. Keep paper running and confirm with
   exact snapshots and out-of-sample data before changing production or arming

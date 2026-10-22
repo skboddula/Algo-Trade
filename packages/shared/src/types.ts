@@ -263,6 +263,13 @@ export interface StrategyConfig {
    */
   maxDailyLossPct?: number
   lastEntryTime: string
+  /** IST HH:MM. No new entries before this time (warm-up gate). Unset means
+   *  the session open (09:15). Used by the replay; the daemon may ignore it. */
+  firstEntryTime?: string
+  /** For buying, skip an entry when the next option bar opens more than this
+   *  percent above the signal-bar close (chase guard). Unset or 0 = off.
+   *  Used by the replay; the daemon may ignore it. */
+  maxEntryPremiumMovePct?: number
   /** EOD square-off time (IST HH:MM) — open positions are force-closed at
    *  this time; independent of lastEntryTime (entries close earlier than
    *  the exchange's 15:40 derivatives close). Default 15:35. */
